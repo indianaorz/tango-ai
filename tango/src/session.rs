@@ -51,6 +51,8 @@ pub enum Mode {
     Replayer,
 }
 
+use mgba::core::CoreMutRef;
+
 impl Session {
     pub fn new_pvp(
         config: std::sync::Arc<parking_lot::RwLock<config::Config>>,
@@ -97,6 +99,7 @@ impl Session {
         let completion_token = tango_pvp::hooks::CompletionToken::new();
 
         traps.extend(local_hooks.primary_traps(joyflags.clone(), match_.clone(), completion_token.clone()));
+
         core.set_traps(
             traps
                 .into_iter()
@@ -284,6 +287,65 @@ impl Session {
             (mgba::gba::SCREEN_WIDTH * mgba::gba::SCREEN_HEIGHT * 4)
                 as usize
         ]));
+
+
+
+        fn search_all_health_values(core: &mut CoreMutRef) -> Vec<u32> {
+            let segment = -1; // Default segment, adjust as necessary
+            let value_to_find = 1800;
+            let mut found_addresses = Vec::new();
+        
+            // Define the memory range to search - adjust based on your game's addressable space
+            let start_address = 0x02000000; // Start of EWRAM, commonly used in GBA games
+            let end_address = 0x02040000; // End of EWRAM
+        
+            // Search through the address range for the value 1800
+            for address in (start_address..end_address).step_by(4) {
+                let current_value = core.raw_read_16(address, segment);
+                if current_value == value_to_find || current_value == 1400{
+                    found_addresses.push(address);
+                }
+            }
+        
+            found_addresses
+        }
+
+
+    
+        fn display_health_state(core: &mut CoreMutRef, is_offerer: bool) {
+            // Define addresses for potential health values
+            let server_health_address = 0x0203A9D4; // Server side health
+            let client_health_address = 0x0203AAAC; // Client side health
+            let segment = -1; // Default segment; adjust if necessary
+        
+            // Determine labels based on whether the instance is the server or the client
+            let (player_label, opponent_label) = if is_offerer {
+                // Server: Player is at 0x0203A9D4, Opponent is at 0x0203AAAC
+                ("Player Health", "Opponent Health")
+            } else {
+                // Client: Opponent is at 0x0203A9D4, Player is at 0x0203AAAC
+                ("Opponent Health", "Player Health")
+            };
+        
+            // Read and display the health values with appropriate labels
+            let player_health_value = core.raw_read_16(server_health_address, segment);
+            println!(
+                "{} (16-bit) at address 0x{:08X}: {}",
+                player_label, server_health_address, player_health_value
+            );
+        
+            let opponent_health_value = core.raw_read_16(client_health_address, segment);
+            println!(
+                "{} (16-bit) at address 0x{:08X}: {}",
+                opponent_label, client_health_address, opponent_health_value
+            );
+        }
+        
+        
+        
+        
+
+
         thread.set_frame_callback({
             let completion_token = completion_token.clone();
             let joyflags = joyflags.clone();
@@ -296,8 +358,11 @@ impl Session {
                 core.set_keys(joyflags.load(std::sync::atomic::Ordering::Relaxed));
                 emu_tps_counter.lock().mark();
 
+                // Check if match has started, then perform memory search
                 if completion_token.is_complete() {
                     thread_handle.pause();
+                } else {
+                    display_health_state(&mut core, is_offerer); // Pass the is_offerer flag
                 }
             }
         });
@@ -347,6 +412,7 @@ impl Session {
             },
         })
     }
+    
 
     pub fn new_singleplayer(
         audio_binder: audio::LateBinder,
@@ -453,6 +519,7 @@ impl Session {
         let mut traps = hooks.common_traps();
         traps.extend(hooks.stepper_traps(stepper_state.clone()));
         traps.extend(hooks.stepper_replay_traps());
+
         core.set_traps(traps);
 
         let thread = mgba::thread::Thread::new(core);

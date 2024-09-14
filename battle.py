@@ -25,14 +25,16 @@ INSTANCES = [
         'rom_path': 'bn6,0',
         'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
         'name': 'Instance 1',
+        'is_player': True
     },
-    {
-        'address': '127.0.0.1',
-        'port': 12346,
-        'rom_path': 'bn6,1',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar 1.sav',
-        'name': 'Instance 2',
-    },
+    # {
+    #     'address': '127.0.0.1',
+    #     'port': 12346,
+    #     'rom_path': 'bn6,1',
+    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar 1.sav',
+    #     'name': 'Instance 2',
+    #     'is_player': True
+    # },
 ]
 
 # Function to run the AppImage with specific ROM, SAVE paths, and PORT
@@ -53,7 +55,6 @@ def start_instances():
 
 # Function to find the game window by title (which is the port number)
 def find_game_window(port):
-    # Use wmctrl to list windows and find the one with the title containing the port number
     result = subprocess.run(['wmctrl', '-l'], stdout=subprocess.PIPE, text=True)
     for line in result.stdout.splitlines():
         if str(port) in line:
@@ -79,15 +80,12 @@ def get_window_geometry(window_id):
 # Function to capture the game window using mss
 def capture_window(geometry):
     with mss.mss() as sct:
-        # Capture the screen region defined by the window geometry
         sct_img = sct.grab(geometry)
-        # Convert the screen capture to a PIL Image
         image = Image.frombytes("RGB", sct_img.size, sct_img.rgb)
         return image
 
 # Placeholder predict method for AI inference (currently random actions)
 def predict(image):
-    # For now, simulate random actions (replace this with your AI model's prediction logic)
     possible_keys = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'Z', 'X', 'A']
     action = random.choice(['key_press', 'key_release'])
     key = random.choice(possible_keys)
@@ -109,60 +107,66 @@ async def send_input_command(writer, command):
     except Exception as e:
         print(f"Failed to send command: {e}")
 
+# Function to receive messages from the game
+async def receive_messages(reader):
+    while True:
+        try:
+            data = await reader.read(1024)
+            if not data:
+                break
+            message = data.decode().strip()
+            print(f"Received message from game: {message}")
+        except Exception as e:
+            print(f"Failed to receive message: {e}")
+            break
+
 # Function to handle connection to a specific instance and predict actions based on screen capture
 async def handle_connection(instance):
     try:
         reader, writer = await asyncio.open_connection(instance['address'], instance['port'])
         print(f"Connected to {instance['name']} at {instance['address']}:{instance['port']}")
 
+        # Start receiving messages from the game
+        asyncio.create_task(receive_messages(reader))
+
         # Find the corresponding game window based on the port number
         window_id = find_game_window(instance['port'])
         print(f"Found window for {instance['name']} with ID {window_id}")
 
         # Initialize a counter to manage the saving interval
-        save_interval = 20  # Save image every 2 seconds (0.1 seconds per loop * 20)
+        save_interval = 20
         counter = 0
 
-        # Continuously capture the window and send predicted commands
         while True:
-            # Get the window geometry
             geometry = get_window_geometry(window_id)
-            # Capture the current frame from the window
             image = capture_window(geometry)
 
             # Save the captured image every 2 seconds
             if counter % save_interval == 0:
                 save_image(image, instance['port'])
 
-            # Get the predicted action from the AI (currently random)
-            command = predict(image)
-            # Send the input command to the game instance
-            await send_input_command(writer, command)
+            if not instance.get('is_player', False):
+                command = predict(image)
+                await send_input_command(writer, command)
 
-            # Increment the counter and sleep
             counter += 1
-            await asyncio.sleep(0.1)  # Adjust the interval as needed
+            await asyncio.sleep(0.1)
 
     except ConnectionRefusedError:
         print(f"Failed to connect to {instance['name']}. Is the application running?")
     except Exception as e:
         print(f"An error occurred with {instance['name']}: {e}")
     finally:
-        # Optional: cleanly close the connection if needed
         writer.close()
         await writer.wait_closed()
         print(f"Connection to {instance['name']} closed.")
 
 # Main function to start instances and handle inputs
 async def main():
-    # Start the application instances
     start_instances()
     print("Both instances are running.")
-
-    # Wait briefly to allow instances to fully boot up and listen
     await asyncio.sleep(2)
 
-    # Create tasks to handle input connections for each instance
     tasks = [handle_connection(instance) for instance in INSTANCES]
     await asyncio.gather(*tasks)
 

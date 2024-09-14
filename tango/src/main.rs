@@ -457,85 +457,6 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                         }
                     }
                 }
-                            
-                // We use SDL for controller events and that's it.
-                // #[cfg(not(target_os = "android"))]
-                // for sdl_event in sdl_event_loop.poll_iter() {
-                //     match sdl_event {
-                //         sdl2::event::Event::ControllerDeviceAdded { which, .. } => {
-                //             println!("Controller device added: {}", which);
-                //             if game_controller.is_game_controller(which) {
-                //                 match game_controller.open(which) {
-                //                     Ok(controller) => {
-                //                         println!("Controller opened: {}", controller.name());
-                //                         let which = controller.instance_id();
-                //                         controllers.insert(which, controller);
-                //                         input_state.handle_controller_connected(
-                //                             which,
-                //                             sdl2::sys::SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_MAX as usize,
-                //                         );
-                //                     }
-                //                     Err(e) => {
-                //                         println!("Failed to add controller: {}", e);
-                //                     }
-                //                 }
-                //             }
-                //         }
-                //         sdl2::event::Event::ControllerDeviceRemoved { which, .. } => {
-                //             println!("Controller device removed: {}", which);
-                //             if let Some(controller) = controllers.remove(&which) {
-                //                 println!("Controller removed: {}", controller.name());
-                //                 input_state.handle_controller_disconnected(which);
-                //             }
-                //         }
-                //         sdl2::event::Event::ControllerAxisMotion { axis, value, which, .. } => {
-                //             println!("Controller axis motion: axis={:?}, value={}, which={}", axis, value, which);
-                //             const AXIS_THRESHOLD_RANGE: std::ops::RangeInclusive<i16> = -input::AXIS_THRESHOLD..=input::AXIS_THRESHOLD;
-            
-                //             if let Some(steal_input) = (!AXIS_THRESHOLD_RANGE.contains(&value))
-                //                 .then(|| state.steal_input.take())
-                //                 .flatten()
-                //             {
-                //                 println!("Axis input being stolen");
-                //                 steal_input.run_callback(
-                //                     input::PhysicalInput::Axis {
-                //                         axis: axis.into(),
-                //                         direction: if value > input::AXIS_THRESHOLD {
-                //                             input::AxisDirection::Positive
-                //                         } else {
-                //                             input::AxisDirection::Negative
-                //                         },
-                //                     },
-                //                     &mut next_config.input_mapping,
-                //                 );
-                //             } else {
-                //                 input_state.handle_controller_axis_motion(which, axis as usize, value);
-                //             }
-                //             gfx_backend.window().request_redraw();
-                //         }
-                //         sdl2::event::Event::ControllerButtonDown { button, which, .. } => {
-                //             println!("Controller button down: {:?}, which={}", button, which);
-                //             if let Some(steal_input) = state.steal_input.take() {
-                //                 println!("Button input being stolen");
-                //                 steal_input.run_callback(
-                //                     input::PhysicalInput::Button(button.into()),
-                //                     &mut next_config.input_mapping,
-                //                 );
-                //             } else {
-                //                 input_state.handle_controller_button_down(which, button.into());
-                //             }
-                //             gfx_backend.window().request_redraw();
-                //         }
-                //         sdl2::event::Event::ControllerButtonUp { button, which, .. } => {
-                //             println!("Controller button up: {:?}, which={}", button, which);
-                //             input_state.handle_controller_button_up(which, button.into());
-                //             gfx_backend.window().request_redraw();
-                //         }
-                //         _ => {
-                //             println!("Unhandled SDL event: {:?}", sdl_event);
-                //         }
-                //     }
-                // }
             }
 
             _ => {}
@@ -636,17 +557,29 @@ async fn setup_tcp_listener(
 
 use tokio::sync::mpsc;
 use serde::Deserialize;
+use serde::Serialize; // Add this line for serialization
+use tokio::io::{AsyncWriteExt}; // Add this for sending data back
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)] // Add Clone here
 struct InputCommand {
     #[serde(rename = "type")]
     command_type: String,
     key: String,
 }
 
+
+// Define a struct for messages sent back to the Python app
+#[derive(Serialize, Debug)]
+struct OutputMessage {
+    event: String,
+    details: String,
+}
+
+
+
 async fn handle_tcp_client(
     mut socket: tokio::net::TcpStream,
-    tx: mpsc::UnboundedSender<InputCommand>, // Add a sender to the function signature
+    tx: mpsc::UnboundedSender<InputCommand>,
 ) {
     let mut buf = vec![0; 1024];
     loop {
@@ -659,11 +592,20 @@ async fn handle_tcp_client(
                 let data = &buf[..n];
                 if let Ok(command_str) = std::str::from_utf8(data) {
                     for line in command_str.lines() {
-                        // println!("Received input command: {}", line);
                         if let Ok(cmd) = serde_json::from_str::<InputCommand>(line) {
-                            // Send the command to the main event loop
-                            if tx.send(cmd).is_err() {
+                            // Handle incoming command and send acknowledgment or event back to Python
+                            if tx.send(cmd.clone()).is_err() {
                                 println!("Failed to send input command to event loop");
+                            }
+
+                            // Example: Send a message back to Python after processing a command
+                            let response = OutputMessage {
+                                event: "command_received".to_string(),
+                                details: format!("Processed command: {:?}", cmd),
+                            };
+
+                            if let Err(e) = send_message_to_python(&mut socket, &response).await {
+                                println!("Failed to send message to Python: {}", e);
                             }
                         } else {
                             println!("Failed to parse input command");
@@ -677,4 +619,16 @@ async fn handle_tcp_client(
             }
         }
     }
+}
+
+
+// Function to send messages back to the Python app
+async fn send_message_to_python(
+    socket: &mut tokio::net::TcpStream,
+    message: &OutputMessage,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let message_json = serde_json::to_string(message)?;
+    socket.write_all(message_json.as_bytes()).await?;
+    socket.write_all(b"\n").await?;
+    Ok(())
 }
