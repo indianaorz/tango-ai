@@ -1,4 +1,6 @@
-#[derive(Hash, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Hash, Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ControllerButton {
     #[serde(rename = "a")]
     A,
@@ -101,7 +103,7 @@ impl From<sdl2::controller::Button> for ControllerButton {
     }
 }
 
-#[derive(Hash, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Hash, Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ControllerAxis {
     #[serde(rename = "leftx")]
     LeftX,
@@ -141,5 +143,49 @@ impl From<sdl2::controller::Axis> for ControllerAxis {
             sdl2::controller::Axis::TriggerLeft => Self::TriggerLeft,
             sdl2::controller::Axis::TriggerRight => Self::TriggerRight,
         }
+    }
+}
+
+// Utility functions to map string keys to corresponding buttons or axes
+pub fn map_key_to_button(key: &str) -> Option<ControllerButton> {
+    match key.to_uppercase().as_str() {
+        "A" => Some(ControllerButton::A),
+        "B" => Some(ControllerButton::B),
+        "X" => Some(ControllerButton::X),
+        "Y" => Some(ControllerButton::Y),
+        "BACK" => Some(ControllerButton::Back),
+        "GUIDE" => Some(ControllerButton::Guide),
+        "START" => Some(ControllerButton::Start),
+        "LEFTSTICK" => Some(ControllerButton::LeftStick),
+        "RIGHTSTICK" => Some(ControllerButton::RightStick),
+        "LEFTSHOULDER" => Some(ControllerButton::LeftShoulder),
+        "RIGHTSHOULDER" => Some(ControllerButton::RightShoulder),
+        "DPUP" | "UP" => Some(ControllerButton::DPadUp),
+        "DPDOWN" | "DOWN" => Some(ControllerButton::DPadDown),
+        "DPLEFT" | "LEFT" => Some(ControllerButton::DPadLeft),
+        "DPRIGHT" | "RIGHT" => Some(ControllerButton::DPadRight),
+        "MISC1" => Some(ControllerButton::Misc1),
+        "PADDLE1" => Some(ControllerButton::Paddle1),
+        "PADDLE2" => Some(ControllerButton::Paddle2),
+        "PADDLE3" => Some(ControllerButton::Paddle3),
+        "PADDLE4" => Some(ControllerButton::Paddle4),
+        "TOUCHPAD" => Some(ControllerButton::Touchpad),
+        "SELECT" => Some(ControllerButton::Back), // Assuming "SELECT" maps to "Back"
+        "L" => Some(ControllerButton::LeftShoulder), // Assuming L maps to LeftShoulder
+        "R" => Some(ControllerButton::RightShoulder), // Assuming R maps to RightShoulder
+        _ => None,
+    }
+}
+
+
+pub fn map_key_to_axis(key: &str) -> Option<ControllerAxis> {
+    match key.to_lowercase().as_str() {
+        "leftx" => Some(ControllerAxis::LeftX),
+        "lefty" => Some(ControllerAxis::LeftY),
+        "rightx" => Some(ControllerAxis::RightX),
+        "righty" => Some(ControllerAxis::RightY),
+        "lefttrigger" => Some(ControllerAxis::TriggerLeft),
+        "righttrigger" => Some(ControllerAxis::TriggerRight),
+        _ => None,
     }
 }

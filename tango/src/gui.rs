@@ -1,5 +1,4 @@
 use fluent_templates::Loader;
-
 use crate::{audio, config, discord, game, i18n, input, patch, rom, save, session, stats, updater};
 use std::str::FromStr;
 
@@ -95,6 +94,7 @@ pub struct State {
     session_view: Option<session_view::State>,
     welcome: Option<welcome::State>,
     init_link_code: String,
+    port: u16,
 }
 
 impl State {
@@ -112,6 +112,7 @@ impl State {
         init_link_code: String,
         rom_path: String,
         save_path: String,
+        port: u16,
     ) -> Result<Self, anyhow::Error> {
         let font_families = FontFamilies {
             latn: FontFamily::new("Latn", include_bytes!("fonts/NotoSans-Regular.ttf")),
@@ -226,6 +227,7 @@ impl State {
             },
             current_language: None,
             init_link_code,
+            port
         })
     }
 }
@@ -414,6 +416,7 @@ pub fn show(
             &state.last_mouse_motion_time,
             &mut state.show_escape_window,
             state.session_view.get_or_insert_with(session_view::State::new),
+            state.port
         );
     } else {
         state.session_view = None;

@@ -50,6 +50,7 @@ glutin = { version = "0.31", optional = true }
 glutin-winit = "0.4"
 hqx = { path = "../hqx" }
 image = { version = "0.25", features = ["png"] }
+memmap2 = "0.8"
 indexmap = "1.9"
 input-helper = { path = "../input-helper" }
 itertools = "0.10"

@@ -7,6 +7,7 @@ use tokio::runtime::Runtime;
 use tokio::net::TcpListener;
 use tokio::io::AsyncReadExt;
 
+
 use clap::Parser;
 
 
@@ -35,6 +36,7 @@ mod sync;
 mod updater;
 mod version;
 mod video;
+
 
 use fluent_templates::Loader;
 use keyboard::Key;
@@ -163,13 +165,12 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
 
     // Create a separate runtime for asynchronous tasks
     let rt = Runtime::new()?;
+    let (tx, mut rx) = mpsc::unbounded_channel::<InputCommand>(); // Create the channel
+
 
     // Run the async task within this runtime
-    rt.spawn(async move {
-        if let Err(e) = setup_tcp_listener(port).await {
-            println!("Failed to set up TCP listener: {}", e);
-        }
-    });
+    rt.spawn(setup_tcp_listener(port, tx.clone()));
+
 
     println!("Using init_link_code: {}", init_link_code);
 
@@ -300,6 +301,7 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
         init_link_code,
         rom_path,
         save_path,
+        port,
     )?;
 
     let mut patch_autoupdater = patch::Autoupdater::new(config.clone(), patches_scanner.clone());
@@ -375,9 +377,9 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                     window_event => {
                         let _ = gfx_backend.on_window_event(&window_event);
                         match window_event {
-                            winit::event::WindowEvent::Focused(false) => {
-                                input_state.clear_keys();
-                            }
+                            // winit::event::WindowEvent::Focused(false) => {
+                            //     input_state.clear_keys();
+                            // }
                             winit::event::WindowEvent::Occluded(false) => {
                                 next_config.full_screen = gfx_backend.window().fullscreen().is_some();
                             }
@@ -409,82 +411,128 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                 if cfg!(windows) {
                     redraw();
                 }
-
-                // We use SDL for controller events and that's it.
-                #[cfg(not(target_os = "android"))]
-                for sdl_event in sdl_event_loop.poll_iter() {
-                    match sdl_event {
-                        sdl2::event::Event::ControllerDeviceAdded { which, .. } => {
-                            if game_controller.is_game_controller(which) {
-                                match game_controller.open(which) {
-                                    Ok(controller) => {
-                                        log::info!("controller added: {}", controller.name());
-
-                                        // insane: `which` for ControllerDeviceAdded is not the same as the other events
-                                        // https://github.com/libsdl-org/SDL/issues/7401
-                                        // this event uses `joystick_index`, the rest work on the joystick's `id`
-                                        let which = controller.instance_id();
-
-                                        controllers.insert(which, controller);
-                                        input_state.handle_controller_connected(
-                                            which,
-                                            sdl2::sys::SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_MAX as usize,
-                                        );
-                                    }
-                                    Err(e) => {
-                                        log::info!("failed to add controller: {}", e);
-                                    }
-                                }
-                            }
-                        }
-                        sdl2::event::Event::ControllerDeviceRemoved { which, .. } => {
-                            if let Some(controller) = controllers.remove(&which) {
-                                log::info!("controller removed: {}", controller.name());
-                                input_state.handle_controller_disconnected(which);
-                            }
-                        }
-                        sdl2::event::Event::ControllerAxisMotion { axis, value, which, .. } => {
-                            const AXIS_THRESHOLD_RANGE: std::ops::RangeInclusive<i16> =
-                                -input::AXIS_THRESHOLD..=input::AXIS_THRESHOLD;
-
-                            if let Some(steal_input) = (!AXIS_THRESHOLD_RANGE.contains(&value))
-                                .then(|| state.steal_input.take())
-                                .flatten()
-                            {
-                                steal_input.run_callback(
-                                    input::PhysicalInput::Axis {
-                                        axis: axis.into(),
-                                        direction: if value > input::AXIS_THRESHOLD {
-                                            input::AxisDirection::Positive
-                                        } else {
-                                            input::AxisDirection::Negative
-                                        },
-                                    },
-                                    &mut next_config.input_mapping,
+                
+               // Process commands from the Python app
+                while let Ok(cmd) = rx.try_recv() {
+                    // Debug log for received command
+                    println!("Received command from TCP: {:?}", cmd);
+                    //clear input state
+                    input_state.clear_keys();
+                    
+                    // Simulate keyboard input based on the command
+                    match cmd.command_type.as_str() {
+                        "key_press" => {
+                            if let Some(key) = map_key_to_physical_key(&cmd.key) {
+                                // Simulate a key press event
+                                handle_input_event(
+                                    &mut input_state,
+                                    &mut state,
+                                    key,
+                                    winit::event::ElementState::Pressed,
+                                    &mut next_config,
                                 );
                             } else {
-                                input_state.handle_controller_axis_motion(which, axis as usize, value);
+                                println!("Unrecognized key for key press: {}", cmd.key);
                             }
-                            gfx_backend.window().request_redraw();
                         }
-                        sdl2::event::Event::ControllerButtonDown { button, which, .. } => {
-                            if let Some(steal_input) = state.steal_input.take() {
-                                steal_input.run_callback(
-                                    input::PhysicalInput::Button(button.into()),
-                                    &mut next_config.input_mapping,
+                        "key_release" => {
+                            if let Some(key) = map_key_to_physical_key(&cmd.key) {
+                                // Simulate a key release event
+                                handle_input_event(
+                                    &mut input_state,
+                                    &mut state,
+                                    key,
+                                    winit::event::ElementState::Released,
+                                    &mut next_config,
                                 );
                             } else {
-                                input_state.handle_controller_button_down(which, button.into());
+                                println!("Unrecognized key for key release: {}", cmd.key);
                             }
-                            gfx_backend.window().request_redraw();
                         }
-                        sdl2::event::Event::ControllerButtonUp { button, which, .. } => {
-                            input_state.handle_controller_button_up(which, button.into());
-                            gfx_backend.window().request_redraw();
+                        _ => {
+                            println!("Unknown command type: {}", cmd.command_type);
                         }
-                        _ => {}
                     }
                 }
+                            
+                // We use SDL for controller events and that's it.
+                // #[cfg(not(target_os = "android"))]
+                // for sdl_event in sdl_event_loop.poll_iter() {
+                //     match sdl_event {
+                //         sdl2::event::Event::ControllerDeviceAdded { which, .. } => {
+                //             println!("Controller device added: {}", which);
+                //             if game_controller.is_game_controller(which) {
+                //                 match game_controller.open(which) {
+                //                     Ok(controller) => {
+                //                         println!("Controller opened: {}", controller.name());
+                //                         let which = controller.instance_id();
+                //                         controllers.insert(which, controller);
+                //                         input_state.handle_controller_connected(
+                //                             which,
+                //                             sdl2::sys::SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_MAX as usize,
+                //                         );
+                //                     }
+                //                     Err(e) => {
+                //                         println!("Failed to add controller: {}", e);
+                //                     }
+                //                 }
+                //             }
+                //         }
+                //         sdl2::event::Event::ControllerDeviceRemoved { which, .. } => {
+                //             println!("Controller device removed: {}", which);
+                //             if let Some(controller) = controllers.remove(&which) {
+                //                 println!("Controller removed: {}", controller.name());
+                //                 input_state.handle_controller_disconnected(which);
+                //             }
+                //         }
+                //         sdl2::event::Event::ControllerAxisMotion { axis, value, which, .. } => {
+                //             println!("Controller axis motion: axis={:?}, value={}, which={}", axis, value, which);
+                //             const AXIS_THRESHOLD_RANGE: std::ops::RangeInclusive<i16> = -input::AXIS_THRESHOLD..=input::AXIS_THRESHOLD;
+            
+                //             if let Some(steal_input) = (!AXIS_THRESHOLD_RANGE.contains(&value))
+                //                 .then(|| state.steal_input.take())
+                //                 .flatten()
+                //             {
+                //                 println!("Axis input being stolen");
+                //                 steal_input.run_callback(
+                //                     input::PhysicalInput::Axis {
+                //                         axis: axis.into(),
+                //                         direction: if value > input::AXIS_THRESHOLD {
+                //                             input::AxisDirection::Positive
+                //                         } else {
+                //                             input::AxisDirection::Negative
+                //                         },
+                //                     },
+                //                     &mut next_config.input_mapping,
+                //                 );
+                //             } else {
+                //                 input_state.handle_controller_axis_motion(which, axis as usize, value);
+                //             }
+                //             gfx_backend.window().request_redraw();
+                //         }
+                //         sdl2::event::Event::ControllerButtonDown { button, which, .. } => {
+                //             println!("Controller button down: {:?}, which={}", button, which);
+                //             if let Some(steal_input) = state.steal_input.take() {
+                //                 println!("Button input being stolen");
+                //                 steal_input.run_callback(
+                //                     input::PhysicalInput::Button(button.into()),
+                //                     &mut next_config.input_mapping,
+                //                 );
+                //             } else {
+                //                 input_state.handle_controller_button_down(which, button.into());
+                //             }
+                //             gfx_backend.window().request_redraw();
+                //         }
+                //         sdl2::event::Event::ControllerButtonUp { button, which, .. } => {
+                //             println!("Controller button up: {:?}, which={}", button, which);
+                //             input_state.handle_controller_button_up(which, button.into());
+                //             gfx_backend.window().request_redraw();
+                //         }
+                //         _ => {
+                //             println!("Unhandled SDL event: {:?}", sdl_event);
+                //         }
+                //     }
+                // }
             }
 
             _ => {}
@@ -524,19 +572,57 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
     Ok(())
 }
 
+// Add a function to map Python command keys to physical keys in the game
+fn map_key_to_physical_key(key: &str) -> Option<Key> {
+    match key.to_lowercase().as_str() {
+        "up" => Some(Key::Up),
+        "down" => Some(Key::Down),
+        "left" => Some(Key::Left),
+        "right" => Some(Key::Right),
+        "z" => Some(Key::Z),
+        "x" => Some(Key::X),
+        "a" => Some(Key::S),
+        _ => None,
+    }
+}
 
 
-async fn setup_tcp_listener(port: u16) -> Result<(), anyhow::Error> {
-    // Set up TCP listener for input events
+// Use this helper function to handle input consistently
+fn handle_input_event(
+    input_state: &mut input::State,
+    state: &mut gui::State,
+    key: Key,
+    element_state: winit::event::ElementState,
+    next_config: &mut config::Config,
+) {
+    match element_state {
+        winit::event::ElementState::Pressed => {
+            if let Some(steal_input) = state.steal_input.take() {
+                steal_input.run_callback(
+                    input::PhysicalInput::Key(key),
+                    &mut next_config.input_mapping,
+                );
+            } else {
+                input_state.handle_key_down(key);
+            }
+        }
+        winit::event::ElementState::Released => {
+            input_state.handle_key_up(key);
+        }
+    }
+}
+async fn setup_tcp_listener(
+    port: u16,
+    tx: mpsc::UnboundedSender<InputCommand>, // Pass the sender to setup_tcp_listener
+) -> Result<(), anyhow::Error> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
-    println!("Listening for input events on port {}", port); // Debug message
+    println!("Listening for input events on port {}", port);
 
-    // Handle incoming connections asynchronously
     loop {
         match listener.accept().await {
             Ok((socket, _)) => {
-                println!("Accepted connection on port {}", port); // Debug message
-                tokio::spawn(handle_tcp_client(socket)); // Changed to handle_tcp_client
+                println!("Accepted connection on port {}", port);
+                tokio::spawn(handle_tcp_client(socket, tx.clone())); // Clone and pass the sender to each client handler
             }
             Err(e) => {
                 println!("Failed to accept connection: {}", e);
@@ -545,7 +631,20 @@ async fn setup_tcp_listener(port: u16) -> Result<(), anyhow::Error> {
     }
 }
 
-async fn handle_tcp_client(mut socket: tokio::net::TcpStream) {
+use tokio::sync::mpsc;
+use serde::Deserialize;
+
+#[derive(Deserialize, Debug)]
+struct InputCommand {
+    #[serde(rename = "type")]
+    command_type: String,
+    key: String,
+}
+
+async fn handle_tcp_client(
+    mut socket: tokio::net::TcpStream,
+    tx: mpsc::UnboundedSender<InputCommand>, // Add a sender to the function signature
+) {
     let mut buf = vec![0; 1024];
     loop {
         match socket.read(&mut buf).await {
@@ -557,7 +656,15 @@ async fn handle_tcp_client(mut socket: tokio::net::TcpStream) {
                 let data = &buf[..n];
                 if let Ok(command_str) = std::str::from_utf8(data) {
                     for line in command_str.lines() {
-                        println!("Received input command: {}", line);
+                        // println!("Received input command: {}", line);
+                        if let Ok(cmd) = serde_json::from_str::<InputCommand>(line) {
+                            // Send the command to the main event loop
+                            if tx.send(cmd).is_err() {
+                                println!("Failed to send input command to event loop");
+                            }
+                        } else {
+                            println!("Failed to parse input command");
+                        }
                     }
                 }
             }

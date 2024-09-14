@@ -45,10 +45,11 @@ fn show_emulator(
     max_scale: u32,
     integer_scaling: bool,
     vbuf: &mut Option<VBuf>,
+    port: u16, // Add port parameter
 ) {
     let video_filter = video::filter_by_name(video_filter).unwrap_or(Box::new(video::NullFilter));
 
-    // Apply stupid video scaling filter that only mint wants 🥴
+    // Apply the video scaling filter
     let [vbuf_width, vbuf_height] =
         video_filter.output_size([mgba::gba::SCREEN_WIDTH as usize, mgba::gba::SCREEN_HEIGHT as usize]);
 
@@ -71,6 +72,10 @@ fn show_emulator(
 
     vbuf.texture.set(vbuf.image.clone(), egui::TextureOptions::NEAREST);
 
+    // Send the VBuf image to the Python script over TCP
+    send_frame_to_shared_memory(&vbuf.image, &format!("shared_memory_{}", port)); // Pass the formatted path
+
+    // Render the image on the UI
     let gba_screen_size = egui::Vec2::new(mgba::gba::SCREEN_WIDTH as _, mgba::gba::SCREEN_HEIGHT as _);
     let pixels_per_point = ui.ctx().pixels_per_point();
     let mut scaling_factor: f32 = egui::Vec2::min_elem(ui.available_size() * pixels_per_point / gba_screen_size);
@@ -93,6 +98,80 @@ fn show_emulator(
     ui.put(rect, egui::Image::new((vbuf.texture.id(), scaled_size)));
     ui.ctx().request_repaint();
 }
+use image::{ImageBuffer, Rgba, ColorType, ImageEncoder};
+use image::codecs::png::PngEncoder;
+use memmap2::MmapMut;
+use std::fs::File;
+use std::io::{Cursor, Write};
+use std::path::Path;
+use std::ptr;
+use std::os::unix::fs::FileExt;
+
+// Function to create and write image data to a shared memory segment
+fn send_frame_to_shared_memory(image: &egui::ColorImage, shm_path: &str) {
+    // Create the image buffer from the VBuf pixel data
+    let buffer: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_fn(
+        image.size[0] as u32, 
+        image.size[1] as u32, 
+        |x, y| {
+            let pixel = image.pixels[(y as usize) * image.size[0] + (x as usize)];
+            Rgba([pixel.r(), pixel.g(), pixel.b(), pixel.a()])
+        }
+    );
+
+    // Prepare to encode the image buffer into PNG format
+    let mut png_data = Vec::new();
+    {
+        let cursor = Cursor::new(&mut png_data);
+        let encoder = PngEncoder::new(cursor);
+        encoder.write_image(
+            buffer.as_raw(),
+            buffer.width(),
+            buffer.height(),
+            ColorType::Rgba8.into(),  // Convert ColorType to ExtendedColorType
+        ).expect("Failed to encode image to PNG");
+    }
+
+    // Create or open a file to use as shared memory
+    let mut file = File::create(Path::new(shm_path)).expect("Failed to create shared memory file");
+
+    // Write the length of the PNG data
+    let length = png_data.len() as u32;
+    file.write_all(&length.to_be_bytes()).expect("Failed to write data length");
+
+    // Write the PNG data
+    file.write_all(&png_data).expect("Failed to write image data");
+
+    // Memory map the file
+    let mut mmap = unsafe { MmapMut::map_mut(&file).expect("Failed to memory map file") };
+
+    // Copy the PNG data to the memory-mapped file
+    unsafe {
+        ptr::copy_nonoverlapping(
+            png_data.as_ptr(),
+            mmap.as_mut_ptr(),
+            png_data.len()
+        );
+    }
+
+    println!("Sent image data to shared memory at {}", shm_path);
+}
+
+
+fn main() {
+    // Example usage
+    let example_image = egui::ColorImage {
+        size: [640, 480],
+        pixels: vec![egui::Color32::WHITE; 640 * 480],
+    };
+
+    // Path to the shared memory file
+    let shm_path = "/tmp/shared_memory_file";
+
+    send_frame_to_shared_memory(&example_image, shm_path);
+
+    println!("Image data written to shared memory");
+}
 
 pub fn show(
     ctx: &egui::Context,
@@ -103,6 +182,7 @@ pub fn show(
     last_mouse_motion_time: &Option<std::time::Instant>,
     show_escape_window: &mut Option<gui::escape_window::State>,
     state: &mut State,
+    port: u16, // Add port parameter here
 ) {
     let language = &config.language;
     let discord_client = &shared_root_state.discord_client;
@@ -273,7 +353,7 @@ cpsr = {:08x}"#,
             ui.with_layout(
                 egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                 |ui| {
-                    show_emulator(ui, session, video_filter, max_scale, integer_scaling, &mut state.vbuf);
+                    show_emulator(ui, session, video_filter, max_scale, integer_scaling, &mut state.vbuf, port);
                 },
             );
         });
