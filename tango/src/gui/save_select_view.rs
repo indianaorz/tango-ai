@@ -16,32 +16,52 @@ impl Selection {
         saves_scanner: save::Scanner,
         patches_scanner: patch::Scanner,
         config: &crate::config::Config,
+        rom_path: String,
+        save_path: String,
+
     ) -> Option<Selection> {
         let roms = roms_scanner.read();
         let saves = saves_scanner.read();
         let patches = patches_scanner.read();
 
-        let (family, variant) = config.last_game.as_ref()?;
-        let game = game::find_by_family_and_variant(family, *variant)?;
+        // let (family, variant) = config.last_game.as_ref()?;
+
+        // //log family and variant
+        // println!("family: {:?}", family);
+        // println!("variant: {:?}", variant);
+
+        //get family and variant from rom_path. will be like "bn6,1"
+        let family_variant: Vec<&str> = rom_path.split(',').collect();
+        let game_family = family_variant[0];
+        //u8
+        let game_variant = family_variant[1].parse::<u8>().unwrap();
+
+        let game = game::find_by_family_and_variant(game_family,game_variant)?;
 
         // make sure the game is still installed
         if !roms.contains_key(&game) {
             return None;
         }
 
+        //convert save_path to Option<std::path::PathBuf>
+        let save_buf: Option<std::path::PathBuf> = Some(std::path::PathBuf::from(save_path));
         // start building selection
         let mut selection = Selection {
             game,
-            save_path: None,
+            save_path: save_buf,
             patch: None,
         };
 
         // see if we have the last save still, if we do, restore selection
-        if let (Some(game_saves), Some(save_path)) = (saves.get(&game), config.last_save.as_ref()) {
-            if game_saves.iter().any(|save| save.path == *save_path) {
-                selection.save_path = Some(save_path.clone());
-            }
-        }
+        // if let (Some(game_saves), Some(save_path)) = (saves.get(&game), config.last_save.as_ref()) {
+        //     if game_saves.iter().any(|save| save.path == *save_path) {
+        //         selection.save_path = Some(save_path.clone());
+        //     }
+        // }
+
+        //print the game and save path
+        println!("game: {:?}", selection.game);
+        println!("save_path: {:?}", selection.save_path);
 
         // try to match patch from config
         if let (Some(patch_name), Some(version)) = (config.last_patch.as_ref(), config.last_patch_version.as_ref()) {
@@ -52,6 +72,7 @@ impl Selection {
                 }
             }
         }
+
 
         Some(selection)
     }

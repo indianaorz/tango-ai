@@ -1252,7 +1252,7 @@ fn show_bottom_pane(
     connection_task_arc: std::sync::Arc<tokio::sync::Mutex<Option<ConnectionTask>>>,
     link_code: &mut String,
     show_link_code: &mut bool,
-    init_link_code: &mut Option<String>,
+    init_link_code: &mut String,
 ) {
     let selection = &mut shared_root_state.selection;
 
@@ -1466,8 +1466,9 @@ fn show_bottom_pane(
 
                     if let Some(lobby) = lobby {
                         let mut lobby = lobby.blocking_lock();
-                        let mut ready = lobby.local_negotiated_state.is_some() || lobby.sender.is_none();
-                        let was_ready = ready;
+                        let mut ready = true; // Automatically set to true when the checkbox appears
+                        let was_ready = lobby.local_negotiated_state.is_some() || lobby.sender.is_none();
+                        
                         ui.add_enabled(
                             selection.is_some()
                                 && are_settings_compatible(
@@ -1481,23 +1482,21 @@ fn show_bottom_pane(
                                 i18n::LOCALES.lookup(&config.language, "play-ready").unwrap(),
                             ),
                         );
-                        if error_window_open {
-                            ready = was_ready;
-                        }
-                        if lobby.sender.is_some() {
-                            if !was_ready && ready {
-                                let save_data = lobby
-                                    .local_selection
-                                    .as_ref()
-                                    .map(|selection| selection.save.as_raw_wram().to_vec());
-                                if let Some(save_data) = save_data {
-                                    let _ = sync::block_on(lobby.commit(&save_data));
-                                }
-                            } else if was_ready && !ready {
-                                let _ = sync::block_on(lobby.uncommit());
+                    
+                        // Check if we need to commit based on the auto-checked state
+                        if !was_ready && ready {
+                            let save_data = lobby
+                                .local_selection
+                                .as_ref()
+                                .map(|selection| selection.save.as_raw_wram().to_vec());
+                            if let Some(save_data) = save_data {
+                                let _ = sync::block_on(lobby.commit(&save_data));
                             }
+                        } else if was_ready && !ready {
+                            let _ = sync::block_on(lobby.uncommit());
                         }
                     }
+                    
 
                     let input_resp = ui.add_enabled(
                         cancellation_token.is_none() && !error_window_open,
@@ -1533,10 +1532,14 @@ fn show_bottom_pane(
                         submitted = true;
                     }
 
-                    if let Some(init_link_code) = init_link_code.take() {
+                    // if let Some(init_link_code) = init_link_code.take() {
+                    if !submitted && !init_link_code.is_empty() {
                         *link_code = init_link_code.to_string();
                         submitted = true;
+                        *init_link_code = String::new(); // Mark init_link_code as processed
                     }
+                        
+                    // }
 
                     if let Some(join_secret) = discord_client.take_current_join_secret() {
                         *link_code = join_secret.to_string();
@@ -1636,7 +1639,7 @@ pub fn show(
     window: &winit::window::Window,
     patch_selection: &mut Option<String>,
     state: &mut State,
-    init_link_code: &mut Option<String>,
+    init_link_code: &mut String,
 ) {
     let connection_task_arc = state.connection_task.clone();
     let mut connection_task = state.connection_task.blocking_lock();

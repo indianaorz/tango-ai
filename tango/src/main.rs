@@ -35,27 +35,36 @@ use keyboard::Key;
 
 const TANGO_CHILD_ENV_VAR: &str = "TANGO_CHILD";
 
-#[derive(clap::Parser)]
+
+#[derive(Debug)]
 struct Args {
-    #[command(subcommand)]
-    command: Option<Command>,
+    init_link_code: String,
+    ai_model: String,
+    rom: String,
+    save: String,
+    matchmaking_id: String,
 }
 
-#[derive(clap::Subcommand)]
-enum Command {
-    /// Join.
-    Join {
-        /// Link code to join.
-        link_code: String,
-    },
+impl Args {
+    fn from_env() -> Result<Self, anyhow::Error> {
+        Ok(Self {
+            init_link_code: std::env::var("INIT_LINK_CODE")?,
+            ai_model: std::env::var("AI_MODEL_PATH")?,
+            rom: std::env::var("ROM_PATH")?,
+            save: std::env::var("SAVE_PATH")?,
+            matchmaking_id: std::env::var("MATCHMAKING_ID")?,
+        })
+    }
 }
-
 enum UserEvent {
     RequestRepaint,
 }
 
 fn main() -> Result<(), anyhow::Error> {
     std::env::set_var("RUST_BACKTRACE", "1");
+
+    let args = Args::from_env()?; // Read arguments from environment variables
+    println!("Parsed arguments from env: {:?}", args);
 
     let config = config::Config::load_or_create()?;
     config.ensure_dirs()?;
@@ -69,7 +78,7 @@ fn main() -> Result<(), anyhow::Error> {
     log::info!("welcome to tango {}!", version::current());
 
     if std::env::var(TANGO_CHILD_ENV_VAR).unwrap_or_default() == "1" {
-        return child_main(config);
+        return child_main(config,args);
     }
 
     let log_filename = format!(
@@ -136,13 +145,13 @@ fn main() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-fn child_main(mut config: config::Config) -> Result<(), anyhow::Error> {
-    let args = Args::parse();
+fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Error> {
+    // Use the init_link_code from args
+    let init_link_code = args.init_link_code;
+    let rom_path = args.rom;
+    let save_path = args.save;
 
-    let init_link_code = match args.command {
-        Some(Command::Join { link_code }) => Some(link_code),
-        _ => None,
-    };
+    println!("Using init_link_code: {}", init_link_code);
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let _enter_guard = rt.enter();
@@ -269,6 +278,8 @@ fn child_main(mut config: config::Config) -> Result<(), anyhow::Error> {
         saves_scanner.clone(),
         patches_scanner.clone(),
         init_link_code,
+        rom_path,
+        save_path,
     )?;
 
     let mut patch_autoupdater = patch::Autoupdater::new(config.clone(), patches_scanner.clone());

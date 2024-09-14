@@ -94,7 +94,7 @@ pub struct State {
     current_language: Option<unic_langid::LanguageIdentifier>,
     session_view: Option<session_view::State>,
     welcome: Option<welcome::State>,
-    init_link_code: Option<String>,
+    init_link_code: String,
 }
 
 impl State {
@@ -109,7 +109,9 @@ impl State {
         roms_scanner: rom::Scanner,
         saves_scanner: save::Scanner,
         patches_scanner: patch::Scanner,
-        init_link_code: Option<String>,
+        init_link_code: String,
+        rom_path: String,
+        save_path: String,
     ) -> Result<Self, anyhow::Error> {
         let font_families = FontFamilies {
             latn: FontFamily::new("Latn", include_bytes!("fonts/NotoSans-Regular.ttf")),
@@ -144,6 +146,8 @@ impl State {
             saves_scanner.clone(),
             patches_scanner.clone(),
             &config.read(),
+            rom_path,
+            save_path,
         );
 
         let committed_selection = working_selection

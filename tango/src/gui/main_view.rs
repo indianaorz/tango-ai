@@ -41,7 +41,7 @@ pub fn show(
     window: &winit::window::Window,
     show_settings: &mut Option<gui::settings_window::State>,
     state: &mut State,
-    init_link_code: &mut Option<String>,
+    init_link_code: &mut String,
     updater: &updater::Updater,
 ) {
     egui::TopBottomPanel::top("main-top-panel").show(ctx, |ui| {
@@ -142,7 +142,7 @@ pub fn show(
     }
 
     // If a join is requested, switch immediately to the play tab.
-    if shared_root_state.discord_client.has_current_join_secret() || init_link_code.is_some() {
+    if shared_root_state.discord_client.has_current_join_secret()  {
         state.tab = Tab::Play;
     }
 
