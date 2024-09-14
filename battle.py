@@ -4,6 +4,9 @@ import time
 import asyncio
 import json
 import random
+import mss
+import re
+from PIL import Image
 
 # Path to the Tango AppImage
 APP_PATH = "./dist/tango-x86_64-linux.AppImage"
@@ -48,6 +51,54 @@ def start_instances():
         run_instance(instance['rom_path'], instance['save_path'], instance['port'])
         time.sleep(0.5)  # Adjust sleep time based on app's boot time
 
+# Function to find the game window by title (which is the port number)
+def find_game_window(port):
+    # Use wmctrl to list windows and find the one with the title containing the port number
+    result = subprocess.run(['wmctrl', '-l'], stdout=subprocess.PIPE, text=True)
+    for line in result.stdout.splitlines():
+        if str(port) in line:
+            window_id = line.split()[0]
+            return window_id
+    raise Exception(f"No window found with title containing '{port}'")
+
+# Function to get window geometry using xwininfo
+def get_window_geometry(window_id):
+    result = subprocess.run(['xwininfo', '-id', window_id], stdout=subprocess.PIPE, text=True)
+    x = y = width = height = 0
+    for line in result.stdout.splitlines():
+        if "Absolute upper-left X" in line:
+            x = int(re.search(r'\d+', line).group())
+        elif "Absolute upper-left Y" in line:
+            y = int(re.search(r'\d+', line).group())
+        elif "Width" in line:
+            width = int(re.search(r'\d+', line).group())
+        elif "Height" in line:
+            height = int(re.search(r'\d+', line).group())
+    return {"left": x, "top": y, "width": width, "height": height}
+
+# Function to capture the game window using mss
+def capture_window(geometry):
+    with mss.mss() as sct:
+        # Capture the screen region defined by the window geometry
+        sct_img = sct.grab(geometry)
+        # Convert the screen capture to a PIL Image
+        image = Image.frombytes("RGB", sct_img.size, sct_img.rgb)
+        return image
+
+# Placeholder predict method for AI inference (currently random actions)
+def predict(image):
+    # For now, simulate random actions (replace this with your AI model's prediction logic)
+    possible_keys = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'Z', 'X', 'A']
+    action = random.choice(['key_press', 'key_release'])
+    key = random.choice(possible_keys)
+    return {'type': action, 'key': key}
+
+# Function to save captured images for testing
+def save_image(image, port):
+    filename = f"{port}.png"
+    image.save(filename)
+    print(f"Saved image as {filename}")
+
 # Function to send input command to a specific instance
 async def send_input_command(writer, command):
     try:
@@ -57,23 +108,40 @@ async def send_input_command(writer, command):
         print(f"Sent command: {command}")
     except Exception as e:
         print(f"Failed to send command: {e}")
-# Function to handle connection to a specific instance
+
+# Function to handle connection to a specific instance and predict actions based on screen capture
 async def handle_connection(instance):
     try:
         reader, writer = await asyncio.open_connection(instance['address'], instance['port'])
         print(f"Connected to {instance['name']} at {instance['address']}:{instance['port']}")
 
-        # List of possible keys that map correctly to Rust `Key` enum values
-        possible_keys = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'Z', 'X', 'A']
+        # Find the corresponding game window based on the port number
+        window_id = find_game_window(instance['port'])
+        print(f"Found window for {instance['name']} with ID {window_id}")
 
-        # Continuously send random input commands to the instance every second
+        # Initialize a counter to manage the saving interval
+        save_interval = 20  # Save image every 2 seconds (0.1 seconds per loop * 20)
+        counter = 0
+
+        # Continuously capture the window and send predicted commands
         while True:
-            key = random.choice(possible_keys)
-            action = random.choice(['key_press', 'key_release'])
+            # Get the window geometry
+            geometry = get_window_geometry(window_id)
+            # Capture the current frame from the window
+            image = capture_window(geometry)
 
-            command = {'type': action, 'key': key}
+            # Save the captured image every 2 seconds
+            if counter % save_interval == 0:
+                save_image(image, instance['port'])
+
+            # Get the predicted action from the AI (currently random)
+            command = predict(image)
+            # Send the input command to the game instance
             await send_input_command(writer, command)
-            await asyncio.sleep(0.1)  # Send an input every second
+
+            # Increment the counter and sleep
+            counter += 1
+            await asyncio.sleep(0.1)  # Adjust the interval as needed
 
     except ConnectionRefusedError:
         print(f"Failed to connect to {instance['name']}. Is the application running?")
@@ -84,7 +152,6 @@ async def handle_connection(instance):
         writer.close()
         await writer.wait_closed()
         print(f"Connection to {instance['name']} closed.")
-
 
 # Main function to start instances and handle inputs
 async def main():

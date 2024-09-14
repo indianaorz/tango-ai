@@ -108,7 +108,7 @@ fn main() -> Result<(), anyhow::Error> {
         Ok(f) => f,
         Err(e) => {
             rfd::MessageDialog::new()
-                .set_title(&i18n::LOCALES.lookup(&config.language, "window-title").unwrap())
+                //.set_title(&i18n::LOCALES.lookup(&config.language, "window-title").unwrap())
                 .set_description(
                     &i18n::LOCALES
                         .lookup_with_args(
@@ -135,7 +135,7 @@ fn main() -> Result<(), anyhow::Error> {
 
     if !status.success() {
         rfd::MessageDialog::new()
-            .set_title(&i18n::LOCALES.lookup(&config.language, "window-title").unwrap())
+            //.set_title(&i18n::LOCALES.lookup(&config.language, "window-title").unwrap())
             .set_description(
                 &i18n::LOCALES
                     .lookup_with_args(
@@ -197,9 +197,12 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
     let icon = image::load_from_memory(include_bytes!("icon.png"))?;
     let icon_width = icon.width();
     let icon_height = icon.height();
+    let window_title = format!("{}", args.port);
+
 
     let window_builder = winit::window::WindowBuilder::new()
-        .with_title(i18n::LOCALES.lookup(&config.read().language, "window-title").unwrap())
+        .with_title(&window_title)  // Set the title to the port number
+    //.with_title(i18n::LOCALES.lookup(&config.read().language, "window-title").unwrap())
         .with_window_icon(Some(winit::window::Icon::from_rgba(
             icon.into_bytes(),
             icon_width,

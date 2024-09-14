@@ -406,7 +406,7 @@ pub fn show(
     let session_guard = session.lock();
 
     if let Some(session) = session_guard.as_ref() {
-        window.set_title(&i18n::LOCALES.lookup(&config.language, "window-title.running").unwrap());
+        //window.set_title(&i18n::LOCALES.lookup(&config.language, "window-title.running").unwrap());
         session_view::show(
             ctx,
             config,
@@ -420,7 +420,7 @@ pub fn show(
         );
     } else {
         state.session_view = None;
-        window.set_title(&i18n::LOCALES.lookup(&config.language, "window-title").unwrap());
+        //window.set_title(&i18n::LOCALES.lookup(&config.language, "window-title").unwrap());
         main_view::show(
             ctx,
             config,
