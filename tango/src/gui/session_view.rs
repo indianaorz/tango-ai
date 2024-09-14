@@ -73,7 +73,7 @@ fn show_emulator(
     vbuf.texture.set(vbuf.image.clone(), egui::TextureOptions::NEAREST);
 
     // Send the VBuf image to the Python script over TCP
-    send_frame_to_shared_memory(&vbuf.image, &format!("shared_memory_{}", port)); // Pass the formatted path
+    //send_frame_to_shared_memory(&vbuf.image, &format!("shared_memory_{}", port)); // Pass the formatted path
 
     // Render the image on the UI
     let gba_screen_size = egui::Vec2::new(mgba::gba::SCREEN_WIDTH as _, mgba::gba::SCREEN_HEIGHT as _);
