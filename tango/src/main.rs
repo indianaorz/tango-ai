@@ -1,8 +1,14 @@
 #![windows_subsystem = "windows"]
 
+
 use std::io::Write;
+use std::sync::Arc;
+use tokio::runtime::Runtime;
+use tokio::net::TcpListener;
+use tokio::io::AsyncReadExt;
 
 use clap::Parser;
+
 
 #[macro_use]
 extern crate lazy_static;
@@ -43,6 +49,7 @@ struct Args {
     rom: String,
     save: String,
     matchmaking_id: String,
+    port: u16, // Added port number
 }
 
 impl Args {
@@ -53,12 +60,14 @@ impl Args {
             rom: std::env::var("ROM_PATH")?,
             save: std::env::var("SAVE_PATH")?,
             matchmaking_id: std::env::var("MATCHMAKING_ID")?,
+            port: std::env::var("PORT")?.parse::<u16>()?, // Read port from environment variable
         })
     }
 }
 enum UserEvent {
     RequestRepaint,
 }
+
 
 fn main() -> Result<(), anyhow::Error> {
     std::env::set_var("RUST_BACKTRACE", "1");
@@ -150,6 +159,17 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
     let init_link_code = args.init_link_code;
     let rom_path = args.rom;
     let save_path = args.save;
+    let port = args.port;
+
+    // Create a separate runtime for asynchronous tasks
+    let rt = Runtime::new()?;
+
+    // Run the async task within this runtime
+    rt.spawn(async move {
+        if let Err(e) = setup_tcp_listener(port).await {
+            println!("Failed to set up TCP listener: {}", e);
+        }
+    });
 
     println!("Using init_link_code: {}", init_link_code);
 
@@ -499,5 +519,52 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
         updater.set_enabled(next_config.enable_updater);
     })?;
 
+  
+
     Ok(())
+}
+
+
+
+async fn setup_tcp_listener(port: u16) -> Result<(), anyhow::Error> {
+    // Set up TCP listener for input events
+    let listener = TcpListener::bind(("127.0.0.1", port)).await?;
+    println!("Listening for input events on port {}", port); // Debug message
+
+    // Handle incoming connections asynchronously
+    loop {
+        match listener.accept().await {
+            Ok((socket, _)) => {
+                println!("Accepted connection on port {}", port); // Debug message
+                tokio::spawn(handle_tcp_client(socket)); // Changed to handle_tcp_client
+            }
+            Err(e) => {
+                println!("Failed to accept connection: {}", e);
+            }
+        }
+    }
+}
+
+async fn handle_tcp_client(mut socket: tokio::net::TcpStream) {
+    let mut buf = vec![0; 1024];
+    loop {
+        match socket.read(&mut buf).await {
+            Ok(0) => {
+                // Connection closed
+                break;
+            }
+            Ok(n) => {
+                let data = &buf[..n];
+                if let Ok(command_str) = std::str::from_utf8(data) {
+                    for line in command_str.lines() {
+                        println!("Received input command: {}", line);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("Failed to read from socket: {}", e);
+                break;
+            }
+        }
+    }
 }
