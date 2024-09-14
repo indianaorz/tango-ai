@@ -311,7 +311,10 @@ impl Session {
         }
 
 
-    
+        // Add these as state variables or within a struct if needed.
+        static mut LAST_PLAYER_HEALTH: u16 = 0;
+        static mut LAST_OPPONENT_HEALTH: u16 = 0;
+
         fn display_health_state(core: &mut CoreMutRef, is_offerer: bool) {
             // Define addresses for potential health values
             let server_health_address = 0x0203A9D4; // Server side health
@@ -319,27 +322,48 @@ impl Session {
             let segment = -1; // Default segment; adjust if necessary
         
             // Determine labels based on whether the instance is the server or the client
-            let (player_label, opponent_label) = if is_offerer {
+            let (player_label, opponent_label, player_health_address, opponent_health_address) = if is_offerer {
                 // Server: Player is at 0x0203A9D4, Opponent is at 0x0203AAAC
-                ("Player Health", "Opponent Health")
+                ("Player Health", "Opponent Health", server_health_address, client_health_address)
             } else {
                 // Client: Opponent is at 0x0203A9D4, Player is at 0x0203AAAC
-                ("Opponent Health", "Player Health")
+                ("Opponent Health", "Player Health", client_health_address, server_health_address)
             };
         
-            // Read and display the health values with appropriate labels
-            let player_health_value = core.raw_read_16(server_health_address, segment);
-            println!(
-                "{} (16-bit) at address 0x{:08X}: {}",
-                player_label, server_health_address, player_health_value
-            );
+            // Read current health values
+            let current_player_health = core.raw_read_16(player_health_address, segment);
+            let current_opponent_health = core.raw_read_16(opponent_health_address, segment);
         
-            let opponent_health_value = core.raw_read_16(client_health_address, segment);
+            // Safety: Ensure safe access to the static variables
+            unsafe {
+                // Check if player's health has decreased (punishment)
+                if current_player_health < LAST_PLAYER_HEALTH {
+                    let damage = LAST_PLAYER_HEALTH - current_player_health;
+                    println!("punishment {}", damage);
+                }
+        
+                // Check if opponent's health has decreased (reward)
+                if current_opponent_health < LAST_OPPONENT_HEALTH {
+                    let damage = LAST_OPPONENT_HEALTH - current_opponent_health;
+                    println!("reward {}", damage);
+                }
+        
+                // Update last known health values
+                LAST_PLAYER_HEALTH = current_player_health;
+                LAST_OPPONENT_HEALTH = current_opponent_health;
+            }
+        
+            // Display the health values with appropriate labels
             println!(
                 "{} (16-bit) at address 0x{:08X}: {}",
-                opponent_label, client_health_address, opponent_health_value
+                player_label, player_health_address, current_player_health
+            );
+            println!(
+                "{} (16-bit) at address 0x{:08X}: {}",
+                opponent_label, opponent_health_address, current_opponent_health
             );
         }
+        
         
         
         

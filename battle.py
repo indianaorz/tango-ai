@@ -19,22 +19,22 @@ env_common["MATCHMAKING_ID"] = "your_matchmaking_id"  # Replace with the actual 
 
 # Define the server addresses and ports for each instance
 INSTANCES = [
-    {
-        'address': '127.0.0.1',
-        'port': 12345,
-        'rom_path': 'bn6,0',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
-        'name': 'Instance 1',
-        'is_player': True
-    },
     # {
     #     'address': '127.0.0.1',
-    #     'port': 12346,
-    #     'rom_path': 'bn6,1',
-    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar 1.sav',
-    #     'name': 'Instance 2',
+    #     'port': 12345,
+    #     'rom_path': 'bn6,0',
+    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
+    #     'name': 'Instance 1',
     #     'is_player': True
     # },
+    {
+        'address': '127.0.0.1',
+        'port': 12346,
+        'rom_path': 'bn6,1',
+        'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar 1.sav',
+        'name': 'Instance 2',
+        'is_player': True
+    },
 ]
 
 # Function to run the AppImage with specific ROM, SAVE paths, and PORT
