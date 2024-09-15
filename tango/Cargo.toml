@@ -17,6 +17,7 @@ anyhow = "1"
 arboard = "2"
 async-trait = "0.1"
 bincode = "1"
+base64 = "0.21"  
 bps = { path = "../bps" }
 bytemuck = "1"
 byteorder = "1"

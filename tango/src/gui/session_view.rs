@@ -38,6 +38,8 @@ impl VBuf {
     }
 }
 
+use crate::global::{set_screen_image, SCREEN_IMAGE};
+
 fn show_emulator(
     ui: &mut egui::Ui,
     session: &session::Session,
@@ -74,6 +76,7 @@ fn show_emulator(
 
     // Send the VBuf image to the Python script over TCP
     //send_frame_to_shared_memory(&vbuf.image, &format!("shared_memory_{}", port)); // Pass the formatted path
+    set_screen_image(vbuf.image.clone());
 
     // Render the image on the UI
     let gba_screen_size = egui::Vec2::new(mgba::gba::SCREEN_WIDTH as _, mgba::gba::SCREEN_HEIGHT as _);

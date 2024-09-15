@@ -4,9 +4,9 @@ import time
 import asyncio
 import json
 import random
-import mss
-import re
+import base64
 from PIL import Image
+from io import BytesIO
 
 # Path to the Tango AppImage
 APP_PATH = "./dist/tango-x86_64-linux.AppImage"
@@ -19,22 +19,22 @@ env_common["MATCHMAKING_ID"] = "your_matchmaking_id"  # Replace with the actual 
 
 # Define the server addresses and ports for each instance
 INSTANCES = [
-    # {
-    #     'address': '127.0.0.1',
-    #     'port': 12345,
-    #     'rom_path': 'bn6,0',
-    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
-    #     'name': 'Instance 1',
-    #     'is_player': True
-    # },
     {
         'address': '127.0.0.1',
-        'port': 12346,
-        'rom_path': 'bn6,1',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar 1.sav',
-        'name': 'Instance 2',
-        'is_player': True
+        'port': 12345,
+        'rom_path': 'bn6,0',
+        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
+        'name': 'Instance 1',
+        'is_player': True  # Set to True if you don't want this instance to send inputs
     },
+    # {
+    #     'address': '127.0.0.1',
+    #     'port': 12346,
+    #     'rom_path': 'bn6,1',
+    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar.sav',
+    #     'name': 'Instance 1',
+    #     'is_player': True  # Set to True if you don't want this instance to send inputs
+    # },
 ]
 
 # Function to run the AppImage with specific ROM, SAVE paths, and PORT
@@ -53,37 +53,6 @@ def start_instances():
         run_instance(instance['rom_path'], instance['save_path'], instance['port'])
         time.sleep(0.5)  # Adjust sleep time based on app's boot time
 
-# Function to find the game window by title (which is the port number)
-def find_game_window(port):
-    result = subprocess.run(['wmctrl', '-l'], stdout=subprocess.PIPE, text=True)
-    for line in result.stdout.splitlines():
-        if str(port) in line:
-            window_id = line.split()[0]
-            return window_id
-    raise Exception(f"No window found with title containing '{port}'")
-
-# Function to get window geometry using xwininfo
-def get_window_geometry(window_id):
-    result = subprocess.run(['xwininfo', '-id', window_id], stdout=subprocess.PIPE, text=True)
-    x = y = width = height = 0
-    for line in result.stdout.splitlines():
-        if "Absolute upper-left X" in line:
-            x = int(re.search(r'\d+', line).group())
-        elif "Absolute upper-left Y" in line:
-            y = int(re.search(r'\d+', line).group())
-        elif "Width" in line:
-            width = int(re.search(r'\d+', line).group())
-        elif "Height" in line:
-            height = int(re.search(r'\d+', line).group())
-    return {"left": x, "top": y, "width": width, "height": height}
-
-# Function to capture the game window using mss
-def capture_window(geometry):
-    with mss.mss() as sct:
-        sct_img = sct.grab(geometry)
-        image = Image.frombytes("RGB", sct_img.size, sct_img.rgb)
-        return image
-
 # Placeholder predict method for AI inference (currently random actions)
 def predict(image):
     possible_keys = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'Z', 'X', 'A']
@@ -91,8 +60,10 @@ def predict(image):
     key = random.choice(possible_keys)
     return {'type': action, 'key': key}
 
-# Function to save captured images for testing
-def save_image(image, port):
+# Function to save images received from the app
+def save_image_from_base64(encoded_image, port):
+    decoded_image = base64.b64decode(encoded_image)
+    image = Image.open(BytesIO(decoded_image))
     filename = f"{port}.png"
     image.save(filename)
     print(f"Saved image as {filename}")
@@ -107,26 +78,64 @@ async def send_input_command(writer, command):
     except Exception as e:
         print(f"Failed to send command: {e}")
 
-# Function to receive messages from the game and print them
-async def receive_messages(reader):
+# Function to request the current screen image
+async def request_screen_image(writer):
+    try:
+        command = {'type': 'request_screen', 'key': ''}
+        await send_input_command(writer, command)
+    except Exception as e:
+        print(f"Failed to request screen image: {e}")
+
+
+
+# Function to receive messages from the game and process them
+async def receive_messages(reader, port):
+    buffer = ""
     while True:
         try:
-            data = await reader.read(1024)
+            # Read larger chunks to handle potentially large data
+            data = await reader.read(4096)
             if not data:
                 break
-            message = data.decode().strip()
-            
-            # Parse the message as JSON if possible
-            try:
-                parsed_message = json.loads(message)
-                event = parsed_message.get("event", "Unknown")
-                details = parsed_message.get("details", "No details provided")
 
-                # Print the event type and details
-                print(f"Received message: Event - {event}, Details - {details}")
-            except json.JSONDecodeError:
-                # If message is not JSON, just print the raw message
-                print(f"Received raw message: {message}")
+            # Accumulate data in buffer
+            buffer += data.decode()
+
+            # Try parsing JSON from the buffer
+            while True:
+                try:
+                    # Attempt to parse the first complete JSON object
+                    json_end_index = buffer.find('}\n')
+                    if json_end_index == -1:
+                        json_end_index = buffer.find('}')
+                    
+                    if json_end_index == -1:
+                        # No complete JSON object found yet
+                        break
+
+                    # Extract the complete JSON message
+                    json_message = buffer[:json_end_index + 1].strip()
+                    buffer = buffer[json_end_index + 1:]  # Remove processed message from buffer
+
+                    # Parse and handle the JSON message
+                    parsed_message = json.loads(json_message)
+                    event = parsed_message.get("event", "Unknown")
+                    details = parsed_message.get("details", "No details provided")
+
+                    # Handle specific events
+                    if event == "screen_image":
+                        print(f"Received screen_image event for port {port}.")
+                        save_image_from_base64(details, port)
+                    elif event == "reward":
+                        print(f"Received reward message: {details}")
+                    elif event == "punishment":
+                        print(f"Received punishment message: {details}")
+                    else:
+                        print(f"Received message: Event - {event}, Details - {details}")
+
+                except json.JSONDecodeError:
+                    # If JSON parsing fails, continue accumulating
+                    break
 
         except Exception as e:
             print(f"Failed to receive message: {e}")
@@ -140,26 +149,21 @@ async def handle_connection(instance):
         print(f"Connected to {instance['name']} at {instance['address']}:{instance['port']}")
 
         # Start receiving messages from the game
-        asyncio.create_task(receive_messages(reader))
+        asyncio.create_task(receive_messages(reader, instance['port']))
 
-        # Find the corresponding game window based on the port number
-        window_id = find_game_window(instance['port'])
-        print(f"Found window for {instance['name']} with ID {window_id}")
-
-        # Initialize a counter to manage the saving interval
-        save_interval = 20
+        # Initialize a counter to manage the screen request interval
+        screen_request_interval = 50  # Every 5 seconds if loop sleeps for 0.1s
         counter = 0
 
         while True:
-            geometry = get_window_geometry(window_id)
-            image = capture_window(geometry)
+            # Request the screen image periodically
+            if counter % screen_request_interval == 0:
+                await request_screen_image(writer)
 
-            # Save the captured image every 2 seconds
-            if counter % save_interval == 0:
-                save_image(image, instance['port'])
-
+            # Predict and send inputs if not a player instance
             if not instance.get('is_player', False):
-                command = predict(image)
+                # Capture and predict inputs based on an internal timer, not actual screen capture
+                command = predict(None)
                 await send_input_command(writer, command)
 
             counter += 1

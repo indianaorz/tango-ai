@@ -5,6 +5,11 @@ use std::sync::Arc;
 
 pub const EXPECTED_FPS: f32 = 16777216.0 / 280896.0;
 
+// session.rs
+use crate::global::{add_reward, add_punishment, clear_rewards, clear_punishments, RewardPunishment};
+use crate::global::{REWARDS, PUNISHMENTS}; // Import the global variables
+
+
 pub struct GameInfo {
     pub game: &'static (dyn game::Game + Send + Sync),
     pub patch: Option<(String, semver::Version)>,
@@ -14,11 +19,6 @@ pub struct Setup {
     pub game_lang: unic_langid::LanguageIdentifier,
     pub save: Box<dyn tango_dataview::save::Save + Send + Sync>,
     pub assets: Box<dyn tango_dataview::rom::Assets + Send + Sync>,
-}
-
-#[derive(Debug, Clone)]
-pub struct RewardPunishment {
-    pub damage: u16,
 }
 
 pub struct Session {
@@ -33,8 +33,6 @@ pub struct Session {
     pause_on_next_frame: std::sync::Arc<std::sync::atomic::AtomicBool>,
     opponent_setup: Option<Setup>,
     own_setup: Option<Setup>,
-    rewards: Arc<Mutex<Vec<RewardPunishment>>>,
-    punishments: Arc<Mutex<Vec<RewardPunishment>>>,
 }
 
 pub struct PvP {
@@ -63,19 +61,6 @@ use mgba::core::CoreMutRef;
 
 impl Session {
 
-    pub fn get_rewards(&self) -> Vec<RewardPunishment> {
-        let mut rewards = self.rewards.lock();
-        let result = rewards.clone();
-        rewards.clear(); // Clear after reading
-        result
-    }
-
-    pub fn get_punishments(&self) -> Vec<RewardPunishment> {
-        let mut punishments = self.punishments.lock();
-        let result = punishments.clone();
-        punishments.clear(); // Clear after reading
-        result
-    }
 
     pub fn new_pvp(
         config: std::sync::Arc<parking_lot::RwLock<config::Config>>,
@@ -102,10 +87,6 @@ impl Session {
         match_type: (u8, u8),
         rng_seed: [u8; 16],
     ) -> Result<Self, anyhow::Error> {
-
-        //initialize rewards and punishments
-        let rewards = Arc::new(Mutex::new(Vec::new()));
-        let punishments = Arc::new(Mutex::new(Vec::new()));
 
 
 
@@ -348,8 +329,6 @@ impl Session {
         fn display_health_state(
             core: &mut CoreMutRef,
             is_offerer: bool,
-            rewards: Arc<Mutex<Vec<RewardPunishment>>>,
-            punishments: Arc<Mutex<Vec<RewardPunishment>>>,
         ) {
             // Define addresses for potential health values
             let server_health_address = 0x0203A9D4; // Server side health
@@ -370,37 +349,25 @@ impl Session {
             let current_opponent_health = core.raw_read_16(opponent_health_address, segment);
         
             // Safety: Ensure safe access to the static variables
-           unsafe {
+            unsafe {
                 // Check if player's health has decreased (punishment)
                 if current_player_health < LAST_PLAYER_HEALTH {
                     let damage = LAST_PLAYER_HEALTH - current_player_health;
-                    // println!("punishment {}", damage);
-                    // Record punishment
-                    punishments.lock().push(RewardPunishment { damage });
+                    // Record punishment in global PUNISHMENTS
+                    add_punishment(RewardPunishment { damage });
                 }
-
+        
                 // Check if opponent's health has decreased (reward)
                 if current_opponent_health < LAST_OPPONENT_HEALTH {
                     let damage = LAST_OPPONENT_HEALTH - current_opponent_health;
-                    // println!("reward {}", damage);
-                    // Record reward
-                    rewards.lock().push(RewardPunishment { damage });
+                    // Record reward in global REWARDS
+                    add_reward(RewardPunishment { damage });
                 }
-
+        
                 // Update last known health values
                 LAST_PLAYER_HEALTH = current_player_health;
                 LAST_OPPONENT_HEALTH = current_opponent_health;
             }
-        
-            // Display the health values with appropriate labels
-            // println!(
-            //     "{} (16-bit) at address 0x{:08X}: {}",
-            //     player_label, player_health_address, current_player_health
-            // );
-            // println!(
-            //     "{} (16-bit) at address 0x{:08X}: {}",
-            //     opponent_label, opponent_health_address, current_opponent_health
-            // );
         }
         
         
@@ -414,8 +381,6 @@ impl Session {
             let joyflags = joyflags.clone();
             let vbuf = vbuf.clone();
             let emu_tps_counter = emu_tps_counter.clone();
-            let rewards = rewards.clone();
-            let punishments = punishments.clone();
             move |mut core, video_buffer, mut thread_handle| {
                 let mut vbuf = vbuf.lock();
                 vbuf.copy_from_slice(video_buffer);
@@ -427,7 +392,7 @@ impl Session {
                 if completion_token.is_complete() {
                     thread_handle.pause();
                 } else {
-                    display_health_state(&mut core, is_offerer, rewards.clone(), punishments.clone());
+                    display_health_state(&mut core, is_offerer);
                 }
             }
         });
@@ -475,9 +440,6 @@ impl Session {
             } else {
                 None
             },
-
-            rewards: rewards,
-            punishments: punishments
         })
     }
     
@@ -549,9 +511,6 @@ impl Session {
             completion_token: tango_pvp::hooks::CompletionToken::new(),
             own_setup: None,
             opponent_setup: None,
-
-            rewards: Arc::new(Mutex::new(Vec::new())),
-            punishments: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -588,7 +547,39 @@ impl Session {
             }),
         );
         let mut traps = hooks.common_traps();
-        traps.extend(hooks.stepper_traps(stepper_state.clone()));
+
+        let stepper_state_clone = stepper_state.clone();
+        traps.extend(
+            hooks
+                .stepper_traps(stepper_state_clone)
+                .into_iter()
+                .map(|(addr, original_func)| {
+                    let stepper_state_clone = stepper_state.clone(); // Clone again for each closure
+                    (
+                        addr,
+                        Box::new(move |core: mgba::core::CoreMutRef<'_>| {
+                            // Call the original function to apply inputs
+                            original_func(core);
+        
+                            // Access the current input pairs from the cloned stepper state
+                            let stepper_inner = stepper_state_clone.lock_inner();
+                            if let Some(input_pair) = stepper_inner.peek_input_pair() {
+                                let local_input = input_pair.local.joyflags;
+                                let remote_input = input_pair.remote.joyflags;
+        
+                                // Print the inputs to the terminal
+                                println!(
+                                    "At address {:08X}, Local Input: {:016b}, Remote Input: {:016b}",
+                                    addr, local_input, remote_input
+                                );
+        
+                                // Optionally, store inputs in global state for Python interaction
+                                // add_input_event(local_input, remote_input);
+                            }
+                        }) as Box<dyn Fn(mgba::core::CoreMutRef<'_>)>,
+                    )
+                }),
+        );
         traps.extend(hooks.stepper_replay_traps());
 
         core.set_traps(traps);
@@ -616,26 +607,84 @@ impl Session {
             (mgba::gba::SCREEN_WIDTH * mgba::gba::SCREEN_HEIGHT * 4)
                 as usize
         ]));
+
+
+        // Add these as state variables or within a struct if needed.
+        static mut LAST_PLAYER_HEALTH: u16 = 0;
+        static mut LAST_OPPONENT_HEALTH: u16 = 0;
+
+        fn display_health_state(
+            core: &mut CoreMutRef,
+            is_offerer: bool,
+        ) {
+            // Define addresses for potential health values
+            let server_health_address = 0x0203A9D4; // Server side health
+            let client_health_address = 0x0203AAAC; // Client side health
+            let segment = -1; // Default segment; adjust if necessary
+        
+            // Determine labels based on whether the instance is the server or the client
+            let (player_label, opponent_label, player_health_address, opponent_health_address) = if is_offerer {
+                // Server: Player is at 0x0203A9D4, Opponent is at 0x0203AAAC
+                ("Player Health", "Opponent Health", server_health_address, client_health_address)
+            } else {
+                // Client: Opponent is at 0x0203A9D4, Player is at 0x0203AAAC
+                ("Opponent Health", "Player Health", client_health_address, server_health_address)
+            };
+        
+            // Read current health values
+            let current_player_health = core.raw_read_16(player_health_address, segment);
+            let current_opponent_health = core.raw_read_16(opponent_health_address, segment);
+        
+            // Safety: Ensure safe access to the static variables
+            unsafe {
+                // Check if player's health has decreased (punishment)
+                if current_player_health < LAST_PLAYER_HEALTH {
+                    let damage = LAST_PLAYER_HEALTH - current_player_health;
+                    // Record punishment in global PUNISHMENTS
+                    add_punishment(RewardPunishment { damage });
+                }
+        
+                // Check if opponent's health has decreased (reward)
+                if current_opponent_health < LAST_OPPONENT_HEALTH {
+                    let damage = LAST_OPPONENT_HEALTH - current_opponent_health;
+                    // Record reward in global REWARDS
+                    add_reward(RewardPunishment { damage });
+                }
+        
+                // Update last known health values
+                LAST_PLAYER_HEALTH = current_player_health;
+                LAST_OPPONENT_HEALTH = current_opponent_health;
+            }
+        }
+        
+
+
+
         thread.set_frame_callback({
             let vbuf = vbuf.clone();
             let emu_tps_counter = emu_tps_counter.clone();
             let completion_token = completion_token.clone();
             let stepper_state = stepper_state.clone();
             let pause_on_next_frame = pause_on_next_frame.clone();
-            move |_core, video_buffer, mut thread_handle| {
+            move |mut core, video_buffer, mut thread_handle| {
                 let mut vbuf = vbuf.lock();
                 vbuf.copy_from_slice(video_buffer);
                 video::fix_vbuf_alpha(&mut vbuf);
                 emu_tps_counter.lock().mark();
-
+        
                 if !replay_is_complete && stepper_state.lock_inner().input_pairs_left() == 0 {
                     completion_token.complete();
                 }
-
+        
                 if pause_on_next_frame.swap(false, std::sync::atomic::Ordering::SeqCst)
                     || completion_token.is_complete()
                 {
                     thread_handle.pause();
+                } else {
+                    // Borrow `core` as a mutable reference
+                    let core_ref = &mut core; 
+                    // Call display_health_state with the necessary parameters
+                    display_health_state(core_ref, true);
                 }
             }
         });
@@ -652,9 +701,6 @@ impl Session {
             pause_on_next_frame,
             own_setup: None,
             opponent_setup: None,
-
-            rewards: Arc::new(Mutex::new(Vec::new())),
-            punishments: Arc::new(Mutex::new(Vec::new())),
         })
     }
 

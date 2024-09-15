@@ -37,9 +37,17 @@ mod updater;
 mod version;
 mod video;
 
-
 use fluent_templates::Loader;
 use keyboard::Key;
+
+
+mod global; // Include the global module
+
+use crate::global::{get_punishments,get_rewards,add_reward, add_punishment, clear_rewards, clear_punishments, get_screen_image,SCREEN_IMAGE, RewardPunishment};
+use crate::global::{REWARDS, PUNISHMENTS}; // Import the global variables
+
+use base64::{encode}; // Add base64 for encoding images as strings
+
 
 const TANGO_CHILD_ENV_VAR: &str = "TANGO_CHILD";
 
@@ -69,6 +77,8 @@ impl Args {
 enum UserEvent {
     RequestRepaint,
 }
+
+use lazy_static::lazy_static;
 
 
 fn main() -> Result<(), anyhow::Error> {
@@ -466,38 +476,46 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
         }
 
         if let Some(session) = state.shared.session.lock().as_mut() {
+
             session.set_joyflags(next_config.input_mapping.to_mgba_keys(&input_state));
             session.set_master_volume(next_config.volume);
+        }
 
-            let rewards = session.get_rewards();
-            let punishments = session.get_punishments();
 
-            if !rewards.is_empty() {
-                if let Some(ref output_tx) = *output_tx.lock() {
-                    for reward in rewards {
-                        let message = OutputMessage {
-                            event: "reward".to_string(),
-                            details: format!("damage: {}", reward.damage),
-                        };
-                        if let Err(e) = output_tx.send(message) {
-                            println!("Failed to send reward message: {}", e);
-                        }
+        // Now handle global rewards and punishments instead of session-specific ones
+        let rewards = get_rewards(); // Use global function to get rewards
+        let punishments = get_punishments(); // Use global function to get punishments
+
+        if !rewards.is_empty() {
+            println!("Global rewards: {:?}", rewards);
+            if let Some(ref output_tx) = *output_tx.lock() {
+                for reward in rewards {
+                    let message = OutputMessage {
+                        event: "reward".to_string(),
+                        details: format!("damage: {}", reward.damage),
+                    };
+                    println!("Sending message: {:?}", message);
+                    if let Err(e) = output_tx.send(message) {
+                        println!("Failed to send reward message: {}", e);
                     }
                 }
+                clear_rewards(); // Clear global rewards after processing
             }
+        }
 
-            if !punishments.is_empty() {
-                if let Some(ref output_tx) = *output_tx.lock() {
-                    for punishment in punishments {
-                        let message = OutputMessage {
-                            event: "punishment".to_string(),
-                            details: format!("damage: {}", punishment.damage),
-                        };
-                        if let Err(e) = output_tx.send(message) {
-                            println!("Failed to send punishment message: {}", e);
-                        }
+        if !punishments.is_empty() {
+            println!("Global punishments: {:?}", punishments);
+            if let Some(ref output_tx) = *output_tx.lock() {
+                for punishment in punishments {
+                    let message = OutputMessage {
+                        event: "punishment".to_string(),
+                        details: format!("damage: {}", punishment.damage),
+                    };
+                    if let Err(e) = output_tx.send(message) {
+                        println!("Failed to send punishment message: {}", e);
                     }
                 }
+                clear_punishments(); // Clear global punishments after processing
             }
         }
 
@@ -613,9 +631,11 @@ struct OutputMessage {
     event: String,
     details: String,
 }
-
-
-// Modify handle_tcp_client to receive messages from event loop
+use image::codecs::png::PngEncoder;
+use image::ImageEncoder;
+use image::ColorType; // Make sure to import ColorType from the image crate
+use egui::Color32;
+// Modify the handle_tcp_client function to send the screen_image event
 async fn handle_tcp_client(
     mut socket: tokio::net::TcpStream,
     tx: mpsc::UnboundedSender<InputCommand>,
@@ -640,19 +660,57 @@ async fn handle_tcp_client(
                         if let Ok(command_str) = std::str::from_utf8(data) {
                             for line in command_str.lines() {
                                 if let Ok(cmd) = serde_json::from_str::<InputCommand>(line) {
-                                    // Handle incoming command and send acknowledgment or event back to Python
-                                    if tx.send(cmd.clone()).is_err() {
-                                        println!("Failed to send input command to event loop");
-                                    }
+                                    match cmd.command_type.as_str() {
+                                        "request_screen" => {
+                                            // Handle screen image request
+                                            if let Some(image) = get_screen_image() {
+                                                // Convert Color32 slice to raw bytes (RGBA)
+                                                let rgba_bytes: Vec<u8> = image.pixels.iter().flat_map(|pixel| {
+                                                    vec![pixel.r(), pixel.g(), pixel.b(), pixel.a()]
+                                                }).collect();
 
-                                    // Example: Send a message back to Python after processing a command
-                                    let response = OutputMessage {
-                                        event: "command_received".to_string(),
-                                        details: format!("Processed command: {:?}", cmd),
-                                    };
+                                                // Encode image to PNG format
+                                                let mut png_data = Vec::new();
+                                                let encoder = PngEncoder::new(&mut png_data);
+                                                encoder.write_image(
+                                                    &rgba_bytes,
+                                                    image.size[0] as u32,
+                                                    image.size[1] as u32,
+                                                    ColorType::Rgba8.into(),
+                                                ).expect("Failed to encode image");
 
-                                    if let Err(e) = send_message_to_python(&mut socket, &response).await {
-                                        println!("Failed to send message to Python: {}", e);
+                                                // Encode PNG data in base64
+                                                let encoded_image = encode(png_data);
+
+                                                // Send the encoded image back
+                                                let response = OutputMessage {
+                                                    event: "screen_image".to_string(),
+                                                    details: encoded_image,
+                                                };
+
+                                                // Log the event being sent for debugging
+                                                // println!("Sending screen_image event: {:?}", response);
+
+                                                if let Err(e) = send_message_to_python(&mut socket, &response).await {
+                                                    println!("Failed to send screen image: {}", e);
+                                                }
+                                            } else {
+                                                println!("No screen image available.");
+                                            }
+                                        }
+                                        _ => {
+                                            // Handle other commands or send acknowledgment
+                                            if tx.send(cmd.clone()).is_err() {
+                                                println!("Failed to send input command to event loop");
+                                            }
+                                            let response = OutputMessage {
+                                                event: "command_received".to_string(),
+                                                details: format!("Processed command: {:?}", cmd),
+                                            };
+                                            if let Err(e) = send_message_to_python(&mut socket, &response).await {
+                                                println!("Failed to send message to Python: {}", e);
+                                            }
+                                        }
                                     }
                                 } else {
                                     println!("Failed to parse input command");
@@ -669,7 +727,6 @@ async fn handle_tcp_client(
 
             // Reading from msg_rx
             Some(message) = msg_rx.recv() => {
-                // Send the message to the Python app
                 if let Err(e) = send_message_to_python(&mut socket, &message).await {
                     println!("Failed to send message to Python: {}", e);
                 }
@@ -681,6 +738,7 @@ async fn handle_tcp_client(
         }
     }
 }
+
 
 
 // Function to send messages back to the Python app

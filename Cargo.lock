@@ -6367,6 +6367,7 @@ dependencies = [
  "anyhow",
  "arboard 2.1.1",
  "async-trait",
+ "base64 0.21.7",
  "bincode",
  "bps",
  "bytemuck",
