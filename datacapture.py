@@ -8,9 +8,14 @@ import base64
 from PIL import Image
 from io import BytesIO
 import sys
+import glob  # For file pattern matching
 
 # Path to the Tango AppImage
 APP_PATH = "./dist/tango-x86_64-linux.AppImage"
+
+# Paths
+REPLAYS_DIR = '/home/lee/Documents/Tango/replays'
+TRAINING_DATA_DIR = 'training_data'
 
 # Common environment variables
 env_common = os.environ.copy()
@@ -18,34 +23,25 @@ env_common["INIT_LINK_CODE"] = "your_link_code"
 env_common["AI_MODEL_PATH"] = "ai_model"
 env_common["MATCHMAKING_ID"] = "your_matchmaking_id"  # Replace with the actual matchmaking ID
 
-# Define the server addresses and ports for each instance
-INSTANCES = [
-    {
-        'address': '127.0.0.1',
-        'port': 12345,
-        'rom_path': 'bn6,0',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
-        'name': 'Instance 1',
-        'replay_path': '/home/lee/Documents/Tango/replays/20231020013333-watsonx-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
-        'is_player': True  # Set to True if you don't want this instance to send inputs
-    },
-    {
-        'address': '127.0.0.1',
-        'port': 12346,
-        'rom_path': 'bn6,0',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
-        'name': 'Instance 2',
-        'replay_path': '/home/lee/Documents/Tango/replays/20231020012615-watsonx-bn6-vs-IndianaOrz-round2-p2.tangoreplay',
-        'is_player': True  # Set to True if you don't want this instance to send inputs
-    },
-]
-
 # Function to get the training directory based on the replay file name
 def get_training_data_dir(replay_path):
     replay_name = os.path.basename(replay_path).split('.')[0]  # Extract the file name without extension
-    training_data_dir = os.path.join("training_data", replay_name)
+    training_data_dir = os.path.join(TRAINING_DATA_DIR, replay_name)
     os.makedirs(training_data_dir, exist_ok=True)
     return training_data_dir
+
+# Function to get a list of unprocessed replays
+def get_unprocessed_replays():
+    # Get all replay files with 'bn6' in their name
+    replay_files = glob.glob(os.path.join(REPLAYS_DIR, '*bn6*.tangoreplay'))
+    
+    unprocessed_replays = []
+    for replay_file in replay_files:
+        replay_name = os.path.basename(replay_file).split('.')[0]
+        training_data_dir = os.path.join(TRAINING_DATA_DIR, replay_name)
+        if not os.path.exists(training_data_dir):
+            unprocessed_replays.append(replay_file)
+    return unprocessed_replays
 
 # Function to run the AppImage with specific ROM, SAVE paths, and PORT
 def run_instance(rom_path, save_path, port, replay_path):
@@ -58,11 +54,26 @@ def run_instance(rom_path, save_path, port, replay_path):
     print(f"Running instance with ROM_PATH: {rom_path}, SAVE_PATH: {save_path}, PORT: {port}")
     subprocess.Popen([APP_PATH], env=env)
 
-# Function to start all instances
-def start_instances():
-    for instance in INSTANCES:
-        run_instance(instance['rom_path'], instance['save_path'], instance['port'], instance['replay_path'])
-        time.sleep(0.5)  # Adjust sleep time based on app's boot time
+# Function to start instances in batches
+def start_instances_in_batches(instances, batch_size=10):
+    total_instances = len(instances)
+    for i in range(0, total_instances, batch_size):
+        batch = instances[i:i+batch_size]
+        # Start instances in the current batch
+        for instance in batch:
+            run_instance(instance['rom_path'], instance['save_path'], instance['port'], instance['replay_path'])
+            time.sleep(0.5)  # Adjust sleep time based on app's boot time
+        # Wait for the batch to complete
+        print(f"Processing batch {i // batch_size + 1} of {((total_instances - 1) // batch_size) + 1}")
+        asyncio.run(process_batch(batch))
+        # Optionally, you can add a delay or cleanup here if needed
+
+# Function to process a batch of instances
+async def process_batch(instances):
+    tasks = [asyncio.create_task(handle_connection(instance)) for instance in instances]
+    # Wait for all handle_connection tasks to complete
+    await asyncio.gather(*tasks)
+    print("Batch processing completed.")
 
 # Placeholder predict method for AI inference (currently random actions)
 def predict(image):
@@ -257,19 +268,49 @@ async def handle_connection(instance):
         print(f"Connection to {instance['name']} closed.")
 
 # Main function to start instances and handle inputs
-async def main():
-    start_instances()
-    print("Instances are running.")
-    await asyncio.sleep(0.5)
+def main():
+    # Get the list of unprocessed replays
+    unprocessed_replays = get_unprocessed_replays()
 
-    tasks = [asyncio.create_task(handle_connection(instance)) for instance in INSTANCES]
+    if not unprocessed_replays:
+        print("No unprocessed replays found.")
+        return
 
-    # Wait for all handle_connection tasks to complete
-    await asyncio.gather(*tasks)
-    print("All instances have completed. Exiting program.")
+    # Prepare instances
+    instances = []
+    port = 12345  # Starting port number; adjust if needed
+
+    for replay_path in unprocessed_replays:
+        replay_name = os.path.basename(replay_path).split('.')[0]
+
+        # Check if the training data directory exists
+        training_data_dir = os.path.join(TRAINING_DATA_DIR, replay_name)
+        if os.path.exists(training_data_dir):
+            print(f"Training data for {replay_name} already exists. Skipping.")
+            continue
+
+        # Create the instance configuration
+        instance = {
+            'address': '127.0.0.1',
+            'port': port,
+            'rom_path': 'bn6,0',
+            'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
+            'name': f'Instance {port}',
+            'replay_path': replay_path,
+            'is_player': True  # Set to True if you don't want this instance to send inputs
+        }
+        instances.append(instance)
+        port += 1  # Increment port for the next instance
+
+    if not instances:
+        print("No new instances to process.")
+        return
+
+    # Start instances in batches
+    start_instances_in_batches(instances, batch_size=10)
 
 if __name__ == '__main__':
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         print("\nExiting...")

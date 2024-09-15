@@ -11,6 +11,13 @@ pub struct RewardPunishment {
     pub damage: u16,
 }
 
+
+// Define the structure to hold winner state
+#[derive(Debug, Clone)]
+pub struct WinnerState {
+    pub player_won: Option<bool>,
+}
+
 lazy_static! {
     // Global variable for storing rewards
     pub static ref REWARDS: Arc<Mutex<Vec<RewardPunishment>>> = Arc::new(Mutex::new(Vec::new()));
@@ -25,8 +32,22 @@ lazy_static! {
 
     pub static ref REPLAY_PATH: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
+    pub static ref WINNER_STATE: Arc<Mutex<WinnerState>> = Arc::new(Mutex::new(WinnerState { player_won: None }));
+
 }
 
+
+// Function to set the winner state
+pub fn set_winner(player_won: bool) {
+    let mut winner_state = WINNER_STATE.lock();
+    winner_state.player_won = Some(player_won);
+}
+
+// Function to get the winner state
+pub fn get_winner() -> Option<bool> {
+    let winner_state = WINNER_STATE.lock();
+    winner_state.player_won
+}
 
 // Static methods for adding and clearing rewards and punishments
 

@@ -3,10 +3,10 @@ use parking_lot::Mutex;
 use rand::SeedableRng;
 use std::sync::Arc;
 
-pub const EXPECTED_FPS: f32 = 16777216.0 / 280896.0;
+pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0 )* 10.0;
 
 // session.rs
-use crate::global::{add_reward, add_punishment, clear_rewards, clear_punishments, set_local_input, RewardPunishment};
+use crate::global::{add_reward, add_punishment, clear_rewards, clear_punishments, set_local_input, set_winner, RewardPunishment};
 use crate::global::{REWARDS, PUNISHMENTS}; // Import the global variables
 
 
@@ -609,6 +609,8 @@ impl Session {
         // Add these as state variables or within a struct if needed.
         static mut LAST_PLAYER_HEALTH: u16 = 0;
         static mut LAST_OPPONENT_HEALTH: u16 = 0;
+        static mut HEALTH_INITIALIZED: bool = false; // Flag to check if health has been properly initialized
+
 
         fn display_health_state(
             core: &mut CoreMutRef,
@@ -634,27 +636,41 @@ impl Session {
         
             // Safety: Ensure safe access to the static variables
             unsafe {
-                // Check if player's health has decreased (punishment)
-                if current_player_health < LAST_PLAYER_HEALTH {
-                    let damage = LAST_PLAYER_HEALTH - current_player_health;
-                    // Record punishment in global PUNISHMENTS
-                    add_punishment(RewardPunishment { damage });
+                // Check if health values are greater than 0 for the first time
+                if !HEALTH_INITIALIZED && current_player_health > 0 && current_opponent_health > 0 {
+                    HEALTH_INITIALIZED = true; // Set the flag to true, start checking for game state changes
                 }
-        
-                // Check if opponent's health has decreased (reward)
-                if current_opponent_health < LAST_OPPONENT_HEALTH {
-                    let damage = LAST_OPPONENT_HEALTH - current_opponent_health;
-                    // Record reward in global REWARDS
-                    add_reward(RewardPunishment { damage });
+                
+                // If health values are initialized, start monitoring for winner or damage changes
+                if HEALTH_INITIALIZED {
+                    // Check if player's health has decreased (punishment)
+                    if current_player_health < LAST_PLAYER_HEALTH {
+                        let damage = LAST_PLAYER_HEALTH - current_player_health;
+                        // Record punishment in global PUNISHMENTS
+                        add_punishment(RewardPunishment { damage });
+                    }
+
+                    // Check if opponent's health has decreased (reward)
+                    if current_opponent_health < LAST_OPPONENT_HEALTH {
+                        let damage = LAST_OPPONENT_HEALTH - current_opponent_health;
+                        // Record reward in global REWARDS
+                        add_reward(RewardPunishment { damage });
+                    }
+
+                    // Check for game end and set the winner
+                    if current_player_health == 0 {
+                        set_winner(false); // Player lost
+                    } else if current_opponent_health == 0 {
+                        set_winner(true); // Player won
+                    }
                 }
-        
                 // Update last known health values
                 LAST_PLAYER_HEALTH = current_player_health;
                 LAST_OPPONENT_HEALTH = current_opponent_health;
             }
         }
         
-
+        
 
 
         thread.set_frame_callback({
@@ -663,6 +679,7 @@ impl Session {
             let completion_token = completion_token.clone();
             let stepper_state = stepper_state.clone();
             let pause_on_next_frame = pause_on_next_frame.clone();
+            let local_player_index = replay.local_player_index;
             move |mut core, video_buffer, mut thread_handle| {
                 let mut vbuf = vbuf.lock();
                 vbuf.copy_from_slice(video_buffer);
@@ -677,11 +694,17 @@ impl Session {
                     || completion_token.is_complete()
                 {
                     thread_handle.pause();
+                    // Force exit the application when the replay is complete
+                    if completion_token.is_complete() {
+                        println!("Replay completed. Exiting application...");
+                        std::process::exit(0); // Exit the application with code 0 (normal exit)
+                    }
                 } else {
                     // Borrow `core` as a mutable reference
                     let core_ref = &mut core; 
+                    let is_offerer = local_player_index != 0;
                     // Call display_health_state with the necessary parameters
-                    display_health_state(core_ref, true);
+                    display_health_state(core_ref, is_offerer);
                 }
             }
         });

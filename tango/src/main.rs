@@ -43,7 +43,7 @@ use keyboard::Key;
 
 mod global; // Include the global module
 
-use crate::global::{get_punishments,get_rewards,add_reward, add_punishment, clear_rewards, clear_punishments, get_screen_image, get_local_input, clear_local_input, SCREEN_IMAGE, RewardPunishment};
+use crate::global::{get_punishments,get_rewards,add_reward, add_punishment, clear_rewards, clear_punishments, get_screen_image, get_local_input, clear_local_input, get_winner, SCREEN_IMAGE, RewardPunishment};
 use crate::global::{REWARDS, PUNISHMENTS}; // Import the global variables
 
 use base64::{encode}; // Add base64 for encoding images as strings
@@ -524,6 +524,23 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                 }
                 clear_punishments(); // Clear global punishments after processing
             }
+        }
+
+
+        if let Some(player_won) = get_winner() {
+            // Send a winner message to the Python script
+            if let Some(ref output_tx) = *output_tx.lock() {
+                let message = OutputMessage {
+                    event: "winner".to_string(),
+                    details: format!("{}", player_won), // Sends "true" if the player won, "false" otherwise
+                };
+                if let Err(e) = output_tx.send(message) {
+                    println!("Failed to send winner message: {}", e);
+                }
+            }
+
+            // Exit the application after sending the winner message
+            std::process::exit(0);
         }
 
         // Handling local inputs
