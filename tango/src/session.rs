@@ -615,29 +615,35 @@ impl Session {
         static mut LAST_OPPONENT_HEALTH: u16 = 0;
         static mut HEALTH_INITIALIZED: bool = false; // Flag to check if health has been properly initialized
         static HEALTH_ADDRESSES: LazyLock<Mutex<HashMap<u32, u16>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+        
+
+        static PLAYER_HEALTH_ADDRESS: Mutex<Option<u32>> = Mutex::new(None);
+        static OPPONENT_HEALTH_ADDRESS: Mutex<Option<u32>> = Mutex::new(None);
+        static ADDRESSES_SET: Mutex<bool> = Mutex::new(false);
 
 
         fn display_health_state(
             core: &mut CoreMutRef,
-            is_offerer: bool,
+            player_address: u32,
+            opponent_address: u32,
         ) {
-            // Define addresses for potential health values
-            let server_health_address = 0x0203A9D4; // Server side health
-            let client_health_address = 0x0203AAAC; // Client side health
             let segment = -1; // Default segment; adjust if necessary
-        
-            // Determine labels based on whether the instance is the server or the client
-            let (player_label, opponent_label, player_health_address, opponent_health_address) = if is_offerer {
-                // Server: Player is at 0x0203A9D4, Opponent is at 0x0203AAAC
-                ("Player Health", "Opponent Health", server_health_address, client_health_address)
-            } else {
-                // Client: Opponent is at 0x0203A9D4, Player is at 0x0203AAAC
-                ("Opponent Health", "Player Health", client_health_address, server_health_address)
-            };
+            // Read current health values
+            let current_player_health = core.raw_read_16(player_address, segment);
+            let current_opponent_health = core.raw_read_16(opponent_address, segment);
+
+            // // Determine labels based on whether the instance is the server or the client
+            // let (player_label, opponent_label, player_health_address, opponent_health_address) = if is_offerer {
+            //     // Server: Player is at 0x0203A9D4, Opponent is at 0x0203AAAC
+            //     ("Player Health", "Opponent Health", server_health_address, client_health_address)
+            // } else {
+            //     // Client: Opponent is at 0x0203A9D4, Player is at 0x0203AAAC
+            //     ("Opponent Health", "Player Health", client_health_address, server_health_address)
+            // };
         
             // Read current health values
-            let current_player_health = core.raw_read_16(player_health_address, segment);
-            let current_opponent_health = core.raw_read_16(opponent_health_address, segment);
+            // let current_player_health = core.raw_read_16(player_health_address, segment);
+            // let current_opponent_health = core.raw_read_16(opponent_health_address, segment);
         
             // Safety: Ensure safe access to the static variables
             unsafe {
@@ -684,7 +690,7 @@ impl Session {
 
             // Define the memory range to search - adjust based on your game's addressable space
             let start_address = 0x02000000; // Start of EWRAM, commonly used in GBA games
-            let end_address = 0x02040000; // End of EWRAM
+            let end_address = 0x03007FFF; // End of EWRAM
 
             // Search through the address range for the specified value
             for address in (start_address..end_address).step_by(4) {
@@ -697,7 +703,7 @@ impl Session {
             found_addresses
         }
 
-
+        
         thread.set_frame_callback({
             let vbuf = vbuf.clone();
             let emu_tps_counter = emu_tps_counter.clone();
@@ -724,15 +730,94 @@ impl Session {
                         println!("Replay completed. Exiting application...");
                         std::process::exit(0); // Exit the application with code 0 (normal exit)
                     }
-                } else {
-                    // Borrow `core` as a mutable reference
-                    let core_ref = &mut core; 
-                    let is_offerer = local_player_index != 1;
-                    // Call display_health_state with the necessary parameters
-                    display_health_state(core_ref, is_offerer);
+                }else {
+                    let core_ref = &mut core;
+        
+                        // Print local player index
+                    // println!("Local Player Index: {}", local_player_index);
+                    let is_offerer = local_player_index == 1;
+
+                    // Check if the addresses have already been set
+                    let mut addresses_set = ADDRESSES_SET.lock();
+                    if !*addresses_set {
+                        // Define addresses for potential health values
+                        let player_health_address = 0x020F52A4; // Example address
+                        let segment = -1; // Default segment; adjust if necessary
+
+                        let possible_addresses = [
+                            0x0203AAAC, 
+                            0x02B7AAAC,
+                            0x0257AAAC,
+                            0x0203A9D4,
+                            0x0293A9D4,
+                        ];
+
+                        // Read player health directly
+                        let player_health = core_ref.raw_read_16(player_health_address, segment);
+
+                        //break out if value is 0
+                        if player_health == 0 {
+                            return;
+                        }
+
+                        // Log values for all possible opponent addresses
+                        for &address in &possible_addresses {
+                            let current_value = core_ref.raw_read_16(address, segment);
+                            println!(
+                                "Possible Opponent Address: 0x{:08X}, Value: {}",
+                                address, current_value
+                            );
+
+                            // If the value isn't equal to the player's health, it's considered the opponent's health
+                            if current_value != player_health {
+                                *OPPONENT_HEALTH_ADDRESS.lock() = Some(address);
+                                break;
+                            }
+                        }
+
+                        //get current enemy health value
+                        let opponent_health_address = OPPONENT_HEALTH_ADDRESS.lock().unwrap();
+
+                        // Update the global addresses
+                        *OPPONENT_HEALTH_ADDRESS.lock() = Some(opponent_health_address);
+
+                        //get the opponent's current health
+                        let opponent_health = core_ref.raw_read_16(opponent_health_address, segment);
+
+                        //find an address from the possible addresses that is NOT the opponent's health
+                        
+                        for &address in &possible_addresses {
+                            let current_value = core_ref.raw_read_16(address, segment);
+                            println!(
+                                "Possible Player Address: 0x{:08X}, Value: {}",
+                                address, current_value
+                            );
+                            if current_value != opponent_health{
+                                *PLAYER_HEALTH_ADDRESS.lock() = Some(address);
+                                break;
+                            }
+                        }
+                        
+
+                        //only stop trying to set the values once we know the player and enemy health aren't the same
+                        if player_health != opponent_health {
+                            *addresses_set = true;
+                        }
+                    }
+
+                    // Retrieve the health addresses
+                    let player_health_addr = *PLAYER_HEALTH_ADDRESS.lock();
+                    let opponent_health_addr = *OPPONENT_HEALTH_ADDRESS.lock();
+
+                    // Ensure the addresses are set before calling `display_health_state`
+                    if let (Some(player_addr), Some(opponent_addr)) = (player_health_addr, opponent_health_addr) {
+                        display_health_state(core_ref, player_addr, opponent_addr);
+                    } else {
+                        println!("Health addresses not properly set.");
+                    }
                      // Search for health values that start at 1250
                     // Search for health values that start at 1250
-                    // let health_addresses = search_all_health_values(core_ref, 1450);
+                    // let health_addresses = search_all_health_values(core_ref, 1250);
 
                     // // Access the global health addresses map without using unwrap()
                     // let mut health_map = HEALTH_ADDRESSES.lock();
@@ -759,7 +844,7 @@ impl Session {
 
                     //         // Return true to keep this address in the list if the current value is plausible
                     //         // Here, we check if it's a reasonable health value (e.g., less than 1250)
-                    //         return current_value <= 1450;
+                    //         return current_value <= 1250;
                     //     }
 
                     //     // Retain address if no change occurred, waiting for a potential change

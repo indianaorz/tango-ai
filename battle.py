@@ -22,6 +22,16 @@ env_common["MATCHMAKING_ID"] = "your_matchmaking_id"  # Replace with the actual 
 INSTANCES = [
     {
         'address': '127.0.0.1',
+        'port': 12344,
+        'rom_path': 'bn6,0',
+        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
+        'name': 'Instance 1',
+        'replay_path': '/home/lee/Documents/Tango/replays/20240405024019-geddon-bn6-vs-BiohazrdMnSP-round3-p1.tangoreplay',
+        'is_player': True  # Set to True if you don't want this instance to send inputs
+    },
+
+    {
+        'address': '127.0.0.1',
         'port': 12345,
         'rom_path': 'bn6,0',
         'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
@@ -29,15 +39,15 @@ INSTANCES = [
         'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
         'is_player': True  # Set to True if you don't want this instance to send inputs
     },
-    # {
-    #     'address': '127.0.0.1',
-    #     'port': 12346,
-    #     'rom_path': 'bn6,0',
-    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
-    #     'name': 'Instance 2',
-    #     'replay_path': '/home/lee/Documents/Tango/replays/20231020012615-watsonx-bn6-vs-IndianaOrz-round2-p2.tangoreplay',
-    #     'is_player': True  # Set to True if you don't want this instance to send inputs
-    # },
+    {
+        'address': '127.0.0.1',
+        'port': 12346,
+        'rom_path': 'bn6,0',
+        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
+        'name': 'Instance 2',
+        'replay_path': '/home/lee/Documents/Tango/replays/20231013013155-annular-bn6-vs-DthKrdMnSP-round3-p2.tangoreplay',
+        'is_player': True  # Set to True if you don't want this instance to send inputs
+    },
 ]
 
 # Function to get the training directory based on the replay file name
