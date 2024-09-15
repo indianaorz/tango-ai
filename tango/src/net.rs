@@ -2,6 +2,7 @@ pub mod protocol;
 
 pub const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
+
 #[derive(Debug, thiserror::Error)]
 pub enum NegotiationError {
     #[error("expected hello")]

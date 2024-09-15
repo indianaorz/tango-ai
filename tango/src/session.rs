@@ -16,6 +16,11 @@ pub struct Setup {
     pub assets: Box<dyn tango_dataview::rom::Assets + Send + Sync>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RewardPunishment {
+    pub damage: u16,
+}
+
 pub struct Session {
     start_time: std::time::SystemTime,
     game_info: GameInfo,
@@ -28,6 +33,8 @@ pub struct Session {
     pause_on_next_frame: std::sync::Arc<std::sync::atomic::AtomicBool>,
     opponent_setup: Option<Setup>,
     own_setup: Option<Setup>,
+    rewards: Arc<Mutex<Vec<RewardPunishment>>>,
+    punishments: Arc<Mutex<Vec<RewardPunishment>>>,
 }
 
 pub struct PvP {
@@ -51,9 +58,25 @@ pub enum Mode {
     Replayer,
 }
 
+
 use mgba::core::CoreMutRef;
 
 impl Session {
+
+    pub fn get_rewards(&self) -> Vec<RewardPunishment> {
+        let mut rewards = self.rewards.lock();
+        let result = rewards.clone();
+        rewards.clear(); // Clear after reading
+        result
+    }
+
+    pub fn get_punishments(&self) -> Vec<RewardPunishment> {
+        let mut punishments = self.punishments.lock();
+        let result = punishments.clone();
+        punishments.clear(); // Clear after reading
+        result
+    }
+
     pub fn new_pvp(
         config: std::sync::Arc<parking_lot::RwLock<config::Config>>,
         audio_binder: audio::LateBinder,
@@ -79,6 +102,13 @@ impl Session {
         match_type: (u8, u8),
         rng_seed: [u8; 16],
     ) -> Result<Self, anyhow::Error> {
+
+        //initialize rewards and punishments
+        let rewards = Arc::new(Mutex::new(Vec::new()));
+        let punishments = Arc::new(Mutex::new(Vec::new()));
+
+
+
         let mut core = mgba::core::Core::new_gba("tango")?;
         core.enable_video_buffer();
 
@@ -315,7 +345,12 @@ impl Session {
         static mut LAST_PLAYER_HEALTH: u16 = 0;
         static mut LAST_OPPONENT_HEALTH: u16 = 0;
 
-        fn display_health_state(core: &mut CoreMutRef, is_offerer: bool) {
+        fn display_health_state(
+            core: &mut CoreMutRef,
+            is_offerer: bool,
+            rewards: Arc<Mutex<Vec<RewardPunishment>>>,
+            punishments: Arc<Mutex<Vec<RewardPunishment>>>,
+        ) {
             // Define addresses for potential health values
             let server_health_address = 0x0203A9D4; // Server side health
             let client_health_address = 0x0203AAAC; // Client side health
@@ -335,33 +370,37 @@ impl Session {
             let current_opponent_health = core.raw_read_16(opponent_health_address, segment);
         
             // Safety: Ensure safe access to the static variables
-            unsafe {
+           unsafe {
                 // Check if player's health has decreased (punishment)
                 if current_player_health < LAST_PLAYER_HEALTH {
                     let damage = LAST_PLAYER_HEALTH - current_player_health;
-                    println!("punishment {}", damage);
+                    // println!("punishment {}", damage);
+                    // Record punishment
+                    punishments.lock().push(RewardPunishment { damage });
                 }
-        
+
                 // Check if opponent's health has decreased (reward)
                 if current_opponent_health < LAST_OPPONENT_HEALTH {
                     let damage = LAST_OPPONENT_HEALTH - current_opponent_health;
-                    println!("reward {}", damage);
+                    // println!("reward {}", damage);
+                    // Record reward
+                    rewards.lock().push(RewardPunishment { damage });
                 }
-        
+
                 // Update last known health values
                 LAST_PLAYER_HEALTH = current_player_health;
                 LAST_OPPONENT_HEALTH = current_opponent_health;
             }
         
             // Display the health values with appropriate labels
-            println!(
-                "{} (16-bit) at address 0x{:08X}: {}",
-                player_label, player_health_address, current_player_health
-            );
-            println!(
-                "{} (16-bit) at address 0x{:08X}: {}",
-                opponent_label, opponent_health_address, current_opponent_health
-            );
+            // println!(
+            //     "{} (16-bit) at address 0x{:08X}: {}",
+            //     player_label, player_health_address, current_player_health
+            // );
+            // println!(
+            //     "{} (16-bit) at address 0x{:08X}: {}",
+            //     opponent_label, opponent_health_address, current_opponent_health
+            // );
         }
         
         
@@ -375,6 +414,8 @@ impl Session {
             let joyflags = joyflags.clone();
             let vbuf = vbuf.clone();
             let emu_tps_counter = emu_tps_counter.clone();
+            let rewards = rewards.clone();
+            let punishments = punishments.clone();
             move |mut core, video_buffer, mut thread_handle| {
                 let mut vbuf = vbuf.lock();
                 vbuf.copy_from_slice(video_buffer);
@@ -386,7 +427,7 @@ impl Session {
                 if completion_token.is_complete() {
                     thread_handle.pause();
                 } else {
-                    display_health_state(&mut core, is_offerer); // Pass the is_offerer flag
+                    display_health_state(&mut core, is_offerer, rewards.clone(), punishments.clone());
                 }
             }
         });
@@ -434,6 +475,9 @@ impl Session {
             } else {
                 None
             },
+
+            rewards: rewards,
+            punishments: punishments
         })
     }
     
@@ -505,6 +549,9 @@ impl Session {
             completion_token: tango_pvp::hooks::CompletionToken::new(),
             own_setup: None,
             opponent_setup: None,
+
+            rewards: Arc::new(Mutex::new(Vec::new())),
+            punishments: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -605,6 +652,9 @@ impl Session {
             pause_on_next_frame,
             own_setup: None,
             opponent_setup: None,
+
+            rewards: Arc::new(Mutex::new(Vec::new())),
+            punishments: Arc::new(Mutex::new(Vec::new())),
         })
     }
 

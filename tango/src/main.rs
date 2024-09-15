@@ -165,11 +165,14 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
 
     // Create a separate runtime for asynchronous tasks
     let rt = Runtime::new()?;
-    let (tx, mut rx) = mpsc::unbounded_channel::<InputCommand>(); // Create the channel
+
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<InputCommand>(); // For receiving input commands
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputMessage>(); // For sending messages back to Python
+    let output_tx = Arc::new(Mutex::new(Some(output_tx))); // Wrap in Arc<Mutex<>> for sharing between threads
 
 
     // Run the async task within this runtime
-    rt.spawn(setup_tcp_listener(port, tx.clone()));
+    rt.spawn(setup_tcp_listener(port, input_tx.clone(), output_tx.clone()));
 
 
     println!("Using init_link_code: {}", init_link_code);
@@ -416,8 +419,8 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                 }
                 
                // Process commands from the Python app
-                while let Ok(cmd) = rx.try_recv() {
-                    // Debug log for received command
+               while let Ok(cmd) = input_rx.try_recv() {
+                // Debug log for received command
                     println!("Received command from TCP: {:?}", cmd);
                     //clear input state
                     input_state.clear_keys();
@@ -465,6 +468,37 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
         if let Some(session) = state.shared.session.lock().as_mut() {
             session.set_joyflags(next_config.input_mapping.to_mgba_keys(&input_state));
             session.set_master_volume(next_config.volume);
+
+            let rewards = session.get_rewards();
+            let punishments = session.get_punishments();
+
+            if !rewards.is_empty() {
+                if let Some(ref output_tx) = *output_tx.lock() {
+                    for reward in rewards {
+                        let message = OutputMessage {
+                            event: "reward".to_string(),
+                            details: format!("damage: {}", reward.damage),
+                        };
+                        if let Err(e) = output_tx.send(message) {
+                            println!("Failed to send reward message: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if !punishments.is_empty() {
+                if let Some(ref output_tx) = *output_tx.lock() {
+                    for punishment in punishments {
+                        let message = OutputMessage {
+                            event: "punishment".to_string(),
+                            details: format!("damage: {}", punishment.damage),
+                        };
+                        if let Err(e) = output_tx.send(message) {
+                            println!("Failed to send punishment message: {}", e);
+                        }
+                    }
+                }
+            }
         }
 
         next_config.window_size = gfx_backend
@@ -535,9 +569,12 @@ fn handle_input_event(
         }
     }
 }
+
+// Modify setup_tcp_listener to accept output_tx
 async fn setup_tcp_listener(
     port: u16,
-    tx: mpsc::UnboundedSender<InputCommand>, // Pass the sender to setup_tcp_listener
+    tx: mpsc::UnboundedSender<InputCommand>,
+    output_tx: Arc<Mutex<Option<mpsc::UnboundedSender<OutputMessage>>>>,
 ) -> Result<(), anyhow::Error> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     println!("Listening for input events on port {}", port);
@@ -546,7 +583,7 @@ async fn setup_tcp_listener(
         match listener.accept().await {
             Ok((socket, _)) => {
                 println!("Accepted connection on port {}", port);
-                tokio::spawn(handle_tcp_client(socket, tx.clone())); // Clone and pass the sender to each client handler
+                tokio::spawn(handle_tcp_client(socket, tx.clone(), output_tx.clone()));
             }
             Err(e) => {
                 println!("Failed to accept connection: {}", e);
@@ -555,10 +592,12 @@ async fn setup_tcp_listener(
     }
 }
 
+
 use tokio::sync::mpsc;
 use serde::Deserialize;
 use serde::Serialize; // Add this line for serialization
 use tokio::io::{AsyncWriteExt}; // Add this for sending data back
+use parking_lot::Mutex; // Add this for thread safety
 
 #[derive(Deserialize, Serialize, Debug, Clone)] // Add Clone here
 struct InputCommand {
@@ -576,45 +615,67 @@ struct OutputMessage {
 }
 
 
-
+// Modify handle_tcp_client to receive messages from event loop
 async fn handle_tcp_client(
     mut socket: tokio::net::TcpStream,
     tx: mpsc::UnboundedSender<InputCommand>,
+    output_tx: Arc<Mutex<Option<mpsc::UnboundedSender<OutputMessage>>>>,
 ) {
+    // Register the output_tx for sending messages
+    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<OutputMessage>();
+    *output_tx.lock() = Some(msg_tx);
+
     let mut buf = vec![0; 1024];
     loop {
-        match socket.read(&mut buf).await {
-            Ok(0) => {
-                // Connection closed
-                break;
-            }
-            Ok(n) => {
-                let data = &buf[..n];
-                if let Ok(command_str) = std::str::from_utf8(data) {
-                    for line in command_str.lines() {
-                        if let Ok(cmd) = serde_json::from_str::<InputCommand>(line) {
-                            // Handle incoming command and send acknowledgment or event back to Python
-                            if tx.send(cmd.clone()).is_err() {
-                                println!("Failed to send input command to event loop");
-                            }
+        tokio::select! {
+            // Reading from the socket
+            n = socket.read(&mut buf) => {
+                match n {
+                    Ok(0) => {
+                        // Connection closed
+                        break;
+                    }
+                    Ok(n) => {
+                        let data = &buf[..n];
+                        if let Ok(command_str) = std::str::from_utf8(data) {
+                            for line in command_str.lines() {
+                                if let Ok(cmd) = serde_json::from_str::<InputCommand>(line) {
+                                    // Handle incoming command and send acknowledgment or event back to Python
+                                    if tx.send(cmd.clone()).is_err() {
+                                        println!("Failed to send input command to event loop");
+                                    }
 
-                            // Example: Send a message back to Python after processing a command
-                            let response = OutputMessage {
-                                event: "command_received".to_string(),
-                                details: format!("Processed command: {:?}", cmd),
-                            };
+                                    // Example: Send a message back to Python after processing a command
+                                    let response = OutputMessage {
+                                        event: "command_received".to_string(),
+                                        details: format!("Processed command: {:?}", cmd),
+                                    };
 
-                            if let Err(e) = send_message_to_python(&mut socket, &response).await {
-                                println!("Failed to send message to Python: {}", e);
+                                    if let Err(e) = send_message_to_python(&mut socket, &response).await {
+                                        println!("Failed to send message to Python: {}", e);
+                                    }
+                                } else {
+                                    println!("Failed to parse input command");
+                                }
                             }
-                        } else {
-                            println!("Failed to parse input command");
                         }
+                    }
+                    Err(e) => {
+                        println!("Failed to read from socket: {}", e);
+                        break;
                     }
                 }
             }
-            Err(e) => {
-                println!("Failed to read from socket: {}", e);
+
+            // Reading from msg_rx
+            Some(message) = msg_rx.recv() => {
+                // Send the message to the Python app
+                if let Err(e) = send_message_to_python(&mut socket, &message).await {
+                    println!("Failed to send message to Python: {}", e);
+                }
+            }
+            else => {
+                // All senders have been dropped
                 break;
             }
         }

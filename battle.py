@@ -107,7 +107,7 @@ async def send_input_command(writer, command):
     except Exception as e:
         print(f"Failed to send command: {e}")
 
-# Function to receive messages from the game
+# Function to receive messages from the game and print them
 async def receive_messages(reader):
     while True:
         try:
@@ -115,10 +115,23 @@ async def receive_messages(reader):
             if not data:
                 break
             message = data.decode().strip()
-            print(f"Received message from game: {message}")
+            
+            # Parse the message as JSON if possible
+            try:
+                parsed_message = json.loads(message)
+                event = parsed_message.get("event", "Unknown")
+                details = parsed_message.get("details", "No details provided")
+
+                # Print the event type and details
+                print(f"Received message: Event - {event}, Details - {details}")
+            except json.JSONDecodeError:
+                # If message is not JSON, just print the raw message
+                print(f"Received raw message: {message}")
+
         except Exception as e:
             print(f"Failed to receive message: {e}")
             break
+
 
 # Function to handle connection to a specific instance and predict actions based on screen capture
 async def handle_connection(instance):
