@@ -6,7 +6,7 @@ use std::sync::Arc;
 pub const EXPECTED_FPS: f32 = 16777216.0 / 280896.0;
 
 // session.rs
-use crate::global::{add_reward, add_punishment, clear_rewards, clear_punishments, RewardPunishment};
+use crate::global::{add_reward, add_punishment, clear_rewards, clear_punishments, set_local_input, RewardPunishment};
 use crate::global::{REWARDS, PUNISHMENTS}; // Import the global variables
 
 
@@ -548,33 +548,30 @@ impl Session {
         );
         let mut traps = hooks.common_traps();
 
-        let stepper_state_clone = stepper_state.clone();
         traps.extend(
             hooks
-                .stepper_traps(stepper_state_clone)
+                .stepper_traps(stepper_state.clone())
                 .into_iter()
                 .map(|(addr, original_func)| {
-                    let stepper_state_clone = stepper_state.clone(); // Clone again for each closure
+                    let stepper_state_clone = stepper_state.clone();
                     (
                         addr,
                         Box::new(move |core: mgba::core::CoreMutRef<'_>| {
-                            // Call the original function to apply inputs
                             original_func(core);
-        
-                            // Access the current input pairs from the cloned stepper state
+                            
+                            // Capture local input
                             let stepper_inner = stepper_state_clone.lock_inner();
                             if let Some(input_pair) = stepper_inner.peek_input_pair() {
                                 let local_input = input_pair.local.joyflags;
-                                let remote_input = input_pair.remote.joyflags;
         
-                                // Print the inputs to the terminal
-                                println!(
-                                    "At address {:08X}, Local Input: {:016b}, Remote Input: {:016b}",
-                                    addr, local_input, remote_input
-                                );
+                                // Add the local input to the global list
+                                set_local_input(local_input);
         
-                                // Optionally, store inputs in global state for Python interaction
-                                // add_input_event(local_input, remote_input);
+                                // Print or log if necessary for debugging
+                                // println!(
+                                //     "At address {:08X}, Local Input: {:016b}",
+                                //     addr, local_input
+                                // );
                             }
                         }) as Box<dyn Fn(mgba::core::CoreMutRef<'_>)>,
                     )

@@ -43,7 +43,7 @@ use keyboard::Key;
 
 mod global; // Include the global module
 
-use crate::global::{get_punishments,get_rewards,add_reward, add_punishment, clear_rewards, clear_punishments, get_screen_image,SCREEN_IMAGE, RewardPunishment};
+use crate::global::{get_punishments,get_rewards,add_reward, add_punishment, clear_rewards, clear_punishments, get_screen_image, get_local_input, clear_local_input, SCREEN_IMAGE, RewardPunishment};
 use crate::global::{REWARDS, PUNISHMENTS}; // Import the global variables
 
 use base64::{encode}; // Add base64 for encoding images as strings
@@ -487,14 +487,14 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
         let punishments = get_punishments(); // Use global function to get punishments
 
         if !rewards.is_empty() {
-            println!("Global rewards: {:?}", rewards);
+            // println!("Global rewards: {:?}", rewards);
             if let Some(ref output_tx) = *output_tx.lock() {
                 for reward in rewards {
                     let message = OutputMessage {
                         event: "reward".to_string(),
                         details: format!("damage: {}", reward.damage),
                     };
-                    println!("Sending message: {:?}", message);
+                    // println!("Sending message: {:?}", message);
                     if let Err(e) = output_tx.send(message) {
                         println!("Failed to send reward message: {}", e);
                     }
@@ -504,7 +504,7 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
         }
 
         if !punishments.is_empty() {
-            println!("Global punishments: {:?}", punishments);
+            // println!("Global punishments: {:?}", punishments);
             if let Some(ref output_tx) = *output_tx.lock() {
                 for punishment in punishments {
                     let message = OutputMessage {
@@ -516,6 +516,21 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                     }
                 }
                 clear_punishments(); // Clear global punishments after processing
+            }
+        }
+
+        // Handling local inputs
+        let local_inputs = get_local_input();
+        if let Some(input) = local_inputs {
+            if let Some(ref output_tx) = *output_tx.lock() {
+                let input_message = OutputMessage {
+                    event: "local_input".to_string(),
+                    details: format!("{:?}", input),
+                };
+                if let Err(e) = output_tx.send(input_message) {
+                    println!("Failed to send local inputs: {}", e);
+                }
+                clear_local_input(); // Clear inputs after sending
             }
         }
 

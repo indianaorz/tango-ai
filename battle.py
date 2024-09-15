@@ -86,44 +86,39 @@ async def request_screen_image(writer):
     except Exception as e:
         print(f"Failed to request screen image: {e}")
 
-
-
+def int_to_binary_string(value):
+    # Convert the integer to a 16-bit binary string
+    return format(value, '016b')
 # Function to receive messages from the game and process them
 async def receive_messages(reader, port):
     buffer = ""
     while True:
         try:
-            # Read larger chunks to handle potentially large data
             data = await reader.read(4096)
             if not data:
                 break
-
-            # Accumulate data in buffer
             buffer += data.decode()
 
-            # Try parsing JSON from the buffer
             while True:
                 try:
-                    # Attempt to parse the first complete JSON object
                     json_end_index = buffer.find('}\n')
                     if json_end_index == -1:
                         json_end_index = buffer.find('}')
-                    
                     if json_end_index == -1:
-                        # No complete JSON object found yet
                         break
 
-                    # Extract the complete JSON message
                     json_message = buffer[:json_end_index + 1].strip()
-                    buffer = buffer[json_end_index + 1:]  # Remove processed message from buffer
+                    buffer = buffer[json_end_index + 1:]
 
-                    # Parse and handle the JSON message
                     parsed_message = json.loads(json_message)
                     event = parsed_message.get("event", "Unknown")
                     details = parsed_message.get("details", "No details provided")
 
-                    # Handle specific events
-                    if event == "screen_image":
+                    if event == "local_input":
+                        # Convert the received integer to a binary string
+                        binary_input = int_to_binary_string(int(details))
+                        print(f"Received local input: {binary_input}")
+                    elif event == "screen_image":
                         print(f"Received screen_image event for port {port}.")
                         save_image_from_base64(details, port)
                     elif event == "reward":
@@ -134,12 +129,12 @@ async def receive_messages(reader, port):
                         print(f"Received message: Event - {event}, Details - {details}")
 
                 except json.JSONDecodeError:
-                    # If JSON parsing fails, continue accumulating
                     break
 
         except Exception as e:
             print(f"Failed to receive message: {e}")
             break
+
 
 
 # Function to handle connection to a specific instance and predict actions based on screen capture

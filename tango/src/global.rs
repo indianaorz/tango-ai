@@ -20,7 +20,10 @@ lazy_static! {
 
     pub static ref SCREEN_IMAGE: Arc<Mutex<Option<ColorImage>>> = Arc::new(Mutex::new(None));
 
+    // Global variable for storing local input events
+    pub static ref LOCAL_INPUT: Arc<Mutex<Option<u16>>> = Arc::new(Mutex::new(None));
 }
+
 
 // Static methods for adding and clearing rewards and punishments
 
@@ -72,4 +75,26 @@ pub fn set_screen_image(image: ColorImage) {
 pub fn get_screen_image() -> Option<ColorImage> {
     let screen_image = SCREEN_IMAGE.lock();
     screen_image.clone()
+}
+
+
+
+// Function to set the latest input
+pub fn set_local_input(input: u16) {
+    let mut local_input = LOCAL_INPUT.lock();
+    *local_input = Some(input);
+    // println!("Set local input: {:?}", input);
+}
+
+// Function to retrieve the latest input
+pub fn get_local_input() -> Option<u16> {
+    let local_input = LOCAL_INPUT.lock();
+    local_input.clone()
+}
+
+// Function to clear the latest input after processing
+pub fn clear_local_input() {
+    let mut local_input = LOCAL_INPUT.lock();
+    *local_input = None;
+    // println!("Cleared local input");
 }
