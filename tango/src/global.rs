@@ -22,6 +22,9 @@ lazy_static! {
 
     // Global variable for storing local input events
     pub static ref LOCAL_INPUT: Arc<Mutex<Option<u16>>> = Arc::new(Mutex::new(None));
+
+    pub static ref REPLAY_PATH: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
 }
 
 
@@ -97,4 +100,17 @@ pub fn clear_local_input() {
     let mut local_input = LOCAL_INPUT.lock();
     *local_input = None;
     // println!("Cleared local input");
+}
+
+
+// Function to set the replay path
+pub fn set_replay_path(path: String) {
+    let mut replay_path = REPLAY_PATH.lock();
+    *replay_path = Some(path);
+}
+
+// Function to get the replay path
+pub fn get_replay_path() -> Option<String> {
+    let replay_path = REPLAY_PATH.lock();
+    replay_path.clone()
 }

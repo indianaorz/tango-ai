@@ -25,6 +25,7 @@ INSTANCES = [
         'rom_path': 'bn6,0',
         'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
         'name': 'Instance 1',
+        'replay_path': '/home/lee/Documents/Tango/replays/20231020013333-watsonx-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
         'is_player': True  # Set to True if you don't want this instance to send inputs
     },
     # {
@@ -38,11 +39,12 @@ INSTANCES = [
 ]
 
 # Function to run the AppImage with specific ROM, SAVE paths, and PORT
-def run_instance(rom_path, save_path, port):
+def run_instance(rom_path, save_path, port, replay_path):
     env = env_common.copy()
     env["ROM_PATH"] = rom_path
     env["SAVE_PATH"] = save_path
     env["PORT"] = str(port)
+    env["REPLAY_PATH"] = replay_path
 
     print(f"Running instance with ROM_PATH: {rom_path}, SAVE_PATH: {save_path}, PORT: {port}")
     subprocess.Popen([APP_PATH], env=env)
@@ -50,7 +52,7 @@ def run_instance(rom_path, save_path, port):
 # Function to start all instances
 def start_instances():
     for instance in INSTANCES:
-        run_instance(instance['rom_path'], instance['save_path'], instance['port'])
+        run_instance(instance['rom_path'], instance['save_path'], instance['port'], instance['replay_path'])
         time.sleep(0.5)  # Adjust sleep time based on app's boot time
 
 # Placeholder predict method for AI inference (currently random actions)

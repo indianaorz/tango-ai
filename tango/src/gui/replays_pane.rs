@@ -108,6 +108,8 @@ impl State {
     }
 }
 
+use crate::global::{get_replay_path}; // Import the global replay path functions
+
 pub fn show(
     ui: &mut egui::Ui,
     config: &config::Config,
@@ -122,6 +124,8 @@ pub fn show(
     let patches_scanner = shared_root_state.patches_scanner.clone();
     let roms = roms_scanner.read();
     let patches = patches_scanner.read();
+
+
 
     egui::SidePanel::left("replays-window-left-panel")
         .frame(egui::Frame::default().inner_margin(egui::Margin {
@@ -555,4 +559,160 @@ pub fn show(
                 });
             });
     });
+// Attempt to auto-load replay from the global path if set
+if let Some(replay_path) = get_replay_path() {
+    println!("Attempting to load replay from path: {:?}", replay_path);
+
+    match std::fs::File::open(&replay_path) {
+        Ok(mut file) => {
+            println!("Successfully opened replay file: {:?}", replay_path);
+
+            match tango_pvp::replay::read_metadata(&mut file) {
+                Ok((_, metadata)) => {
+                    println!("Successfully read metadata: {:?}", metadata);
+
+                    if let Some(local_side) = metadata.local_side.as_ref() {
+                        println!("Found local side metadata: {:?}", local_side);
+
+                        if let Some(local_game_info) = local_side.game_info.as_ref() {
+                            println!("Found local game info: {:?}", local_game_info);
+
+                            if let Some(local_game) = game::find_by_family_and_variant(
+                                local_game_info.rom_family.as_str(),
+                                local_game_info.rom_variant as u8,
+                            ) {
+                                println!("Found local game: {:?}", local_game);
+
+                                // Read the replay file again to decode it
+                                match std::fs::File::open(&replay_path) {
+                                    Ok(mut f) => {
+                                        match tango_pvp::replay::Replay::decode(&mut f) {
+                                            Ok(replay) => {
+                                                println!("Successfully decoded replay");
+
+                                                match local_game.save_from_wram(replay.local_state.wram()) {
+                                                    Ok(save) => {
+                                                        println!("Successfully created save from WRAM");
+
+                                                        let mut local_rom = roms.get(&local_game).cloned();
+
+                                                        // Apply patch if available
+                                                        let patch = if let Some(patch_info) = local_game_info.patch.as_ref() {
+                                                            println!("Applying patch: {:?}", patch_info);
+
+                                                            if let Some(patch) = patches.get(&patch_info.name) {
+                                                                if let Ok(version) = semver::Version::parse(&patch_info.version) {
+                                                                    if let Some(version_meta) = patch.versions.get(&version) {
+                                                                        if let Some(rom) = &local_rom {
+                                                                            let (rom_code, revision) = local_game.gamedb_entry().rom_code_and_revision;
+                                                                            match patch::apply_patch_from_disk(
+                                                                                rom,
+                                                                                local_game,
+                                                                                patches_path,
+                                                                                &patch_info.name,
+                                                                                &version,
+                                                                            ) {
+                                                                                Ok(patched_rom) => {
+                                                                                    local_rom = Some(patched_rom);
+                                                                                    println!("Successfully applied patch: {:?}", patch_info.name);
+                                                                                    Some((patch_info.name.clone(), version))
+                                                                                },
+                                                                                Err(e) => {
+                                                                                    println!(
+                                                                                        "Failed to apply patch {}: {:?}: {:?}",
+                                                                                        patch_info.name,
+                                                                                        (rom_code, revision),
+                                                                                        e
+                                                                                    );
+                                                                                    None
+                                                                                }
+                                                                            }
+                                                                        } else {
+                                                                            println!("No ROM found for local game during patch application.");
+                                                                            None
+                                                                        }
+                                                                    } else {
+                                                                        println!("No version metadata found for patch.");
+                                                                        None
+                                                                    }
+                                                                } else {
+                                                                    println!("Failed to parse version: {:?}", patch_info.version);
+                                                                    None
+                                                                }
+                                                            } else {
+                                                                println!("Patch not found: {:?}", patch_info.name);
+                                                                None
+                                                            }
+                                                        } else {
+                                                            println!("No patch information available.");
+                                                            None
+                                                        };
+
+                                                        // Start the replay session
+                                                        let audio_binder = shared_root_state.audio_binder.clone();
+                                                        let emu_tps_counter = shared_root_state.emu_tps_counter.clone();
+                                                        let session = shared_root_state.session.clone();
+
+                                                        tokio::task::spawn_blocking({
+                                                            let replay = replay.clone();
+                                                            let local_rom = local_rom.unwrap_or_default();
+                                                            let game = local_game;
+                                                            let patch = patch.clone();
+                                                            let egui_ctx = ui.ctx().clone();
+
+                                                            move || {
+                                                                println!("Starting replay session with game: {:?}", game);
+                                                                *session.lock() = Some(
+                                                                    session::Session::new_replayer(
+                                                                        audio_binder,
+                                                                        game,
+                                                                        patch,
+                                                                        &local_rom,
+                                                                        emu_tps_counter,
+                                                                        &replay,
+                                                                    ).unwrap(),
+                                                                );
+                                                                println!("Replay session started successfully.");
+                                                                egui_ctx.request_repaint();
+                                                            }
+                                                        });
+
+                                                    },
+                                                    Err(e) => {
+                                                        println!("Failed to create save from WRAM: {:?}", e);
+                                                    }
+                                                }
+                                            },
+                                            Err(e) => {
+                                                println!("Failed to decode replay: {:?}", e);
+                                            }
+                                        }
+                                    },
+                                    Err(e) => {
+                                        println!("Failed to open replay file again for decoding: {:?}", e);
+                                    }
+                                }
+                            } else {
+                                println!("Local game not found for variant: {:?}", local_game_info.rom_variant);
+                            }
+                        } else {
+                            println!("No local game info found in metadata.");
+                        }
+                    } else {
+                        println!("No local side metadata found.");
+                    }
+                },
+                Err(e) => {
+                    println!("Failed to read metadata from replay file: {:?}", e);
+                }
+            }
+        },
+        Err(e) => {
+            println!("Failed to open replay file: {:?}", e);
+        }
+    }
+}
+
+
+
 }

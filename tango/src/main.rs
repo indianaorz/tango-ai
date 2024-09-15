@@ -60,6 +60,7 @@ struct Args {
     save: String,
     matchmaking_id: String,
     port: u16, // Added port number
+    replay_path: Option<String>, // Add replay path argument
 }
 
 impl Args {
@@ -71,6 +72,7 @@ impl Args {
             save: std::env::var("SAVE_PATH")?,
             matchmaking_id: std::env::var("MATCHMAKING_ID")?,
             port: std::env::var("PORT")?.parse::<u16>()?, // Read port from environment variable
+            replay_path: std::env::var("REPLAY_PATH").ok(), // Read replay path from environment variable
         })
     }
 }
@@ -86,6 +88,11 @@ fn main() -> Result<(), anyhow::Error> {
 
     let args = Args::from_env()?; // Read arguments from environment variables
     println!("Parsed arguments from env: {:?}", args);
+
+    // Check if the REPLAY_PATH environment variable is set and store it globally
+    if let Ok(replay_path) = std::env::var("REPLAY_PATH") {
+        global::set_replay_path(replay_path);
+    }
 
     let config = config::Config::load_or_create()?;
     config.ensure_dirs()?;

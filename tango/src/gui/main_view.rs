@@ -1,5 +1,7 @@
 use crate::{config, gui, i18n, patch, sync, updater};
 use fluent_templates::Loader;
+use crate::global::get_replay_path; // Import the function to get the global replay path
+
 
 pub struct State {
     tab: Tab,
@@ -8,6 +10,8 @@ pub struct State {
     patches_pane: gui::patches_pane::State,
     replays_pane: gui::replays_pane::State,
     updater: Option<gui::updater_window::State>,
+    replay_path_handled: bool, // Flag to ensure the replay path is handled only once
+
 }
 
 impl State {
@@ -23,6 +27,8 @@ impl State {
             } else {
                 None
             },
+            replay_path_handled: false, // Initialize the flag to false
+
         }
     }
 }
@@ -44,6 +50,14 @@ pub fn show(
     init_link_code: &mut String,
     updater: &updater::Updater,
 ) {
+    // Automatically switch to Replays tab if there's a replay path set in the global state and it hasn't been handled yet
+    if !state.replay_path_handled {
+        if get_replay_path().is_some() {
+            state.tab = Tab::Replays;
+            state.replays_pane.rescan(ctx, &config.replays_path());
+            state.replay_path_handled = true; // Set the flag to true to prevent re-triggering
+        }
+    }
     egui::TopBottomPanel::top("main-top-panel").show(ctx, |ui| {
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
