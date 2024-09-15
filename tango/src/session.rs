@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0 )* 10.0;
+pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0 )* 4.0;
 
 // session.rs
 use crate::global::{add_reward, add_punishment, clear_rewards, clear_punishments, set_local_input, set_winner, RewardPunishment};

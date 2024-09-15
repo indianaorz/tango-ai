@@ -2,10 +2,12 @@ from flask import Flask, render_template, request, redirect, url_for, send_from_
 import os
 import json
 import glob
+import torch  # Import torch to load .pt files
 
 app = Flask(__name__)
 
 TRAINING_DATA_DIR = 'training_data'
+TRAINING_CACHE_DIR = 'training_cache'  # Add the cache directory path
 
 @app.route('/')
 def index():
@@ -21,6 +23,7 @@ def folder_view(folder_name):
     if not os.path.exists(folder_path):
         return "Folder not found", 404
     return render_template('viewer.html', folder_name=folder_name)
+
 @app.route('/folder/<folder_name>/frame/<int:frame_index>')
 def frame_data(folder_name, frame_index):
     folder_path = os.path.join(TRAINING_DATA_DIR, folder_name)
@@ -72,6 +75,22 @@ def frame_data(folder_name, frame_index):
         if next_reward is not None and next_punishment is not None:
             break
 
+    # Load the .pt file corresponding to the frame index
+    cache_folder_path = os.path.join(TRAINING_CACHE_DIR, folder_name)
+    pt_file_name = f'{frame_index:06d}.pt'
+    pt_file_path = os.path.join(cache_folder_path, pt_file_name)
+
+    if os.path.exists(pt_file_path):
+        sample = torch.load(pt_file_path)
+        # Extract net_reward and input tensor
+        pt_net_reward = sample.get('net_reward')
+        input_tensor = sample.get('input')  # This is a tensor
+        # Convert input_tensor to list or string to send in JSON
+        input_tensor_list = input_tensor.tolist()
+    else:
+        pt_net_reward = None
+        input_tensor_list = None
+
     # Prepare response data
     response_data = {
         'current_frame': frame_index,
@@ -88,10 +107,11 @@ def frame_data(folder_name, frame_index):
             'value': next_punishment,
             'frames_ahead': frames_ahead_punishment
         } if next_punishment is not None else None,
-        'winner': is_winner  # Include the winner status from winner.json
+        'winner': is_winner,  # Include the winner status from winner.json
+        'pt_net_reward': pt_net_reward,  # Add net_reward from .pt file
+        'pt_input_tensor': input_tensor_list  # Add input tensor from .pt file
     }
     return jsonify(response_data)
-
 
 @app.route('/training_data/<path:filename>')
 def training_data_files(filename):

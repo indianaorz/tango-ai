@@ -12,6 +12,8 @@
 </head>
 <body>
     <h1>Training Data Folders</h1>
+    <!-- display count of folders -->
+    <h2>Count of Folders: {{ folders|length }}</h2>
     <ul>
         {% for folder in folders %}
         <li><a href="{{ url_for('folder_view', folder_name=folder) }}">{{ folder }}</a></li>

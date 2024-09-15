@@ -11,6 +11,8 @@
         button, input[type="range"] { margin: 5px; }
         #folder-link { margin-bottom: 20px; display: block; }
         #slider-container { text-align: center; margin-top: 20px; }
+        table { margin: 0 auto; border-collapse: collapse; }
+        td, th { padding: 5px; border: 1px solid #ccc; }
     </style>
 </head>
 <body>
@@ -21,12 +23,14 @@
     </div>
     <div id="metadata">
         <p>Frame: <span id="frame-number"></span> / <span id="total-frames"></span></p>
-        <p>Input: <span id="input-data"></span></p>
-        <p>Reward: <span id="reward-data"></span></p>
-        <p>Punishment: <span id="punishment-data"></span></p>
+        <p>Input (Metadata): <span id="input-data"></span></p>
+        <p>Input (Cache): <span id="input-data-cache"></span></p>
+        <p>Reward (Metadata): <span id="reward-data"></span></p>
+        <p>Punishment (Metadata): <span id="punishment-data"></span></p>
+        <p>Net Reward (Cache): <span id="net-reward-cache"></span></p>
         <p>Next Reward: <span id="next-reward-data"></span></p>
         <p>Next Punishment: <span id="next-punishment-data"></span></p>
-        <p>Winner: <span id="winner-status"></span></p> <!-- Display the winner status -->
+        <p>Winner: <span id="winner-status"></span></p>
     </div>
     
     <div id="slider-container">
@@ -60,6 +64,10 @@
                     document.getElementById('input-data').textContent = data.input;
                     document.getElementById('reward-data').textContent = data.reward !== null ? data.reward : 'None';
                     document.getElementById('punishment-data').textContent = data.punishment !== null ? data.punishment : 'None';
+    
+                    // Update cache data
+                    document.getElementById('net-reward-cache').textContent = data.pt_net_reward !== null ? data.pt_net_reward : 'None';
+                    document.getElementById('input-data-cache').textContent = data.pt_input_tensor !== null ? data.pt_input_tensor.join('') : 'None';
     
                     // Update next reward data
                     if (data.next_reward) {

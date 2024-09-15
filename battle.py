@@ -30,24 +30,24 @@ INSTANCES = [
         'is_player': True  # Set to True if you don't want this instance to send inputs
     },
 
-    {
-        'address': '127.0.0.1',
-        'port': 12345,
-        'rom_path': 'bn6,0',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
-        'name': 'Instance 1',
-        'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
-        'is_player': True  # Set to True if you don't want this instance to send inputs
-    },
-    {
-        'address': '127.0.0.1',
-        'port': 12346,
-        'rom_path': 'bn6,0',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
-        'name': 'Instance 2',
-        'replay_path': '/home/lee/Documents/Tango/replays/20231013013155-annular-bn6-vs-DthKrdMnSP-round3-p2.tangoreplay',
-        'is_player': True  # Set to True if you don't want this instance to send inputs
-    },
+    # {
+    #     'address': '127.0.0.1',
+    #     'port': 12345,
+    #     'rom_path': 'bn6,0',
+    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
+    #     'name': 'Instance 1',
+    #     'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
+    #     'is_player': True  # Set to True if you don't want this instance to send inputs
+    # },
+    # {
+    #     'address': '127.0.0.1',
+    #     'port': 12346,
+    #     'rom_path': 'bn6,0',
+    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
+    #     'name': 'Instance 2',
+    #     'replay_path': '/home/lee/Documents/Tango/replays/20231013013155-annular-bn6-vs-DthKrdMnSP-round3-p2.tangoreplay',
+    #     'is_player': True  # Set to True if you don't want this instance to send inputs
+    # },
 ]
 
 # Function to get the training directory based on the replay file name
@@ -232,7 +232,7 @@ async def handle_connection(instance):
         receive_task = asyncio.create_task(receive_messages(reader, instance['port'], training_data_dir))
 
         # Set a delay to request images
-        image_request_interval = 0.01  # Adjust as needed
+        image_request_interval = 0.1 / 4.0  # Adjust as needed
 
         while not reader.at_eof():
             try:
