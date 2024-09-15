@@ -88,7 +88,7 @@ def save_image_from_base64(encoded_image, port, training_data_dir):
     filename = f"{port}_{int(time.time() * 1000)}.png"
     image_path = os.path.join(training_data_dir, filename)
     image.save(image_path)
-    print(f"Saved image as {image_path}")
+    # print(f"Saved image as {image_path}")
     return image_path
 
 # Function to save a game state as JSON
@@ -104,7 +104,7 @@ def save_game_state(image_path, input_binary, reward=None, punishment=None, trai
 
     with open(file_path, 'w') as f:
         json.dump(game_state, f)
-    print(f"Saved game state to {file_path}")
+    # print(f"Saved game state to {file_path}")
 
 # Function to send input command to a specific instance
 async def send_input_command(writer, command):
@@ -112,7 +112,7 @@ async def send_input_command(writer, command):
         command_json = json.dumps(command)
         writer.write(command_json.encode() + b'\n')
         await writer.drain()
-        print(f"Sent command: {command}")
+        # print(f"Sent command: {command}")
     except (ConnectionResetError, BrokenPipeError):
         # Connection has been closed; handle gracefully
         raise
@@ -164,10 +164,10 @@ async def receive_messages(reader, port, training_data_dir):
 
                     if event == "local_input":
                         current_input = int_to_binary_string(int(details))
-                        print(f"Received local input: {current_input}")
+                        # print(f"Received local input: {current_input}")
 
                     elif event == "screen_image":
-                        print(f"Received screen_image event for port {port}.")
+                        # print(f"Received screen_image event for port {port}.")
                         image_path = save_image_from_base64(details, port, training_data_dir)
                         
                         # Save game state when an image is received

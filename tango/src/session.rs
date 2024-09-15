@@ -670,8 +670,18 @@ impl Session {
 
                     // Check for game end and set the winner
                     if current_player_health == 0 {
+                        //log health and addresses
+                        println!("Player Health: {}", current_player_health);
+                        println!("Opponent Health: {}", current_opponent_health);
+                        println!("Player Health Address: 0x{:08X}", player_address);
+                        println!("Opponent Health Address: 0x{:08X}", opponent_address);
                         set_winner(false); // Player lost
                     } else if current_opponent_health == 0 {
+                        //log health and addresses
+                        println!("Player Health: {}", current_player_health);
+                        println!("Opponent Health: {}", current_opponent_health);
+                        println!("Player Health Address: 0x{:08X}", player_address);
+                        println!("Opponent Health Address: 0x{:08X}", opponent_address);
                         set_winner(true); // Player won
                     }
                 }
@@ -743,7 +753,6 @@ impl Session {
                         // Define addresses for potential health values
                         let player_health_address = 0x020F52A4; // Example address
                         let segment = -1; // Default segment; adjust if necessary
-
                         let possible_addresses = [
                             0x0203AAAC, 
                             0x02B7AAAC,
@@ -754,9 +763,9 @@ impl Session {
 
                         // Read player health directly
                         let player_health = core_ref.raw_read_16(player_health_address, segment);
-
+                        println!("Player Health: {}", player_health);
                         //break out if value is 0
-                        if player_health == 0 {
+                        if player_health == 0 || player_health > 4000{
                             return;
                         }
 

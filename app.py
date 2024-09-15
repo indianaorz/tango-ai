@@ -21,24 +21,23 @@ def folder_view(folder_name):
     if not os.path.exists(folder_path):
         return "Folder not found", 404
     return render_template('viewer.html', folder_name=folder_name)
-
 @app.route('/folder/<folder_name>/frame/<int:frame_index>')
 def frame_data(folder_name, frame_index):
     folder_path = os.path.join(TRAINING_DATA_DIR, folder_name)
     if not os.path.exists(folder_path):
         return "Folder not found", 404
-    
+
     # Get list of JSON files sorted by timestamp in filenames
     json_files = sorted(glob.glob(os.path.join(folder_path, '*.json')))
     total_frames = len(json_files)
     if frame_index < 0 or frame_index >= total_frames:
         return "Frame index out of range", 404
-    
+
     # Load current frame data
     current_frame_file = json_files[frame_index]
     with open(current_frame_file, 'r') as f:
         current_data = json.load(f)
-    
+
     # Check if the player is the winner by reading the winner.json file
     winner_file = os.path.join(folder_path, 'winner.json')
     is_winner = None
@@ -46,21 +45,33 @@ def frame_data(folder_name, frame_index):
         with open(winner_file, 'r') as f:
             winner_data = json.load(f)
             is_winner = winner_data.get('is_winner', None)  # Adjust key based on winner.json structure
-    # Find next reward/punishment
-    frames_ahead = None
-    reward_punishment = None
+
+    # Initialize variables to track next reward and punishment
+    next_reward = None
+    next_punishment = None
+    frames_ahead_reward = None
+    frames_ahead_punishment = None
+
+    # Iterate through future frames to find the next reward and punishment
     for i in range(frame_index + 1, total_frames):
         next_frame_file = json_files[i]
         with open(next_frame_file, 'r') as f:
             next_data = json.load(f)
-        if next_data.get('reward') is not None or next_data.get('punishment') is not None:
-            frames_ahead = i - frame_index
-            if next_data.get('reward') is not None:
-                reward_punishment = {'type': 'reward', 'value': next_data['reward']}
-            else:
-                reward_punishment = {'type': 'punishment', 'value': next_data['punishment']}
+
+        # Find the next reward if not already found
+        if next_reward is None and next_data.get('reward') is not None:
+            next_reward = next_data['reward']
+            frames_ahead_reward = i - frame_index
+
+        # Find the next punishment if not already found
+        if next_punishment is None and next_data.get('punishment') is not None:
+            next_punishment = next_data['punishment']
+            frames_ahead_punishment = i - frame_index
+
+        # Break early if both are found
+        if next_reward is not None and next_punishment is not None:
             break
-    
+
     # Prepare response data
     response_data = {
         'current_frame': frame_index,
@@ -69,14 +80,18 @@ def frame_data(folder_name, frame_index):
         'input': current_data['input'],
         'reward': current_data.get('reward'),
         'punishment': current_data.get('punishment'),
-        'next_reward_punishment': {
-            'frames_ahead': frames_ahead,
-            'type': reward_punishment['type'] if reward_punishment else None,
-            'value': reward_punishment['value'] if reward_punishment else None
-        } if frames_ahead is not None else None,
+        'next_reward': {
+            'value': next_reward,
+            'frames_ahead': frames_ahead_reward
+        } if next_reward is not None else None,
+        'next_punishment': {
+            'value': next_punishment,
+            'frames_ahead': frames_ahead_punishment
+        } if next_punishment is not None else None,
         'winner': is_winner  # Include the winner status from winner.json
     }
     return jsonify(response_data)
+
 
 @app.route('/training_data/<path:filename>')
 def training_data_files(filename):

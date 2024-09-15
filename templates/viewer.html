@@ -24,9 +24,11 @@
         <p>Input: <span id="input-data"></span></p>
         <p>Reward: <span id="reward-data"></span></p>
         <p>Punishment: <span id="punishment-data"></span></p>
-        <p>Next Reward/Punishment: <span id="next-rp-data"></span></p>
+        <p>Next Reward: <span id="next-reward-data"></span></p>
+        <p>Next Punishment: <span id="next-punishment-data"></span></p>
         <p>Winner: <span id="winner-status"></span></p> <!-- Display the winner status -->
     </div>
+    
     <div id="slider-container">
         <input type="range" id="frame-slider" min="0" max="0" value="0" style="width: 80%;">
     </div>
@@ -38,44 +40,51 @@
         var folderName = "{{ folder_name }}";
         var currentFrame = 0;
         var totalFrames = 0;
-
+    
         function updateSliderMax(maxValue) {
             const slider = document.getElementById('frame-slider');
             slider.max = maxValue - 1;
             slider.disabled = false;  // Enable the slider once the max value is set
         }
-
+    
         function loadFrame(frameIndex) {
             fetch(`/folder/${folderName}/frame/${frameIndex}`)
                 .then(response => response.json())
                 .then(data => {
                     currentFrame = data.current_frame;
                     totalFrames = data.total_frames;
-
+    
                     // Update frame data
                     document.getElementById('frame-number').textContent = currentFrame + 1;
                     document.getElementById('total-frames').textContent = totalFrames;
                     document.getElementById('input-data').textContent = data.input;
                     document.getElementById('reward-data').textContent = data.reward !== null ? data.reward : 'None';
                     document.getElementById('punishment-data').textContent = data.punishment !== null ? data.punishment : 'None';
-
-                    // Update next reward/punishment info
-                    if (data.next_reward_punishment) {
-                        document.getElementById('next-rp-data').textContent =
-                            data.next_reward_punishment.type + ' ' + data.next_reward_punishment.value +
-                            ', ' + data.next_reward_punishment.frames_ahead + ' frames ahead';
+    
+                    // Update next reward data
+                    if (data.next_reward) {
+                        document.getElementById('next-reward-data').textContent =
+                            'Reward ' + data.next_reward.value + ', ' + data.next_reward.frames_ahead + ' frames ahead';
                     } else {
-                        document.getElementById('next-rp-data').textContent = 'None';
+                        document.getElementById('next-reward-data').textContent = 'None';
                     }
-
+    
+                    // Update next punishment data
+                    if (data.next_punishment) {
+                        document.getElementById('next-punishment-data').textContent =
+                            'Punishment ' + data.next_punishment.value + ', ' + data.next_punishment.frames_ahead + ' frames ahead';
+                    } else {
+                        document.getElementById('next-punishment-data').textContent = 'None';
+                    }
+    
                     // Update winner status
                     const winnerText = data.winner === true ? "Yes" : data.winner === false ? "No" : "Undetermined";
                     document.getElementById('winner-status').textContent = winnerText;
-
+    
                     // Update image and slider
                     document.getElementById('frame-image').src = '/' + data.image_path;
                     document.getElementById('frame-slider').value = currentFrame;
-
+    
                     // Set the slider max value if it's the first load
                     if (totalFrames > 0 && document.getElementById('frame-slider').max == "0") {
                         updateSliderMax(totalFrames);
@@ -85,25 +94,25 @@
                     console.error('Error loading frame data:', error);
                 });
         }
-
+    
         // Button event listeners
         document.getElementById('prev-button').addEventListener('click', function() {
             if (currentFrame > 0) {
                 loadFrame(currentFrame - 1);
             }
         });
-
+    
         document.getElementById('next-button').addEventListener('click', function() {
             if (currentFrame < totalFrames - 1) {
                 loadFrame(currentFrame + 1);
             }
         });
-
+    
         // Slider change event
         document.getElementById('frame-slider').addEventListener('input', function() {
             loadFrame(parseInt(this.value));
         });
-
+    
         // Keyboard navigation
         document.addEventListener('keydown', function(event) {
             if (event.key === 'ArrowLeft') {
@@ -116,9 +125,10 @@
                 }
             }
         });
-
+    
         // Initial load
         loadFrame(0);
     </script>
+    
 </body>
 </html>
