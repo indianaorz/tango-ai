@@ -3,6 +3,10 @@ use parking_lot::Mutex;
 use rand::SeedableRng;
 use std::sync::Arc;
 
+
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
 pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0 )* 10.0;
 
 // session.rs
@@ -610,6 +614,7 @@ impl Session {
         static mut LAST_PLAYER_HEALTH: u16 = 0;
         static mut LAST_OPPONENT_HEALTH: u16 = 0;
         static mut HEALTH_INITIALIZED: bool = false; // Flag to check if health has been properly initialized
+        static HEALTH_ADDRESSES: LazyLock<Mutex<HashMap<u32, u16>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 
         fn display_health_state(
@@ -670,7 +675,27 @@ impl Session {
             }
         }
         
-        
+         
+       
+        // Function to search for all potential health addresses
+        fn search_all_health_values(core: &mut CoreMutRef, value_to_find: u16) -> Vec<u32> {
+            let segment = -1; // Default segment, adjust as necessary
+            let mut found_addresses = Vec::new();
+
+            // Define the memory range to search - adjust based on your game's addressable space
+            let start_address = 0x02000000; // Start of EWRAM, commonly used in GBA games
+            let end_address = 0x02040000; // End of EWRAM
+
+            // Search through the address range for the specified value
+            for address in (start_address..end_address).step_by(4) {
+                let current_value = core.raw_read_16(address, segment);
+                if current_value == value_to_find {
+                    found_addresses.push(address);
+                }
+            }
+
+            found_addresses
+        }
 
 
         thread.set_frame_callback({
@@ -702,10 +727,51 @@ impl Session {
                 } else {
                     // Borrow `core` as a mutable reference
                     let core_ref = &mut core; 
-                    let is_offerer = local_player_index != 0;
+                    let is_offerer = local_player_index != 1;
                     // Call display_health_state with the necessary parameters
                     display_health_state(core_ref, is_offerer);
-                }
+                     // Search for health values that start at 1250
+                    // Search for health values that start at 1250
+                    // let health_addresses = search_all_health_values(core_ref, 1450);
+
+                    // // Access the global health addresses map without using unwrap()
+                    // let mut health_map = HEALTH_ADDRESSES.lock();
+
+                    // // Update the tracked health addresses with new potential addresses
+                    // for addr in &health_addresses {
+                    //     // Initialize address in the map if not already present
+                    //     health_map.entry(*addr).or_insert(1250);
+                    // }
+
+                    // // Check the current values of all tracked addresses
+                    // health_map.retain(|&addr, last_value| {
+                    //     let current_value = core_ref.raw_read_16(addr, -1);
+
+                    //     // Check if the health value changed as expected
+                    //     if current_value != *last_value {
+                    //         println!(
+                    //             "Health value change detected at address 0x{:08X}: {} -> {}",
+                    //             addr, last_value, current_value
+                    //         );
+
+                    //         // Update the last known value for this address
+                    //         *last_value = current_value;
+
+                    //         // Return true to keep this address in the list if the current value is plausible
+                    //         // Here, we check if it's a reasonable health value (e.g., less than 1250)
+                    //         return current_value <= 1450;
+                    //     }
+
+                    //     // Retain address if no change occurred, waiting for a potential change
+                    //     true
+                    // });
+
+                    // // Output remaining potential health addresses
+                    // println!("Potential health addresses after filtering:");
+                    // for (addr, value) in &*health_map {
+                    //     println!("Address: 0x{:08X}, Current Value: {}", addr, value);
+                    // }
+                    }
             }
         });
 
