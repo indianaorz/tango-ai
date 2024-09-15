@@ -3,11 +3,12 @@ import os
 import json
 import glob
 import torch  # Import torch to load .pt files
+import numpy as np  # Import numpy for type conversion if needed
 
 app = Flask(__name__)
 
 TRAINING_DATA_DIR = 'training_data'
-TRAINING_CACHE_DIR = 'training_cache'  # Add the cache directory path
+TRAINING_CACHE_DIR = 'training_cache'  # Ensure this path is correct
 
 @app.route('/')
 def index():
@@ -32,6 +33,7 @@ def frame_data(folder_name, frame_index):
 
     # Get list of JSON files sorted by timestamp in filenames
     json_files = sorted(glob.glob(os.path.join(folder_path, '*.json')))
+    json_files = [f for f in json_files if not os.path.basename(f) == 'winner.json']
     total_frames = len(json_files)
     if frame_index < 0 or frame_index >= total_frames:
         return "Frame index out of range", 404
@@ -46,8 +48,12 @@ def frame_data(folder_name, frame_index):
     is_winner = None
     if os.path.exists(winner_file):
         with open(winner_file, 'r') as f:
-            winner_data = json.load(f)
-            is_winner = winner_data.get('is_winner', None)  # Adjust key based on winner.json structure
+            try:
+                winner_data = json.load(f)
+                is_winner = winner_data.get('is_winner', None)  # Adjust key based on winner.json structure
+            except json.JSONDecodeError:
+                print(f"Invalid JSON format in {winner_file}, skipping this folder.")
+                return "Invalid winner.json format", 400
 
     # Initialize variables to track next reward and punishment
     next_reward = None
@@ -59,7 +65,11 @@ def frame_data(folder_name, frame_index):
     for i in range(frame_index + 1, total_frames):
         next_frame_file = json_files[i]
         with open(next_frame_file, 'r') as f:
-            next_data = json.load(f)
+            try:
+                next_data = json.load(f)
+            except json.JSONDecodeError:
+                print(f"Invalid JSON format in {next_frame_file}, skipping this frame.")
+                continue  # Skip this frame due to invalid JSON
 
         # Find the next reward if not already found
         if next_reward is None and next_data.get('reward') is not None:
@@ -81,12 +91,19 @@ def frame_data(folder_name, frame_index):
     pt_file_path = os.path.join(cache_folder_path, pt_file_name)
 
     if os.path.exists(pt_file_path):
-        sample = torch.load(pt_file_path)
-        # Extract net_reward and input tensor
-        pt_net_reward = sample.get('net_reward')
-        input_tensor = sample.get('input')  # This is a tensor
-        # Convert input_tensor to list or string to send in JSON
-        input_tensor_list = input_tensor.tolist()
+        try:
+            sample = torch.load(pt_file_path, map_location='cpu')  # Ensure compatibility
+            # Extract net_reward and input tensor
+            pt_net_reward = sample.get('net_reward')
+            input_tensor = sample.get('input')  # This is a tensor
+
+            # Convert to serializable types
+            pt_net_reward = float(pt_net_reward) if pt_net_reward is not None else None
+            input_tensor_list = input_tensor.tolist() if input_tensor is not None else None
+        except Exception as e:
+            print(f"Error loading .pt file {pt_file_path}: {e}")
+            pt_net_reward = None
+            input_tensor_list = None
     else:
         pt_net_reward = None
         input_tensor_list = None
@@ -95,10 +112,10 @@ def frame_data(folder_name, frame_index):
     response_data = {
         'current_frame': frame_index,
         'total_frames': total_frames,
-        'image_path': current_data['image_path'],
-        'input': current_data['input'],
-        'reward': current_data.get('reward'),
-        'punishment': current_data.get('punishment'),
+        'image_path': current_data.get('image_path', ''),
+        'input': current_data.get('input', ''),
+        'reward': current_data.get('reward', None),
+        'punishment': current_data.get('punishment', None),
         'next_reward': {
             'value': next_reward,
             'frames_ahead': frames_ahead_reward
@@ -111,6 +128,7 @@ def frame_data(folder_name, frame_index):
         'pt_net_reward': pt_net_reward,  # Add net_reward from .pt file
         'pt_input_tensor': input_tensor_list  # Add input tensor from .pt file
     }
+
     return jsonify(response_data)
 
 @app.route('/training_data/<path:filename>')
