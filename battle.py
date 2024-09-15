@@ -181,7 +181,7 @@ async def receive_messages(reader, port, training_data_dir):
                         # Extract numeric value from "damage: 1" format
                         try:
                             current_reward = int(details.split(":")[1].strip())
-                            print(f"Received reward message: {current_reward}")
+                            # print(f"Received reward message: {current_reward}")
                         except ValueError:
                             print(f"Failed to parse reward message: {details}")
 
@@ -189,7 +189,7 @@ async def receive_messages(reader, port, training_data_dir):
                         # Extract numeric value from "damage: 1" format
                         try:
                             current_punishment = int(details.split(":")[1].strip())
-                            print(f"Received punishment message: {current_punishment}")
+                            # print(f"Received punishment message: {current_punishment}")
                         except ValueError:
                             print(f"Failed to parse punishment message: {details}")
                     elif event == "winner":

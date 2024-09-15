@@ -763,7 +763,7 @@ impl Session {
 
                         // Read player health directly
                         let player_health = core_ref.raw_read_16(player_health_address, segment);
-                        println!("Player Health: {}", player_health);
+                        // println!("Player Health: {}", player_health);
                         //break out if value is 0
                         if player_health == 0 || player_health > 4000{
                             return;
@@ -772,10 +772,10 @@ impl Session {
                         // Log values for all possible opponent addresses
                         for &address in &possible_addresses {
                             let current_value = core_ref.raw_read_16(address, segment);
-                            println!(
-                                "Possible Opponent Address: 0x{:08X}, Value: {}",
-                                address, current_value
-                            );
+                            // println!(
+                            //     "Possible Opponent Address: 0x{:08X}, Value: {}",
+                            //     address, current_value
+                            // );
 
                             // If the value isn't equal to the player's health, it's considered the opponent's health
                             if current_value != player_health {
@@ -797,10 +797,10 @@ impl Session {
                         
                         for &address in &possible_addresses {
                             let current_value = core_ref.raw_read_16(address, segment);
-                            println!(
-                                "Possible Player Address: 0x{:08X}, Value: {}",
-                                address, current_value
-                            );
+                            // println!(
+                            //     "Possible Player Address: 0x{:08X}, Value: {}",
+                            //     address, current_value
+                            // );
                             if current_value != opponent_health{
                                 *PLAYER_HEALTH_ADDRESS.lock() = Some(address);
                                 break;
