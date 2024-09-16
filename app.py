@@ -4,11 +4,26 @@ import json
 import glob
 import torch  # Import torch to load .pt files
 import numpy as np  # Import numpy for type conversion if needed
+from PIL import Image  # Import PIL for image loading
+from train import GameInputPredictor  # Import the model class
 
 app = Flask(__name__)
 
 TRAINING_DATA_DIR = 'training_data'
 TRAINING_CACHE_DIR = 'training_cache'  # Ensure this path is correct
+
+model = None
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+def load_model(checkpoint_path, image_memory=1):
+    global model
+    model = GameInputPredictor(image_memory=image_memory).to(device)
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+    print(f"Model loaded from {checkpoint_path}")
+
 
 @app.route('/')
 def index():
@@ -50,7 +65,7 @@ def frame_data(folder_name, frame_index):
         with open(winner_file, 'r') as f:
             try:
                 winner_data = json.load(f)
-                is_winner = winner_data.get('is_winner', None)  # Adjust key based on winner.json structure
+                is_winner = winner_data.get('is_winner', None)
             except json.JSONDecodeError:
                 print(f"Invalid JSON format in {winner_file}, skipping this folder.")
                 return "Invalid winner.json format", 400
@@ -108,7 +123,7 @@ def frame_data(folder_name, frame_index):
         pt_net_reward = None
         input_tensor_list = None
 
-    # Prepare response data
+    # Prepare response data without running inference
     response_data = {
         'current_frame': frame_index,
         'total_frames': total_frames,
@@ -126,14 +141,65 @@ def frame_data(folder_name, frame_index):
         } if next_punishment is not None else None,
         'winner': is_winner,  # Include the winner status from winner.json
         'pt_net_reward': pt_net_reward,  # Add net_reward from .pt file
-        'pt_input_tensor': input_tensor_list  # Add input tensor from .pt file
+        'pt_input_tensor': input_tensor_list,  # Add input tensor from .pt file
     }
 
     return jsonify(response_data)
+
+# New route to handle inference on-demand
+@app.route('/folder/<folder_name>/frame/<int:frame_index>/inference')
+def frame_inference(folder_name, frame_index):
+    folder_path = os.path.join(TRAINING_DATA_DIR, folder_name)
+    if not os.path.exists(folder_path):
+        return "Folder not found", 404
+
+    # Construct the frame JSON file path correctly
+    json_files = sorted(glob.glob(os.path.join(folder_path, '*.json')))
+    json_files = [f for f in json_files if not os.path.basename(f) == 'winner.json']
+    if frame_index < 0 or frame_index >= len(json_files):
+        return "Frame index out of range", 404
+
+    current_frame_file = json_files[frame_index]
+    if not os.path.exists(current_frame_file):
+        return "Frame data not found", 404
+
+    with open(current_frame_file, 'r') as f:
+        current_data = json.load(f)
+
+    # Ensure the image path is correct and exists
+    image_path = os.path.join(folder_path, os.path.basename(current_data['image_path']))
+    if not os.path.exists(image_path):
+        return "Image file not found", 404
+
+    # Run inference using the image
+    predicted_input_str = None
+    if model is not None:
+        image = Image.open(image_path).convert('RGB')
+        image = image.resize((240, 160))  # Ensure the image size is (240,160)
+        image_np = np.array(image)
+        image_tensor = torch.tensor(image_np, dtype=torch.float32).permute(2, 0, 1) / 255.0  # Shape: (3, 160, 240)
+        image_tensor = image_tensor.unsqueeze(0).to(device)  # Add batch dimension
+        with torch.no_grad():
+            outputs = model(image_tensor)
+            probs = torch.sigmoid(outputs)
+            probs = probs.cpu().numpy()[0]
+            predicted_inputs = (probs >= 0.5).astype(int)
+            predicted_input_str = ''.join(map(str, predicted_inputs))
+
+    # Prepare response data
+    response_data = {
+        'model_prediction': predicted_input_str,
+    }
+
+    return jsonify(response_data)
+
 
 @app.route('/training_data/<path:filename>')
 def training_data_files(filename):
     return send_from_directory(TRAINING_DATA_DIR, filename)
 
 if __name__ == '__main__':
+    # Load the model
+    checkpoint_path = 'checkpoints/checkpoint_epoch_10.pt'  # Adjust the path
+    load_model(checkpoint_path, image_memory=1)
     app.run(debug=True)

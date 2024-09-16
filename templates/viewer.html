@@ -25,6 +25,7 @@
         <p>Frame: <span id="frame-number"></span> / <span id="total-frames"></span></p>
         <p>Input (Metadata): <span id="input-data"></span></p>
         <p>Input (Cache): <span id="input-data-cache"></span></p>
+        <p>Model Prediction: <span id="model-prediction"></span></p>
         <p>Reward (Metadata): <span id="reward-data"></span></p>
         <p>Punishment (Metadata): <span id="punishment-data"></span></p>
         <p>Net Reward (Cache): <span id="net-reward-cache"></span></p>
@@ -39,6 +40,7 @@
     <div id="navigation">
         <button id="prev-button">Previous Frame</button>
         <button id="next-button">Next Frame</button>
+        <button id="inference-button">Run Inference</button> <!-- Button to trigger inference -->
     </div>
     <script>
         var folderName = "{{ folder_name }}";
@@ -92,7 +94,10 @@
                     // Update image and slider
                     document.getElementById('frame-image').src = '/' + data.image_path;
                     document.getElementById('frame-slider').value = currentFrame;
-    
+
+                    // Clear model prediction until inference is run
+                    document.getElementById('model-prediction').textContent = 'None';
+                    
                     // Set the slider max value if it's the first load
                     if (totalFrames > 0 && document.getElementById('frame-slider').max == "0") {
                         updateSliderMax(totalFrames);
@@ -102,7 +107,7 @@
                     console.error('Error loading frame data:', error);
                 });
         }
-    
+
         // Button event listeners
         document.getElementById('prev-button').addEventListener('click', function() {
             if (currentFrame > 0) {
@@ -114,6 +119,11 @@
             if (currentFrame < totalFrames - 1) {
                 loadFrame(currentFrame + 1);
             }
+        });
+
+        // Inference button event listener
+        document.getElementById('inference-button').addEventListener('click', function() {
+            runInference(currentFrame);
         });
     
         // Slider change event
@@ -133,6 +143,18 @@
                 }
             }
         });
+
+        // Function to run inference when button is clicked
+        function runInference(frameIndex) {
+            fetch(`/folder/${folderName}/frame/${frameIndex}/inference`)
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('model-prediction').textContent = data.model_prediction || 'None';
+                })
+                .catch(error => {
+                    console.error('Error running inference:', error);
+                });
+        }
     
         // Initial load
         loadFrame(0);
