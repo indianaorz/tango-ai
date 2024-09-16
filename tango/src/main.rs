@@ -436,40 +436,34 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                 }
                 
                // Process commands from the Python app
-               while let Ok(cmd) = input_rx.try_recv() {
-                // Debug log for received command
-                    println!("Received command from TCP: {:?}", cmd);
-                    //clear input state
+                while let Ok(cmd) = input_rx.try_recv() {
+                    // Debug log for received command
+                    // println!("Received command from TCP: {:?}", cmd);
+
+                    // Clear input state to release any previously pressed keys
                     input_state.clear_keys();
-                    
+
                     // Simulate keyboard input based on the command
                     match cmd.command_type.as_str() {
                         "key_press" => {
-                            if let Some(key) = map_key_to_physical_key(&cmd.key) {
-                                // Simulate a key press event
-                                handle_input_event(
-                                    &mut input_state,
-                                    &mut state,
-                                    key,
-                                    winit::event::ElementState::Pressed,
-                                    &mut next_config,
-                                );
-                            } else {
-                                println!("Unrecognized key for key press: {}", cmd.key);
-                            }
-                        }
-                        "key_release" => {
-                            if let Some(key) = map_key_to_physical_key(&cmd.key) {
-                                // Simulate a key release event
-                                handle_input_event(
-                                    &mut input_state,
-                                    &mut state,
-                                    key,
-                                    winit::event::ElementState::Released,
-                                    &mut next_config,
-                                );
-                            } else {
-                                println!("Unrecognized key for key release: {}", cmd.key);
+                            // println!("Key press command: {}", cmd.key);
+
+                            // Loop over each bit in the binary string and simulate key presses
+                            for (i, bit) in cmd.key.chars().rev().enumerate() {
+                                if bit == '1' {
+                                    if let Some(key) = map_bit_to_key(i) {
+                                        // Simulate a key press event for the active bits
+                                        handle_input_event(
+                                            &mut input_state,
+                                            &mut state,
+                                            key,
+                                            winit::event::ElementState::Pressed,
+                                            &mut next_config,
+                                        );
+                                    } else {
+                                        println!("Unrecognized key for bit position: {}", i);
+                                    }
+                                }
                             }
                         }
                         _ => {
@@ -477,6 +471,7 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                         }
                     }
                 }
+
             }
 
             _ => {}
@@ -601,8 +596,24 @@ fn map_key_to_physical_key(key: &str) -> Option<Key> {
     }
 }
 
+// Function to map bits to specific keys
+fn map_bit_to_key(bit: usize) -> Option<Key> {
+    match bit {
+        8 => Some(Key::A),        // 0000000100000000
+        7 => Some(Key::Down),     // 0000000010000000
+        6 => Some(Key::Up),       // 0000000001000000
+        5 => Some(Key::Left),     // 0000000000100000
+        4 => Some(Key::Right),    // 0000000000010000
+        1 => Some(Key::X),        // 0000000000000010
+        0 => Some(Key::Z),        // 0000000000000001
+        _ => None,
+    }
+}
+
 
 // Use this helper function to handle input consistently
+
+// Function to handle input events consistently
 fn handle_input_event(
     input_state: &mut input::State,
     state: &mut gui::State,
@@ -626,7 +637,6 @@ fn handle_input_event(
         }
     }
 }
-
 // Modify setup_tcp_listener to accept output_tx
 async fn setup_tcp_listener(
     port: u16,
@@ -740,7 +750,7 @@ async fn handle_tcp_client(
                                         _ => {
                                             // Handle other commands or send acknowledgment
                                             if tx.send(cmd.clone()).is_err() {
-                                                println!("Failed to send input command to event loop");
+                                                // println!("Failed to send input command to event loop");
                                             }
                                             let response = OutputMessage {
                                                 event: "command_received".to_string(),

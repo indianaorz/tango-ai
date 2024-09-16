@@ -1,3 +1,4 @@
+#train.py
 import os
 import torch
 import torch.nn as nn
@@ -9,11 +10,12 @@ from tqdm import tqdm
 import random
 from torch.cuda.amp import GradScaler, autocast
 import gc  # Import garbage collector
+from utils import get_exponential_sample, get_image_memory  # Import the helper function
+
 
 class GameDataset(Dataset):
-    def __init__(self, cache_dir, image_memory=1, dir_indices=None,
+    def __init__(self, replay_dirs, image_memory=1,
                  preprocess=True, load_into_memory=False):
-        self.cache_dir = cache_dir
         self.image_memory = image_memory
         self.sample_paths = []
         self.data_in_memory = []
@@ -22,16 +24,9 @@ class GameDataset(Dataset):
         self.preprocess = preprocess
         self.load_into_memory = load_into_memory
 
-        all_replay_dirs = [os.path.join(cache_dir, d) for d in os.listdir(
-            cache_dir) if os.path.isdir(os.path.join(cache_dir, d))]
-        all_replay_dirs.sort()
-
-        # Use only the specified subset of directories
-        if dir_indices is not None:
-            replay_dirs = [all_replay_dirs[i] for i in dir_indices
-                           if i < len(all_replay_dirs)]
-        else:
-            replay_dirs = all_replay_dirs
+        if not replay_dirs:
+            print("No directories provided to GameDataset.")
+            return
 
         # Top-level progress bar for replay directories
         outer_pbar = tqdm(replay_dirs, desc="Initializing Dataset",
@@ -51,108 +46,182 @@ class GameDataset(Dataset):
             # Preprocess if flag is True
             if self.preprocess:
                 for idx in pt_progress:
-                    if idx - image_memory + 1 >= 0:
-                        sample_pt_files = pt_files[idx - image_memory + 1: idx + 1]
-                        try:
-                            # Load net_reward from the last file only
-                            sample = torch.load(sample_pt_files[-1],
-                                                map_location='cpu')
-                            net_reward = sample['net_reward']
-                            self.net_reward_min = min(self.net_reward_min,
-                                                      net_reward)
-                            self.net_reward_max = max(self.net_reward_max,
-                                                      net_reward)
-                            sample_info = {
-                                'pt_files': sample_pt_files,
-                                'net_reward': net_reward
-                            }
-                            self.sample_paths.append(sample_info)
+                    # Calculate exponentially spaced indices
+                    sample_pt_files = self.get_exponential_sample(pt_files, idx)
+                    if not sample_pt_files:
+                        continue  # Skip if insufficient frames
 
-                            # If loading into memory, load all samples now
-                            if self.load_into_memory:
-                                loaded_samples = [torch.load(file,
-                                                  map_location='cpu')
-                                                  for file in sample_pt_files]
-                                self.data_in_memory.append((loaded_samples,
-                                                            net_reward))
-                        except Exception as e:
-                            print(f"Error loading {sample_pt_files[-1]}: {e}")
-                pt_progress.close()
-            else:
-                for idx in range(image_memory - 1, num_samples):
-                    sample_info = {'pt_files': pt_files[idx - image_memory + 1:
-                                                        idx + 1]}
-                    self.sample_paths.append(sample_info)
-                    # Load into memory if specified
-                    if self.load_into_memory:
-                        loaded_samples = [torch.load(file, map_location='cpu')
-                                          for file in sample_info['pt_files']]
-                        net_reward = loaded_samples[-1]['net_reward']
+                    try:
+                        # Load net_reward from the last file only
+                        sample = torch.load(sample_pt_files[-1],
+                                            map_location='cpu')
+                        net_reward = sample['net_reward']
                         self.net_reward_min = min(self.net_reward_min,
                                                   net_reward)
                         self.net_reward_max = max(self.net_reward_max,
                                                   net_reward)
-                        self.data_in_memory.append((loaded_samples,
-                                                    net_reward))
+                        sample_info = {
+                            'pt_files': sample_pt_files,
+                            'net_reward': net_reward
+                        }
+                        self.sample_paths.append(sample_info)
+
+                        # If loading into memory, load all samples now
+                        if self.load_into_memory:
+                            loaded_samples = [torch.load(file,
+                                                      map_location='cpu')
+                                              for file in sample_pt_files]
+                            self.data_in_memory.append((loaded_samples,
+                                                        net_reward))
+                    except Exception as e:
+                        print(f"Error loading {sample_pt_files[-1]}: {e}")
+                pt_progress.close()
+            else:
+                for idx in range(self.image_memory - 1, num_samples):
+                    sample_pt_files = self.get_exponential_sample(pt_files, idx)
+                    if not sample_pt_files:
+                        continue  # Skip if insufficient frames
+
+                    sample_info = {'pt_files': sample_pt_files}
+                    self.sample_paths.append(sample_info)
+                    # Load into memory if specified
+                    if self.load_into_memory:
+                        try:
+                            loaded_samples = [torch.load(file, map_location='cpu')
+                                              for file in sample_pt_files]
+                            net_reward = loaded_samples[-1]['net_reward']
+                            self.net_reward_min = min(self.net_reward_min,
+                                                      net_reward)
+                            self.net_reward_max = max(self.net_reward_max,
+                                                      net_reward)
+                            self.data_in_memory.append((loaded_samples,
+                                                        net_reward))
+                        except Exception as e:
+                            print(f"Error loading files in subset: {e}")
 
         outer_pbar.close()
         print(f"Total samples: {len(self.sample_paths)}")
         print(f"net_reward_min: {self.net_reward_min}, "
               f"net_reward_max: {self.net_reward_max}")
 
+    def get_exponential_sample(self, pt_files, current_idx):
+        """
+        Returns a list of .pt file paths sampled exponentially from the current index.
+        Ensures exactly `image_memory` frames by allowing duplicates when necessary.
+        """
+        indices = [current_idx]
+        step = 1
+        while len(indices) < self.image_memory and current_idx - step >= 0:
+            indices.append(current_idx - step)
+            step *= 2
+
+        # If not enough frames, pad with the earliest frame (index 0)
+        while len(indices) < self.image_memory:
+            indices.append(0)
+
+        # If more frames than needed, truncate the list
+        if len(indices) > self.image_memory:
+            indices = indices[:self.image_memory]
+
+        # Sort the indices to have chronological order (oldest to newest)
+        indices_sorted = sorted(indices)
+
+        # Fetch the corresponding file paths
+        sample_pt_files = [pt_files[i] for i in indices_sorted]
+
+        # Debugging statement
+        # print(f"Selected indices for current_idx {current_idx}: {indices_sorted}")
+        return sample_pt_files
+
+
     def __len__(self):
         return len(self.sample_paths)
 
     def __getitem__(self, idx):
-        if self.load_into_memory:
-            # Access data directly from memory
-            loaded_samples, net_reward = self.data_in_memory[idx]
-            image_tensors = [sample['image'] for sample in loaded_samples]
-            input_tensors = [sample['input'] for sample in loaded_samples]
-        else:
-            # Load data from disk
-            sample_info = self.sample_paths[idx]
-            image_tensors = []
-            input_tensors = []
-            for pt_file in sample_info['pt_files']:
-                sample = torch.load(pt_file)
-                image_tensors.append(sample['image'])
-                input_tensors.append(sample['input'])
-            net_reward = sample_info.get('net_reward', 0.0)
+        try:
+            if self.load_into_memory and idx < len(self.data_in_memory):
+                # Access data directly from memory
+                loaded_samples, net_reward = self.data_in_memory[idx]
+                image_tensors = [sample['image'] for sample in loaded_samples]
+                input_tensors = [sample['input'] for sample in loaded_samples]
+            else:
+                # Load data from disk
+                sample_info = self.sample_paths[idx]
+                image_tensors = []
+                input_tensors = []
+                for pt_file in sample_info['pt_files']:
+                    try:
+                        sample = torch.load(pt_file)
+                        image_tensors.append(sample['image'])
+                        input_tensors.append(sample['input'])
+                    except Exception as e:
+                        print(f"Error loading file {pt_file}: {e}")
+                        raise
 
-        # Stack images along the channel dimension
-        if self.image_memory == 1:
-            image_tensor = image_tensors[0]
-            input_tensor = input_tensors[0]
-        else:
-            # Concatenate images along the channel dimension
-            image_tensor = torch.cat(image_tensors, dim=0)
+                net_reward = sample_info.get('net_reward', 0.0)
+
+            # Ensure the number of images matches image_memory
+            if len(image_tensors) != self.image_memory:
+                print(f"Expected {self.image_memory} images but got {len(image_tensors)} for index {idx}")
+                raise ValueError(f"Image count mismatch for index {idx}")
+
+            # Stack images along the temporal dimension
+            if self.image_memory == 1:
+                image_tensor = image_tensors[0].unsqueeze(1)  # Add depth dimension at dim=1
+                input_tensor = input_tensors[0]
+            else:
+                # Stack images along the depth dimension
+                image_tensor = torch.stack(image_tensors, dim=1)  # (channels, depth, height, width)
+
+            # Optionally, print the shape for debugging
+            # print(f"Image tensor shape: {image_tensor.shape}")
+
             input_tensor = input_tensors[-1]
+            net_reward_tensor = torch.tensor(net_reward, dtype=torch.float32)
 
-        net_reward_tensor = torch.tensor(net_reward, dtype=torch.float32)
+            return image_tensor, input_tensor, net_reward_tensor
 
-        return image_tensor, input_tensor, net_reward_tensor
+        except Exception as e:
+            print(f"Error in __getitem__ at index {idx}: {e}")
+            raise
+
+
+
+import torch
+import torch.nn as nn
+import numpy as np
 
 class GameInputPredictor(nn.Module):
     def __init__(self, image_memory=1):
         super(GameInputPredictor, self).__init__()
-        in_channels = 3 * image_memory
+        self.image_memory = image_memory
+        # Updated to use 3D convolutions to capture spatiotemporal features
         self.conv_layers = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=5, stride=2, padding=2),
+            nn.Conv3d(3, 32, kernel_size=(3, 5, 5), stride=(1, 2, 2), padding=(1, 2, 2)),
+            nn.BatchNorm3d(32),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=5, stride=2, padding=2),
+            nn.Conv3d(32, 64, kernel_size=(3, 5, 5), stride=(1, 2, 2), padding=(1, 2, 2)),
+            nn.BatchNorm3d(64),
             nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=5, stride=2, padding=2),
+            nn.Conv3d(64, 128, kernel_size=(3, 5, 5), stride=(1, 2, 2), padding=(1, 2, 2)),
+            nn.BatchNorm3d(128),
             nn.ReLU(),
-            nn.Conv2d(128, 256, kernel_size=5, stride=2, padding=2),
+            nn.Conv3d(128, 256, kernel_size=(3, 3, 3), stride=(1, 2, 2), padding=(1, 1, 1)),
+            nn.BatchNorm3d(256),
             nn.ReLU(),
         )
         self._to_linear = None
-        self._get_conv_output_shape((in_channels, 160, 240))
+        self._get_conv_output_shape((3, image_memory, 160, 240))  # Input shape based on (channels, depth, height, width)
+        
+        # LSTM layer to capture temporal dependencies in the flattened output
+        self.lstm = nn.LSTM(input_size=self._to_linear, hidden_size=512, num_layers=1, batch_first=True)
+        
+        # Fully connected layers
         self.fc_layers = nn.Sequential(
-            nn.Linear(self._to_linear, 512),
+            nn.Linear(512, 256),
             nn.ReLU(),
-            nn.Linear(512, 16),
+            nn.Dropout(p=0.5),
+            nn.Linear(256, 16),  # Assuming 16 possible actions
         )
 
     def _get_conv_output_shape(self, shape):
@@ -164,8 +233,11 @@ class GameInputPredictor(nn.Module):
         print(f"Flattened size: {self._to_linear}")
 
     def forward(self, x):
+        # Expected input shape: (batch_size, channels=3, depth=image_memory, height=160, width=240)
         x = self.conv_layers(x)
-        x = x.view(-1, self._to_linear)
+        x = x.view(x.size(0), -1, self._to_linear)  # Flatten while keeping batch and sequence dimensions intact
+        x, _ = self.lstm(x)  # Process through LSTM to capture temporal relationships
+        x = x[:, -1, :]  # Use the last output from the LSTM as it represents the processed sequence
         x = self.fc_layers(x)
         return x
 
@@ -186,10 +258,9 @@ def train_model(model, train_loader, optimizer, criterion, device,
         # Create the progress bar for the epoch
         epoch_progress = tqdm(train_loader,
                               desc=f"Epoch {epoch+1}/{num_epochs}",
-                              leave=True, position=overall_progress_position+1)
+                              leave=False, position=overall_progress_position+1)
 
-        for batch_idx, (images, inputs, net_rewards) in enumerate(
-                epoch_progress):
+        for batch_idx, (images, inputs, net_rewards) in enumerate(epoch_progress):
             images = images.to(device)
             inputs = inputs.to(device).clamp(0, 1)
             net_rewards = net_rewards.to(device)
@@ -201,14 +272,16 @@ def train_model(model, train_loader, optimizer, criterion, device,
 
                 # Compute loss per sample
                 loss = criterion(outputs, inputs)
-
                 loss_per_sample = loss.mean(dim=1)
 
+                # Compute sample weights
                 sample_weights = (net_rewards - net_reward_min) / (
                     net_reward_max - net_reward_min + 1e-6)
 
+                # Multiply loss per sample by sample weights
                 weighted_loss = loss_per_sample * sample_weights
 
+                # Compute mean loss over batch
                 loss = weighted_loss.mean()
 
             scaler.scale(loss).backward()
@@ -241,6 +314,7 @@ def train_model(model, train_loader, optimizer, criterion, device,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }, checkpoint_path)
+            print(f"Saved checkpoint: {checkpoint_path}")
 
             # Remove old checkpoints
             existing_checkpoints = sorted(
@@ -255,17 +329,17 @@ def train_model(model, train_loader, optimizer, criterion, device,
 
 def main():
     cache_dir = 'training_cache'
-    checkpoint_dir = 'checkpoints'
-    image_memory = 1
+    image_memory = get_image_memory() #10 is max  # Exponentially spaced frames
+    checkpoint_dir = 'checkpoints' + str(image_memory)
     batch_size = 64
     learning_rate = 1e-4
     max_checkpoints = 5
-    max_dirs = 10000  # Adjust based on your dataset
-    subset_size = 10
-    num_epochs_per_subset = 25
-    checkpoint_freq = 5
-    preprocess = False
-    load_into_memory = True
+    subset_size = 1  # Number of directories per subset
+    num_epochs_per_subset = 10  # Number of epochs per subset
+    checkpoint_freq = 50 # Save a checkpoint every 5 epochs
+    num_full_epochs = 3  # Number of complete passes over all directories
+    preprocess = False  # Set to False to skip preprocessing the dataset
+    load_into_memory = True  # Set to True to load dataset into memory
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -289,9 +363,22 @@ def main():
     else:
         print("No checkpoint found, starting from scratch.")
 
-    # Calculate total iterations needed to cover all directories
-    total_subsets = (max_dirs + subset_size - 1) // subset_size  # Ceiling div
-    total_epochs = total_subsets * num_epochs_per_subset
+    # List all replay directories
+    all_replay_dirs = [os.path.join(cache_dir, d) for d in os.listdir(
+        cache_dir) if os.path.isdir(os.path.join(cache_dir, d))]
+    all_replay_dirs.sort()
+    num_total_dirs = len(all_replay_dirs)
+    print(f"Total replay directories: {num_total_dirs}")
+
+    if num_total_dirs == 0:
+        print("No directories found in the cache. Exiting.")
+        return
+
+    # Calculate total subsets per full epoch based on subset_size
+    subsets_per_full_epoch = (num_total_dirs + subset_size - 1) // subset_size  # Ceiling division
+
+    # Calculate total epochs based on full passes
+    total_epochs = num_full_epochs * subsets_per_full_epoch * num_epochs_per_subset
 
     # Keep track of total epochs trained
     total_epochs_trained = start_epoch
@@ -301,67 +388,85 @@ def main():
                             desc="Overall Training Progress",
                             unit="epoch", position=0, leave=True)
 
-    for subset_idx in range(total_subsets):
-        start_index = subset_idx * subset_size
-        end_index = min(start_index + subset_size, max_dirs)
-        dir_indices = list(range(start_index, end_index))
+    for full_epoch in range(num_full_epochs):
+        print(f"\nStarting full epoch {full_epoch + 1}/{num_full_epochs}")
 
-        # Initialize dataset with the subset of directories
-        dataset = GameDataset(
-            cache_dir,
-            image_memory=image_memory,
-            dir_indices=dir_indices,
-            preprocess=preprocess,
-            load_into_memory=load_into_memory
-        )
-        net_reward_min = dataset.net_reward_min
-        net_reward_max = dataset.net_reward_max
+        # Shuffle directories at the start of each full epoch if desired
+        random.shuffle(all_replay_dirs)
 
-        # Convert to torch tensors
-        net_reward_min = torch.tensor(net_reward_min,
-                                      dtype=torch.float32).to(device)
-        net_reward_max = torch.tensor(net_reward_max,
-                                      dtype=torch.float32).to(device)
-        if net_reward_max == net_reward_min:
-            print("Warning: net_reward_max == net_reward_min, "
-                  "setting sample_weights to 1")
-            net_reward_max = net_reward_min + 1e-6
+        # Divide directories into subsets
+        subsets = [
+            all_replay_dirs[i:i + subset_size]
+            for i in range(0, num_total_dirs, subset_size)
+        ]
 
-        train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
-                                  num_workers=4, pin_memory=True)
+        for subset_idx, subset_dirs in enumerate(subsets):
+            print(f"\nTraining on subset {subset_idx + 1}/{len(subsets)}: {', '.join([os.path.basename(d) for d in subset_dirs])}")
 
-        # Calculate the epochs to train on this subset
-        num_epochs = total_epochs_trained + num_epochs_per_subset
+            # Initialize dataset with the current subset of directories
+            dataset = GameDataset(
+                replay_dirs=subset_dirs,
+                image_memory=image_memory,
+                preprocess=preprocess,
+                load_into_memory=load_into_memory
+            )
 
-        train_model(
-            model,
-            train_loader,
-            optimizer,
-            criterion,
-            device,
-            num_epochs=num_epochs,
-            checkpoint_dir=checkpoint_dir,
-            checkpoint_freq=checkpoint_freq,
-            max_checkpoints=max_checkpoints,
-            start_epoch=total_epochs_trained,
-            net_reward_min=net_reward_min,
-            net_reward_max=net_reward_max,
-            overall_progress_position=overall_progress.pos
-        )
+            # Check if dataset has samples
+            if len(dataset) == 0:
+                print(f"Warning: No samples found in subset {subset_idx + 1}. Skipping.")
+                continue
 
-        # Update total epochs trained
-        total_epochs_trained += num_epochs_per_subset
+            net_reward_min = dataset.net_reward_min
+            net_reward_max = dataset.net_reward_max
 
-        # Update the overall progress
-        overall_progress.update(num_epochs_per_subset)
+            # Convert to torch tensors
+            net_reward_min = torch.tensor(net_reward_min,
+                                          dtype=torch.float32).to(device)
+            net_reward_max = torch.tensor(net_reward_max,
+                                          dtype=torch.float32).to(device)
+            if net_reward_max == net_reward_min:
+                print("Warning: net_reward_max == net_reward_min, "
+                      "setting sample_weights to 1")
+                net_reward_max = net_reward_min + 1e-6
 
-        # After training on current subset, free the dataset and loader
-        del dataset
-        del train_loader
-        torch.cuda.empty_cache()
-        gc.collect()
+            train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                                      num_workers=4, pin_memory=True)
+
+            # Calculate the epoch range for this subset
+            end_epoch = total_epochs_trained + num_epochs_per_subset
+
+            # Train on the current subset
+            train_model(
+                model,
+                train_loader,
+                optimizer,
+                criterion,
+                device,
+                num_epochs=end_epoch,
+                checkpoint_dir=checkpoint_dir,
+                checkpoint_freq=checkpoint_freq,
+                max_checkpoints=max_checkpoints,
+                start_epoch=total_epochs_trained,
+                net_reward_min=net_reward_min,
+                net_reward_max=net_reward_max,
+                overall_progress_position=0  # Position for progress bars
+            )
+
+            # Update total epochs trained
+            total_epochs_trained += num_epochs_per_subset
+
+            # Update the overall progress bar
+            overall_progress.update(num_epochs_per_subset)
+
+            # Free memory
+            del dataset
+            del train_loader
+            torch.cuda.empty_cache()
+            gc.collect()
 
     overall_progress.close()
+    print("Training completed successfully.")
 
+# Ensure that the main function is called when the script is run directly
 if __name__ == '__main__':
     main()

@@ -16,6 +16,13 @@ def process_replay(replay_dir):
     # Extract the replay name
     replay_name = os.path.basename(replay_dir)
     cache_dir = os.path.join(TRAINING_CACHE_DIR, replay_name)
+
+
+    # Check if the cache directory already exists and is non-empty
+    if os.path.exists(cache_dir) and os.listdir(cache_dir):
+        print(f"Cache already exists for {replay_name}, skipping this replay.")
+        return  # Skip processing this replay as it is already cached
+        
     os.makedirs(cache_dir, exist_ok=True)
     
     # Path to winner.json

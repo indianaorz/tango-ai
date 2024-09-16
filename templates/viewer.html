@@ -4,8 +4,8 @@
     <title>Viewer - {{ folder_name }}</title>
     <style>
         body { font-family: Arial, sans-serif; }
-        #image-container { text-align: center; }
-        #image-container img { max-width: 100%; height: auto; }
+        #carousel-container { text-align: center; margin-top: 20px; }
+        .carousel-image { max-width: 100%; height: auto; margin: 10px; }
         #metadata { margin-top: 20px; }
         #navigation { margin-top: 20px; text-align: center; }
         button, input[type="range"] { margin: 5px; }
@@ -13,14 +13,21 @@
         #slider-container { text-align: center; margin-top: 20px; }
         table { margin: 0 auto; border-collapse: collapse; }
         td, th { padding: 5px; border: 1px solid #ccc; }
+        #auto-inference-container { text-align: center; margin-top: 10px; }
+        .frame-group { display: flex; justify-content: center; flex-wrap: wrap; }
+        .frame-group img { margin: 5px; }
     </style>
 </head>
 <body>
     <a id="folder-link" href="/">&#8592; Back to Folders</a>
     <h1>Viewing Folder: {{ folder_name }}</h1>
-    <div id="image-container">
-        <img id="frame-image" src="" alt="Frame Image">
+    
+    <div id="carousel-container">
+        <div class="frame-group" id="frame-group">
+            <!-- Dynamically populated with multiple images -->
+        </div>
     </div>
+    
     <div id="metadata">
         <p>Frame: <span id="frame-number"></span> / <span id="total-frames"></span></p>
         <p>Input (Metadata): <span id="input-data"></span></p>
@@ -37,40 +44,52 @@
     <div id="slider-container">
         <input type="range" id="frame-slider" min="0" max="0" value="0" style="width: 80%;">
     </div>
+    
     <div id="navigation">
         <button id="prev-button">Previous Frame</button>
         <button id="next-button">Next Frame</button>
         <button id="inference-button">Run Inference</button> <!-- Button to trigger inference -->
     </div>
+
+    <!-- Auto-inference checkbox container -->
+    <div id="auto-inference-container">
+        <label><input type="checkbox" id="auto-inference-checkbox"> Auto-Inference</label>
+    </div>
+
     <script>
         var folderName = "{{ folder_name }}";
         var currentFrame = 0;
         var totalFrames = 0;
-    
+        var autoInference = false; // Flag for auto-inference
+        var imageMemory = JSON.parse('{{ image_memory | tojson | default(1) }}'); // Correctly pass image_memory from backend
+
+        console.log("Image Memory:", imageMemory); // Debugging
+
         function updateSliderMax(maxValue) {
             const slider = document.getElementById('frame-slider');
             slider.max = maxValue - 1;
             slider.disabled = false;  // Enable the slider once the max value is set
         }
-    
+
         function loadFrame(frameIndex) {
             fetch(`/folder/${folderName}/frame/${frameIndex}`)
                 .then(response => response.json())
                 .then(data => {
+                    console.log("Loaded Frame Data:", data); // Debugging
                     currentFrame = data.current_frame;
                     totalFrames = data.total_frames;
-    
+
                     // Update frame data
                     document.getElementById('frame-number').textContent = currentFrame + 1;
                     document.getElementById('total-frames').textContent = totalFrames;
                     document.getElementById('input-data').textContent = data.input;
                     document.getElementById('reward-data').textContent = data.reward !== null ? data.reward : 'None';
                     document.getElementById('punishment-data').textContent = data.punishment !== null ? data.punishment : 'None';
-    
+
                     // Update cache data
                     document.getElementById('net-reward-cache').textContent = data.pt_net_reward !== null ? data.pt_net_reward : 'None';
                     document.getElementById('input-data-cache').textContent = data.pt_input_tensor !== null ? data.pt_input_tensor.join('') : 'None';
-    
+
                     // Update next reward data
                     if (data.next_reward) {
                         document.getElementById('next-reward-data').textContent =
@@ -78,7 +97,7 @@
                     } else {
                         document.getElementById('next-reward-data').textContent = 'None';
                     }
-    
+
                     // Update next punishment data
                     if (data.next_punishment) {
                         document.getElementById('next-punishment-data').textContent =
@@ -86,13 +105,38 @@
                     } else {
                         document.getElementById('next-punishment-data').textContent = 'None';
                     }
-    
+
                     // Update winner status
                     const winnerText = data.winner === true ? "Yes" : data.winner === false ? "No" : "Undetermined";
                     document.getElementById('winner-status').textContent = winnerText;
-    
-                    // Update image and slider
-                    document.getElementById('frame-image').src = '/' + data.image_path;
+
+                    // Update images
+                    const frameGroup = document.getElementById('frame-group');
+                    frameGroup.innerHTML = ''; // Clear existing images
+
+                   // Load the sequence of images based on imageMemory
+                    for (let i = 0; i < imageMemory; i++) {
+                        // Adjust imgIndex to ensure it's within the range of available frames
+                        const imgIndex = i;//frameIndex - (imageMemory - 1) + i;
+
+                        // Ensure imgIndex stays within valid bounds of the frames array
+                        // Adjust indices if imgIndex is outside the bounds of frames length
+                        const adjustedIndex = Math.max(0, Math.min(imgIndex, data.frames.length - 1));
+
+                        // Use adjustedIndex to access data.frames safely
+                        const imgSrc = `../${data.frames[adjustedIndex].image_path}`;
+                        console.log("Image Source:", imgSrc); // Debugging - check the image path
+
+                        const img = document.createElement('img');
+                        img.src = imgSrc;
+                        img.alt = `Frame ${adjustedIndex + 1}`;
+                        img.className = 'carousel-image';
+                        frameGroup.appendChild(img);
+                    }
+
+
+
+                    // Update slider
                     document.getElementById('frame-slider').value = currentFrame;
 
                     // Clear model prediction until inference is run
@@ -101,6 +145,11 @@
                     // Set the slider max value if it's the first load
                     if (totalFrames > 0 && document.getElementById('frame-slider').max == "0") {
                         updateSliderMax(totalFrames);
+                    }
+
+                    // Automatically run inference if auto-inference is enabled
+                    if (autoInference) {
+                        runInference(currentFrame);
                     }
                 })
                 .catch(error => {
@@ -124,6 +173,11 @@
         // Inference button event listener
         document.getElementById('inference-button').addEventListener('click', function() {
             runInference(currentFrame);
+        });
+
+        // Auto-inference checkbox event listener
+        document.getElementById('auto-inference-checkbox').addEventListener('change', function() {
+            autoInference = this.checked;
         });
     
         // Slider change event
@@ -155,7 +209,7 @@
                     console.error('Error running inference:', error);
                 });
         }
-    
+
         // Initial load
         loadFrame(0);
     </script>

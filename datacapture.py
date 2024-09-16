@@ -9,14 +9,15 @@ from PIL import Image
 from io import BytesIO
 import sys
 import glob  # For file pattern matching
+import argparse  # For parsing command-line arguments
 
 # Path to the Tango AppImage
 APP_PATH = "./dist/tango-x86_64-linux.AppImage"
 
 # Paths
 REPLAYS_DIR = '/home/lee/Documents/Tango/replays'
-TRAINING_DATA_DIR = 'training_data'
-
+# TRAINING_DATA_DIR = 'training_data'
+TRAINING_DATA_DIR = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO'
 # Common environment variables
 env_common = os.environ.copy()
 env_common["INIT_LINK_CODE"] = "your_link_code"
@@ -30,8 +31,21 @@ def get_training_data_dir(replay_path):
     os.makedirs(training_data_dir, exist_ok=True)
     return training_data_dir
 
-# Function to get a list of unprocessed replays
-def get_unprocessed_replays():
+# Function to get a list of unprocessed replays with an optional maximum limit
+def get_unprocessed_replays(max_replays=None):
+    """
+    Retrieves a list of unprocessed replay files. Optionally limits the number
+    of replays returned based on the max_replays parameter.
+    
+    A replay is considered unprocessed if its corresponding training data directory
+    does not exist or if the winner status in winner.json is undecided.
+
+    Args:
+        max_replays (int, optional): Maximum number of replays to return. Defaults to None.
+        
+    Returns:
+        list: List of unprocessed replay file paths.
+    """
     # Get all replay files with 'bn6' in their name
     replay_files = glob.glob(os.path.join(REPLAYS_DIR, '*bn6*.tangoreplay'))
     
@@ -39,9 +53,36 @@ def get_unprocessed_replays():
     for replay_file in replay_files:
         replay_name = os.path.basename(replay_file).split('.')[0]
         training_data_dir = os.path.join(TRAINING_DATA_DIR, replay_name)
+        
+        # Check if the training data directory exists
         if not os.path.exists(training_data_dir):
+            # Directory doesn't exist, so it's unprocessed
             unprocessed_replays.append(replay_file)
+        else:
+            # Check if winner.json exists and if the winner status is undecided
+            winner_file = os.path.join(training_data_dir, 'winner.json')
+            if os.path.exists(winner_file):
+                try:
+                    with open(winner_file, 'r') as f:
+                        winner_data = json.load(f)
+                        is_winner = winner_data.get('is_winner', None)
+                        # Check if the winner status is undecided
+                        if is_winner is None:
+                            unprocessed_replays.append(replay_file)
+                except json.JSONDecodeError:
+                    # If winner.json is corrupted, consider the replay as unprocessed
+                    unprocessed_replays.append(replay_file)
+                    print(f"Invalid JSON format in {winner_file}, considering {replay_name} unprocessed.")
+            else:
+                # If winner.json does not exist, consider it processed (or handle differently if needed)
+                pass
+        
+        # Stop adding more replays if max_replays is reached
+        if max_replays is not None and len(unprocessed_replays) >= max_replays:
+            break
+
     return unprocessed_replays
+
 
 # Function to run the AppImage with specific ROM, SAVE paths, and PORT
 def run_instance(rom_path, save_path, port, replay_path):
@@ -56,6 +97,13 @@ def run_instance(rom_path, save_path, port, replay_path):
 
 # Function to start instances in batches
 def start_instances_in_batches(instances, batch_size=10):
+    """
+    Starts instances of the Tango AppImage in specified batch sizes.
+    
+    Args:
+        instances (list): List of instance configurations to run.
+        batch_size (int, optional): Number of instances to start per batch. Defaults to 10.
+    """
     total_instances = len(instances)
     for i in range(0, total_instances, batch_size):
         batch = instances[i:i+batch_size]
@@ -89,7 +137,6 @@ def save_image_from_base64(encoded_image, port, training_data_dir):
     filename = f"{port}_{int(time.time() * 1000)}.png"
     image_path = os.path.join(training_data_dir, filename)
     image.save(image_path)
-    # print(f"Saved image as {image_path}")
     return image_path
 
 # Function to save a game state as JSON
@@ -105,7 +152,6 @@ def save_game_state(image_path, input_binary, reward=None, punishment=None, trai
 
     with open(file_path, 'w') as f:
         json.dump(game_state, f)
-    # print(f"Saved game state to {file_path}")
 
 # Function to send input command to a specific instance
 async def send_input_command(writer, command):
@@ -113,9 +159,7 @@ async def send_input_command(writer, command):
         command_json = json.dumps(command)
         writer.write(command_json.encode() + b'\n')
         await writer.drain()
-        # print(f"Sent command: {command}")
     except (ConnectionResetError, BrokenPipeError):
-        # Connection has been closed; handle gracefully
         raise
     except Exception as e:
         print(f"Failed to send command: {e}")
@@ -150,6 +194,7 @@ async def receive_messages(reader, port, training_data_dir):
 
             while True:
                 try:
+                    # Look for JSON object termination
                     json_end_index = buffer.find('}\n')
                     if json_end_index == -1:
                         json_end_index = buffer.find('}')
@@ -165,10 +210,8 @@ async def receive_messages(reader, port, training_data_dir):
 
                     if event == "local_input":
                         current_input = int_to_binary_string(int(details))
-                        # print(f"Received local input: {current_input}")
 
                     elif event == "screen_image":
-                        # print(f"Received screen_image event for port {port}.")
                         image_path = save_image_from_base64(details, port, training_data_dir)
                         
                         # Save game state when an image is received
@@ -179,24 +222,18 @@ async def receive_messages(reader, port, training_data_dir):
                         current_punishment = None
 
                     elif event == "reward":
-                        # Extract numeric value from "damage: 1" format
                         try:
                             current_reward = int(details.split(":")[1].strip())
-                            # print(f"Received reward message: {current_reward}")
                         except ValueError:
                             print(f"Failed to parse reward message: {details}")
 
                     elif event == "punishment":
-                        # Extract numeric value from "damage: 1" format
                         try:
                             current_punishment = int(details.split(":")[1].strip())
-                            # print(f"Received punishment message: {current_punishment}")
                         except ValueError:
                             print(f"Failed to parse punishment message: {details}")
                     elif event == "winner":
-                        # Handle winner message, "true" means player won, "false" means player lost
                         player_won = details.lower() == "true"
-                        # print(f"Received winner message: Player won = {player_won}")
                         save_winner_status(training_data_dir, player_won)
 
                     else:
@@ -218,7 +255,6 @@ def save_winner_status(training_data_dir, player_won):
     file_path = os.path.join(training_data_dir, "winner.json")
     with open(file_path, 'w') as f:
         json.dump(winner_status, f)
-    # print(f"Saved winner status to {file_path}")
 
 # Function to handle connection to a specific instance and predict actions based on screen capture
 async def handle_connection(instance):
@@ -233,7 +269,7 @@ async def handle_connection(instance):
         receive_task = asyncio.create_task(receive_messages(reader, instance['port'], training_data_dir))
 
         # Set a delay to request images
-        image_request_interval = 0.01  # Adjust as needed
+        image_request_interval = 1 / 60.0 / 4.0  # seconds
 
         while not reader.at_eof():
             try:
@@ -269,16 +305,32 @@ async def handle_connection(instance):
 
 # Main function to start instances and handle inputs
 def main():
+    parser = argparse.ArgumentParser(description="Start Tango AppImage instances with a maximum number of replays.")
+    parser.add_argument('--max_replays', type=int, default=10,
+                        help='Maximum number of replays to process. If not set, all unprocessed replays will be processed.')
+    parser.add_argument('--batch_size', type=int, default=10,
+                        help='Number of instances to start per batch. Default is 10.')
+    parser.add_argument('--start_port', type=int, default=12345,
+                        help='Starting port number for instances. Default is 12345.')
+
+    args = parser.parse_args()
+
+    max_replays = args.max_replays
+    batch_size = args.batch_size
+    starting_port = args.start_port
+
     # Get the list of unprocessed replays
-    unprocessed_replays = get_unprocessed_replays()
+    unprocessed_replays = get_unprocessed_replays(max_replays)
 
     if not unprocessed_replays:
         print("No unprocessed replays found.")
         return
 
+    print(f"Found {len(unprocessed_replays)} unprocessed replays.")
+
     # Prepare instances
     instances = []
-    port = 12345  # Starting port number; adjust if needed
+    port = starting_port  # Starting port number; adjust if needed
 
     for replay_path in unprocessed_replays:
         replay_name = os.path.basename(replay_path).split('.')[0]
@@ -306,8 +358,10 @@ def main():
         print("No new instances to process.")
         return
 
+    print(f"Starting {len(instances)} instances.")
+
     # Start instances in batches
-    start_instances_in_batches(instances, batch_size=10)
+    start_instances_in_batches(instances, batch_size=batch_size)
 
 if __name__ == '__main__':
     try:

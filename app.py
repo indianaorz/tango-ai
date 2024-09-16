@@ -6,24 +6,31 @@ import torch  # Import torch to load .pt files
 import numpy as np  # Import numpy for type conversion if needed
 from PIL import Image  # Import PIL for image loading
 from train import GameInputPredictor  # Import the model class
+from utils import get_checkpoint_path, get_exponential_sample, get_image_memory
 
 app = Flask(__name__)
 
 TRAINING_DATA_DIR = 'training_data'
 TRAINING_CACHE_DIR = 'training_cache'  # Ensure this path is correct
 
+# Global configuration
+USE_MODEL = False  # Set to False to disable model loading and inference
+IMAGE_MEMORY = get_image_memory() # Adjust as needed or make dynamic
+
 model = None
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-
 def load_model(checkpoint_path, image_memory=1):
+    """Load the AI model if USE_MODEL is True."""
     global model
-    model = GameInputPredictor(image_memory=image_memory).to(device)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
-    print(f"Model loaded from {checkpoint_path}")
-
+    if USE_MODEL:
+        model = GameInputPredictor(image_memory=image_memory).to(device)
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()
+        print(f"Model loaded from {checkpoint_path}")
+    else:
+        print("Model loading skipped because USE_MODEL is set to False.")
 
 @app.route('/')
 def index():
@@ -38,7 +45,7 @@ def folder_view(folder_name):
     folder_path = os.path.join(TRAINING_DATA_DIR, folder_name)
     if not os.path.exists(folder_path):
         return "Folder not found", 404
-    return render_template('viewer.html', folder_name=folder_name)
+    return render_template('viewer.html', folder_name=folder_name, image_memory=IMAGE_MEMORY)
 
 @app.route('/folder/<folder_name>/frame/<int:frame_index>')
 def frame_data(folder_name, frame_index):
@@ -52,6 +59,30 @@ def frame_data(folder_name, frame_index):
     total_frames = len(json_files)
     if frame_index < 0 or frame_index >= total_frames:
         return "Frame index out of range", 404
+
+    # Calculate the start index based on image_memory
+    start_index = frame_index
+    # Get the sequence of frame indices
+    frame_indices = get_exponential_sample(list(range(total_frames)), frame_index, IMAGE_MEMORY)
+    print(frame_indices)
+    # If not enough frames, pad with the first frame
+    while len(frame_indices) < IMAGE_MEMORY:
+        frame_indices.insert(0, 0)
+
+    # Load frame data for the sequence
+    frames_data = []
+    for idx in frame_indices:
+        if idx >= total_frames:
+            idx = total_frames - 1  # Prevent out-of-range
+        frame_file = json_files[idx]
+        with open(frame_file, 'r') as f:
+            frame_data = json.load(f)
+            frames_data.append({
+                'image_path': frame_data.get('image_path', ''),
+                'input': frame_data.get('input', ''),
+                'reward': frame_data.get('reward', None),
+                'punishment': frame_data.get('punishment', None),
+            })
 
     # Load current frame data
     current_frame_file = json_files[frame_index]
@@ -127,7 +158,7 @@ def frame_data(folder_name, frame_index):
     response_data = {
         'current_frame': frame_index,
         'total_frames': total_frames,
-        'image_path': current_data.get('image_path', ''),
+        'frames': frames_data,  # List of frames based on image_memory
         'input': current_data.get('input', ''),
         'reward': current_data.get('reward', None),
         'punishment': current_data.get('punishment', None),
@@ -146,45 +177,86 @@ def frame_data(folder_name, frame_index):
 
     return jsonify(response_data)
 
+
 # New route to handle inference on-demand
 @app.route('/folder/<folder_name>/frame/<int:frame_index>/inference')
 def frame_inference(folder_name, frame_index):
+    if not USE_MODEL:
+        return jsonify({'error': 'Inference is disabled because USE_MODEL is set to False'}), 403
+
     folder_path = os.path.join(TRAINING_DATA_DIR, folder_name)
     if not os.path.exists(folder_path):
         return "Folder not found", 404
 
-    # Construct the frame JSON file path correctly
+    # Calculate the start index based on image_memory
+    start_index = frame_index - IMAGE_MEMORY + 1
+    if start_index < 0:
+        start_index = 0
+
+    # Get the sequence of frame indices
+    frame_indices = get_exponential_sample(list(range(total_frames)), frame_index, IMAGE_MEMORY)
+    
+    # If not enough frames, pad with the first frame
+    while len(frame_indices) < IMAGE_MEMORY:
+        frame_indices.insert(0, 0)
+
+    # Load frame data for the sequence
+    frames_data = []
     json_files = sorted(glob.glob(os.path.join(folder_path, '*.json')))
     json_files = [f for f in json_files if not os.path.basename(f) == 'winner.json']
-    if frame_index < 0 or frame_index >= len(json_files):
-        return "Frame index out of range", 404
+    total_frames = len(json_files)
 
-    current_frame_file = json_files[frame_index]
-    if not os.path.exists(current_frame_file):
-        return "Frame data not found", 404
+    for idx in frame_indices:
+        if idx >= total_frames:
+            idx = total_frames - 1  # Prevent out-of-range
+        frame_file = json_files[idx]
+        if not os.path.exists(frame_file):
+            return jsonify({'error': f"Frame file {idx} not found"}), 404
+        with open(frame_file, 'r') as f:
+            frame_data = json.load(f)
+            frames_data.append({
+                'image_path': frame_data.get('image_path', ''),
+                'input': frame_data.get('input', ''),
+                'reward': frame_data.get('reward', None),
+                'punishment': frame_data.get('punishment', None),
+            })
 
-    with open(current_frame_file, 'r') as f:
-        current_data = json.load(f)
+    # Load and preprocess images
+    image_paths = [os.path.join(folder_path, frame['image_path']) for frame in frames_data]
+    images = []
+    for path in image_paths:
+        if not os.path.exists(path):
+            print(f"Image file {path} not found.")
+            return jsonify({'error': f"Image file {path} not found"}), 404
+        try:
+            img = Image.open(path).convert('RGB')
+            images.append(img)
+        except Exception as e:
+            print(f"Error loading image {path}: {e}")
+            return jsonify({'error': f"Error loading image {path}"}), 500
 
-    # Ensure the image path is correct and exists
-    image_path = os.path.join(folder_path, os.path.basename(current_data['image_path']))
-    if not os.path.exists(image_path):
-        return "Image file not found", 404
-
-    # Run inference using the image
+    # Run inference using the sequence of images
     predicted_input_str = None
-    if model is not None:
-        image = Image.open(image_path).convert('RGB')
-        image = image.resize((240, 160))  # Ensure the image size is (240,160)
-        image_np = np.array(image)
-        image_tensor = torch.tensor(image_np, dtype=torch.float32).permute(2, 0, 1) / 255.0  # Shape: (3, 160, 240)
-        image_tensor = image_tensor.unsqueeze(0).to(device)  # Add batch dimension
-        with torch.no_grad():
-            outputs = model(image_tensor)
-            probs = torch.sigmoid(outputs)
-            probs = probs.cpu().numpy()[0]
-            predicted_inputs = (probs >= 0.5).astype(int)
-            predicted_input_str = ''.join(map(str, predicted_inputs))
+    if USE_MODEL and model is not None:
+        try:
+            from torchvision import transforms  # Ensure torchvision is imported
+            # Preprocess and stack frames
+            transform = transforms.Compose([
+                transforms.Resize((160, 240)),
+                transforms.ToTensor()
+            ])
+            preprocessed_frames = [transform(img) for img in images]
+            stacked_frames = torch.stack(preprocessed_frames, dim=1).unsqueeze(0).to(device)  # Shape: (1, 3, depth, H, W)
+
+            with torch.no_grad():
+                outputs = model(stacked_frames)
+                probs = torch.sigmoid(outputs)
+                probs = probs.cpu().numpy()[0]
+                predicted_inputs = (probs >= 0.01).astype(int)  # Adjust threshold if needed
+                predicted_input_str = ''.join(map(str, predicted_inputs))
+        except Exception as e:
+            print(f"Error during inference: {e}")
+            return jsonify({'error': 'Inference failed'}), 500
 
     # Prepare response data
     response_data = {
@@ -193,13 +265,18 @@ def frame_inference(folder_name, frame_index):
 
     return jsonify(response_data)
 
-
 @app.route('/training_data/<path:filename>')
 def training_data_files(filename):
     return send_from_directory(TRAINING_DATA_DIR, filename)
 
 if __name__ == '__main__':
-    # Load the model
-    checkpoint_path = 'checkpoints/checkpoint_epoch_10.pt'  # Adjust the path
-    load_model(checkpoint_path, image_memory=1)
+    # Load the model only if USE_MODEL is True
+    if USE_MODEL:
+        checkpoint_path = get_checkpoint_path()  # Adjust the path as needed
+        if checkpoint_path:
+            load_model(checkpoint_path, image_memory=IMAGE_MEMORY)
+        else:
+            print("No checkpoint found. Model not loaded.")
+    else:
+        print("Model loading skipped because USE_MODEL is set to False.")
     app.run(debug=True)
