@@ -39,18 +39,19 @@ INSTANCES = [
         'rom_path': 'bn6,0',
         'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
         'name': 'Instance 1',
+        'replay_path':'/home/lee/Documents/Tango/replays/lrtest.tangoreplay',
         # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
         'is_player': False  # Set to True if you don't want this instance to send inputs
     },
-    {
-        'address': '127.0.0.1',
-        'port': 12345,
-        'rom_path': 'bn6,0',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
-        'name': 'Instance 1',
-        # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
-        'is_player': False  # Set to True if you don't want this instance to send inputs
-    },
+    # {
+    #     'address': '127.0.0.1',
+    #     'port': 12345,
+    #     'rom_path': 'bn6,0',
+    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
+    #     'name': 'Instance 1',
+    #     # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
+    #     'is_player': False  # Set to True if you don't want this instance to send inputs
+    # },
     # {
     #     'address': '127.0.0.1',
     #     'port': 12346,
@@ -93,7 +94,7 @@ KEY_BIT_POSITIONS = {
     'RIGHT': 4,
     'X': 1,
     'Z': 0,
-    'S': 2
+    'S': 9
 }
 
 
@@ -130,7 +131,7 @@ IMAGE_MEMORY = get_image_memory() # Default to 1 if not set
 path = get_checkpoint_path(get_root_dir() + "/checkpoints",IMAGE_MEMORY)
 print(path)
 
-load_model(path, IMAGE_MEMORY)
+# load_model(path, IMAGE_MEMORY)
 
 # Initialize frame buffers and frame counters
 frame_buffers = {instance['port']: deque(maxlen=get_exponental_amount()**IMAGE_MEMORY) for instance in INSTANCES}
@@ -165,7 +166,7 @@ def get_training_data_dir(replay_path):
         training_data_dir = os.path.join("training_data", "generic_instance")
     os.makedirs(training_data_dir, exist_ok=True)
     return training_data_dir
-05
+
 # Function to run the AppImage with specific ROM, SAVE paths, and PORT
 def run_instance(rom_path, save_path, port, replay_path):
     env = env_common.copy()

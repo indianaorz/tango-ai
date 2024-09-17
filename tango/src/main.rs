@@ -605,7 +605,7 @@ fn map_bit_to_key(bit: usize) -> Option<Key> {
         6 => Some(Key::Up),       // 0000000001000000
         5 => Some(Key::Left),     // 0000000000100000
         4 => Some(Key::Right),    // 0000000000010000
-        3 => Some(Key::S),        // 0000000000000100 ???
+        9 => Some(Key::S),        // 0000001000000000 
         1 => Some(Key::X),        // 0000000000000010
         0 => Some(Key::Z),        // 0000000000000001
         _ => None,

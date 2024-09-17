@@ -4,7 +4,7 @@ import glob
 
 
 def get_root_dir():
-    return '../TANGO'#'/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO'
+    return '/home/lee/tango' #'../TANGO'#'/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO'
 
 def get_image_memory():
     return 1
