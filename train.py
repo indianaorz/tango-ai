@@ -10,14 +10,15 @@ from tqdm import tqdm
 import random
 from torch.cuda.amp import GradScaler, autocast
 import gc  # Import garbage collector
-from utils import get_exponential_sample, get_image_memory, get_checkpoint_path, get_exponental_amount  # Import the helper function
+from utils import get_exponential_sample, get_image_memory, get_checkpoint_path, get_exponental_amount, get_root_dir  # Import the helper function
 from cache_data import process_replay
 
 import shutil
 import wandb  # Import wandb
 
 # Define constants
-TEMP_DIR = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/temp'
+
+TEMP_DIR = get_root_dir() + '/temp'
 
 # Create temp dir if it doesn't exist
 if not os.path.exists(TEMP_DIR):
@@ -388,7 +389,7 @@ def train_model(model, train_loader, optimizer, criterion, device,
                 print(f"Removed old checkpoint: {oldest_checkpoint}")
 
 
-TRAINING_CACHE_DIR = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/training_cache'
+TRAINING_CACHE_DIR = get_root_dir() + '/training_cache'
 
 def main():
     # Initialize wandb
@@ -410,8 +411,8 @@ def main():
 
     cache_dir = TRAINING_CACHE_DIR
     image_memory = config.image_memory  # Use wandb config
-    checkpoint_dir = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/checkpoints'
-    raw_dir = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/training_data'
+    checkpoint_dir = get_root_dir() + '/checkpoints'
+    raw_dir = get_root_dir() + '/training_data'
     batch_size = config.batch_size
     learning_rate = config.learning_rate
     max_checkpoints = 5

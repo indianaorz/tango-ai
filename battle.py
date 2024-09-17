@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 import numpy as np  # Import numpy for type conversion if needed
 from PIL import Image  # Import PIL for image loading
 from train import GameInputPredictor  # Import the model class
-from utils import get_checkpoint_path, get_image_memory, get_exponential_sample,get_exponental_amount, get_threshold
+from utils import get_checkpoint_path, get_image_memory, get_exponential_sample,get_exponental_amount, get_threshold, get_root_dir
 import random
 from collections import deque  # Import deque for frame buffering
 
@@ -124,7 +124,7 @@ transform = transforms.Compose([
 # Define image_memory
 IMAGE_MEMORY = get_image_memory() # Default to 1 if not set
 
-path = get_checkpoint_path("/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/checkpoints",IMAGE_MEMORY)
+path = get_checkpoint_path(get_root_dir() + "/checkpoints",IMAGE_MEMORY)
 print(path)
 
 load_model(path, IMAGE_MEMORY)

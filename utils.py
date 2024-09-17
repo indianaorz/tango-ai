@@ -2,14 +2,20 @@
 import os
 import glob
 
+
+def get_root_dir():
+    return '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO'
+
 def get_image_memory():
     return 1
 
 def get_threshold():
     return 0.1
 
+
+default_checkpoint_path = get_root_dir() + '/checkpoints'
 #checkpoint path
-def get_checkpoint_path(checkpoint_dir = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/checkpoints', image_memory = 1):
+def get_checkpoint_path(checkpoint_dir = default_checkpoint_path, image_memory = 1):
     """
     Returns the path to the latest checkpoint in the given directory.
     """

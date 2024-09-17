@@ -11,6 +11,7 @@ from io import BytesIO
 import sys
 import glob  # For file pattern matching
 import argparse  # For parsing command-line arguments
+from utils import get_root_dir()
 
 # Path to the Tango AppImage
 APP_PATH = "./dist/tango-x86_64-linux.AppImage"
@@ -18,7 +19,7 @@ APP_PATH = "./dist/tango-x86_64-linux.AppImage"
 # Paths
 REPLAYS_DIR = '/home/lee/Documents/Tango/replays'
 # TRAINING_DATA_DIR = 'training_data'
-TRAINING_DATA_DIR = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/training_data'
+TRAINING_DATA_DIR = get_root_dir() + '/training_data'
 # Common environment variables
 env_common = os.environ.copy()
 env_common["INIT_LINK_CODE"] = "your_link_code"
