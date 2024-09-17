@@ -1,4 +1,4 @@
-#train.py
+# train.py
 import os
 import torch
 import torch.nn as nn
@@ -14,15 +14,19 @@ from utils import get_exponential_sample, get_image_memory, get_checkpoint_path,
 from cache_data import process_replay
 
 import shutil
+import wandb  # Import wandb
+
+# Define constants
 TEMP_DIR = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/temp'
-#create temp dir if it doesn't exist
+
+# Create temp dir if it doesn't exist
 if not os.path.exists(TEMP_DIR):
     os.makedirs(TEMP_DIR)
 
 class GameDataset(Dataset):
     def __init__(self, replay_dirs, image_memory=1,
                  preprocess=True, load_into_memory=False,
-                 raw_dir = None, is_raw=False):
+                 raw_dir=None, is_raw=False):
         self.image_memory = image_memory
         self.sample_paths = []
         self.data_in_memory = []
@@ -31,14 +35,12 @@ class GameDataset(Dataset):
         self.preprocess = preprocess
         self.load_into_memory = load_into_memory
 
-        
-        
         # Clear tmp dir, remove all subdirectories
         for f in os.listdir(TEMP_DIR):
             subdir_path = os.path.join(TEMP_DIR, f)
             if os.path.isdir(subdir_path):
                 shutil.rmtree(subdir_path)
-        
+
         if is_raw:
             for replay_dir in replay_dirs:
                 process_replay(replay_dir, output_dir=TEMP_DIR)
@@ -57,7 +59,7 @@ class GameDataset(Dataset):
             pt_files = sorted(glob.glob(os.path.join(replay_dir, '*.pt')))
             num_samples = len(pt_files)
 
-            #if the number of samples is > 18000, reduce the number of samples
+            # If the number of samples is > 18000, reduce the number of samples
             if num_samples > 18000:
                 pt_files = pt_files[::2]
                 num_samples = len(pt_files)
@@ -211,11 +213,6 @@ class GameDataset(Dataset):
             raise
 
 
-
-import torch
-import torch.nn as nn
-import numpy as np
-
 class GameInputPredictor(nn.Module):
     def __init__(self, image_memory=1):
         super(GameInputPredictor, self).__init__()
@@ -265,6 +262,7 @@ class GameInputPredictor(nn.Module):
         x = x[:, -1, :]  # Use the last output from the LSTM as it represents the processed sequence
         x = self.fc_layers(x)
         return x
+
 
 def train_model(model, train_loader, optimizer, criterion, device,
                 num_epochs, checkpoint_dir, checkpoint_freq,
@@ -325,11 +323,29 @@ def train_model(model, train_loader, optimizer, criterion, device,
                 'Avg Loss': f'{avg_loss:.6f}'
             })
 
+            # Log metrics to wandb
+            wandb.log({
+                'Train/Loss': loss.item(),
+                'Train/Avg_Loss': avg_loss,
+                'Train/Epoch': epoch + 1,
+                'Train/Batch': batch_idx + 1,
+            })
+
         epoch_progress.close()
 
         avg_epoch_loss = epoch_loss / num_batches
         print(f"Epoch {epoch+1}/{num_epochs}, Average Loss: {avg_epoch_loss}")
-        save_at = checkpoint_dir + str(image_memory)
+        
+        # Optionally, log epoch-level metrics
+        wandb.log({
+            'Train/Epoch_Avg_Loss': avg_epoch_loss,
+            'Train/Epoch': epoch + 1,
+        })
+
+        save_at = os.path.join(checkpoint_dir, str(image_memory))  # Corrected path join
+        if not os.path.exists(save_at):
+            os.makedirs(save_at)
+
         # Save checkpoint if it's the right frequency
         if (epoch + 1) % checkpoint_freq == 0:
             checkpoint_path = os.path.join(
@@ -341,10 +357,15 @@ def train_model(model, train_loader, optimizer, criterion, device,
             }, checkpoint_path)
             print(f"Saved checkpoint: {checkpoint_path}")
 
+            # Save checkpoint as a wandb artifact
+            # artifact = wandb.Artifact('model-checkpoint', type='checkpoint')
+            # artifact.add_file(checkpoint_path)
+            # wandb.log_artifact(artifact)
+            # print(f"Uploaded checkpoint to wandb: {checkpoint_path}")
+
             # Remove old checkpoints
             existing_checkpoints = sorted(
-                glob.glob(os.path.join(save_at,
-                                       'checkpoint_epoch_*.pt')),
+                glob.glob(os.path.join(save_at, 'checkpoint_epoch_*.pt')),
                 key=lambda x: int(x.split('_')[-1].split('.')[0])
             )
             if len(existing_checkpoints) > max_checkpoints:
@@ -352,20 +373,38 @@ def train_model(model, train_loader, optimizer, criterion, device,
                 os.remove(oldest_checkpoint)
                 print(f"Removed old checkpoint: {oldest_checkpoint}")
 
+
 TRAINING_CACHE_DIR = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/training_cache'
 
 def main():
+    # Initialize wandb
+    wandb.init(
+        project="sigma_5_mem_1_sub",  # Replace with your wandb project name
+        name="experiment_name",       # (Optional) Name for this run
+        config={
+            "batch_size": 64,
+            "learning_rate": 1e-4,
+            "image_memory": get_image_memory(),
+            "num_epochs": 100,
+            "optimizer": "Adam",
+            "loss_function": "BCEWithLogitsLoss",
+            # Add other hyperparameters you want to track
+        }
+    )
+    
+    config = wandb.config  # Access the config object
+
     cache_dir = TRAINING_CACHE_DIR
-    image_memory = get_image_memory() #10 is max  # Exponentially spaced frames
+    image_memory = config.image_memory  # Use wandb config
     checkpoint_dir = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/checkpoints'
     raw_dir = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/training_data'
-    batch_size = 64
-    learning_rate = 1e-4
+    batch_size = config.batch_size
+    learning_rate = config.learning_rate
     max_checkpoints = 5
     subset_size = 1  # Number of directories per subset
-    num_epochs_per_subset = 10  # Number of epochs per subset
-    checkpoint_freq = 50 # Save a checkpoint every 5 epochs
-    num_full_epochs = 3  # Number of complete passes over all directories
+    num_epochs_per_subset = 1  # Number of epochs per subset
+    checkpoint_freq = 50  # Save a checkpoint every 50 epochs
+    num_full_epochs = config.num_epochs
     preprocess = True  # Set to False to skip preprocessing the dataset
     load_into_memory = True  # Set to True to load dataset into memory
     is_raw = True
@@ -376,6 +415,9 @@ def main():
     model = GameInputPredictor(image_memory=image_memory).to(device)
     criterion = nn.BCEWithLogitsLoss(reduction='none')
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+    # Log the model architecture
+    wandb.watch(model, log="all", log_freq=100)
 
     # Check for existing checkpoints
     latest_checkpoint = get_checkpoint_path(checkpoint_dir, image_memory)
@@ -456,8 +498,8 @@ def main():
                 image_memory=image_memory,
                 preprocess=preprocess,
                 load_into_memory=load_into_memory,
-                raw_dir = raw_dir,
-                is_raw = is_raw
+                raw_dir=raw_dir,
+                is_raw=is_raw
             )
 
             # Check if dataset has samples
@@ -516,6 +558,10 @@ def main():
 
     overall_progress.close()
     print("Training completed successfully.")
+
+    # Finish the wandb run
+    wandb.finish()
+
 
 # Ensure that the main function is called when the script is run directly
 if __name__ == '__main__':
