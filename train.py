@@ -13,6 +13,8 @@ import gc  # Import garbage collector
 from utils import get_exponential_sample, get_image_memory, get_checkpoint_path, get_exponental_amount, get_root_dir  # Import the helper function
 from cache_data import process_replay
 
+import h5py
+
 import shutil
 import wandb  # Import wandb
 
@@ -24,10 +26,12 @@ TEMP_DIR = get_root_dir() + '/temp'
 if not os.path.exists(TEMP_DIR):
     os.makedirs(TEMP_DIR)
 
+
 class GameDataset(Dataset):
     def __init__(self, replay_dirs, image_memory=1,
                  preprocess=True, load_into_memory=False,
-                 raw_dir=None, is_raw=False):
+                 raw_dir=None, is_raw=False, 
+                 load_data_into_gpu=False, device='cpu'):
         self.image_memory = image_memory
         self.sample_paths = []
         self.data_in_memory = []
@@ -35,6 +39,8 @@ class GameDataset(Dataset):
         self.net_reward_max = float('-inf')
         self.preprocess = preprocess
         self.load_into_memory = load_into_memory
+        self.load_data_into_gpu = load_data_into_gpu
+        self.device = device  # Device to load data onto if flag is True
 
         # Clear tmp dir, remove all subdirectories
         for f in os.listdir(TEMP_DIR):
@@ -105,6 +111,17 @@ class GameDataset(Dataset):
                             loaded_samples = [torch.load(file,
                                                       map_location='cpu')
                                               for file in sample_pt_files]
+                            
+                            if self.load_data_into_gpu:
+                                # Move data to GPU
+                                loaded_samples = [
+                                    {
+                                        'image': sample['image'].to(self.device),
+                                        'input': sample['input'].to(self.device)
+                                    }
+                                    for sample in loaded_samples
+                                ]
+
                             self.data_in_memory.append((loaded_samples,
                                                         net_reward))
                     except Exception as e:
@@ -134,6 +151,17 @@ class GameDataset(Dataset):
                                                       net_reward)
                             self.net_reward_max = max(self.net_reward_max,
                                                       net_reward)
+                            
+                            if self.load_data_into_gpu:
+                                # Move data to GPU
+                                loaded_samples = [
+                                    {
+                                        'image': sample['image'].to(self.device),
+                                        'input': sample['input'].to(self.device)
+                                    }
+                                    for sample in loaded_samples
+                                ]
+
                             self.data_in_memory.append((loaded_samples,
                                                         net_reward))
                         except Exception as e:
@@ -144,7 +172,7 @@ class GameDataset(Dataset):
         print(f"net_reward_min: {self.net_reward_min}, "
               f"net_reward_max: {self.net_reward_max}")
 
-    
+
     def clear_memory(self):
         self.sample_paths = []
         self.data_in_memory = []
@@ -163,7 +191,7 @@ class GameDataset(Dataset):
     def __getitem__(self, idx):
         try:
             if self.load_into_memory and idx < len(self.data_in_memory):
-                # Access data directly from memory
+                # Access data directly from memory (already on GPU if flag is True)
                 loaded_samples, net_reward = self.data_in_memory[idx]
                 image_tensors = [sample['image'] for sample in loaded_samples]
                 input_tensors = [sample['input'] for sample in loaded_samples]
@@ -174,7 +202,11 @@ class GameDataset(Dataset):
                 input_tensors = []
                 for pt_file in sample_info['pt_files']:
                     try:
-                        sample = torch.load(pt_file)
+                        sample = torch.load(pt_file, map_location='cpu')  # Load to CPU first
+                        if self.load_data_into_gpu:
+                            # Move to GPU
+                            sample['image'] = sample['image'].to(self.device)
+                            sample['input'] = sample['input'].to(self.device)
                         image_tensors.append(sample['image'])
                         input_tensors.append(sample['input'])
                     except Exception as e:
@@ -196,9 +228,6 @@ class GameDataset(Dataset):
                 # Stack images along the depth dimension
                 image_tensor = torch.stack(image_tensors, dim=1)  # (channels, depth, height, width)
 
-            # Optionally, print the shape for debugging
-            # print(f"Image tensor shape: {image_tensor.shape}")
-
             input_tensor = input_tensors[-1]
             net_reward_tensor = torch.tensor(net_reward, dtype=torch.float32)
 
@@ -207,6 +236,42 @@ class GameDataset(Dataset):
         except Exception as e:
             print(f"Error in __getitem__ at index {idx}: {e}")
             raise
+
+
+class H5GameDataset(Dataset):
+    def __init__(self, h5_path, device='cpu'):
+        super(H5GameDataset, self).__init__()
+        self.h5_path = h5_path
+        self.device = device
+        self.h5_file = h5py.File(self.h5_path, 'r')
+        self.images = self.h5_file['images']
+        self.inputs = self.h5_file['inputs']
+        self.net_rewards = self.h5_file['net_rewards']
+        
+        # Read net_reward_min and net_reward_max from file attributes
+        self.net_reward_min = self.h5_file.attrs['net_reward_min']
+        self.net_reward_max = self.h5_file.attrs['net_reward_max']
+
+    def __len__(self):
+        return self.images.shape[0]
+
+    def __getitem__(self, idx):
+        # Directly load the image without permutation
+        image = torch.tensor(self.images[idx], dtype=torch.float32) / 255.0  # Shape: (3, D, 160, 240)
+        input_tensor = torch.tensor(self.inputs[idx], dtype=torch.float32)
+        net_reward = torch.tensor(self.net_rewards[idx], dtype=torch.float32)
+        
+        # Move to device if necessary
+        if self.device != 'cpu':
+            image = image.to(self.device)
+            input_tensor = input_tensor.to(self.device)
+            net_reward = net_reward.to(self.device)
+        
+        return image, input_tensor, net_reward
+
+    def __del__(self):
+        if hasattr(self, 'h5_file'):
+            self.h5_file.close()
 
 
 class GameInputPredictor(nn.Module):
@@ -261,9 +326,9 @@ class GameInputPredictor(nn.Module):
 
 
 def train_model(model, train_loader, optimizer, criterion, device,
-                num_epochs, checkpoint_dir, checkpoint_freq,
-                max_checkpoints, start_epoch=0, net_reward_min=0.0,
-                net_reward_max=1.0, overall_progress_position=0, image_memory=1):
+               num_epochs, checkpoint_dir, checkpoint_freq,
+               max_checkpoints, start_epoch=0, net_reward_min=0.0,
+               net_reward_max=1.0, overall_progress_position=0, image_memory=1):
     scaler = GradScaler()
 
     if not os.path.exists(checkpoint_dir):
@@ -286,8 +351,6 @@ def train_model(model, train_loader, optimizer, criterion, device,
 
             net_rewards = (net_rewards - net_rewards.mean()) / (net_rewards.std() + 1e-6)
             net_rewards = torch.clamp(net_rewards, min=-1.0, max=1.0)
-
-
 
             optimizer.zero_grad()
 
@@ -359,8 +422,6 @@ def train_model(model, train_loader, optimizer, criterion, device,
             os.makedirs(save_at)
 
 
-        #need to clear memory here
-
         # Save checkpoint if it's the right frequency
         if (epoch + 1) % checkpoint_freq == 0:
             checkpoint_path = os.path.join(
@@ -390,18 +451,25 @@ def train_model(model, train_loader, optimizer, criterion, device,
 
 
 TRAINING_CACHE_DIR = get_root_dir() + '/training_cache'
+# Create dir if not exist
+if not os.path.exists(TRAINING_CACHE_DIR):
+    os.makedirs(TRAINING_CACHE_DIR)
+
+
 def main():
     # Initialize wandb
     wandb.init(
         project="sigma_5_mem_1_sub",  # Replace with your wandb project name
         name="experiment_name",       # (Optional) Name for this run
         config={
-            "batch_size": 64,
+            "batch_size": 256,
             "learning_rate": 1e-4,
             "image_memory": get_image_memory(),
-            "num_epochs": 50,
+            "num_epochs": 10,
             "optimizer": "Adam",
             "loss_function": "BCEWithLogitsLoss",
+            "load_data_into_gpu": True,  # New flag added
+            "efficient_storage": True,   # New flag for efficient storage
             # Add other hyperparameters you want to track
         }
     )
@@ -415,7 +483,7 @@ def main():
     batch_size = config.batch_size
     learning_rate = config.learning_rate
     max_checkpoints = 5
-    subset_size = 20  # Number of directories per subset
+    subset_size = 8  # Number of directories per subset
     num_epochs_per_subset = 1  # Number of epochs per subset
     checkpoint_freq = 10  # Save a checkpoint every 10 epochs
     num_full_epochs = config.num_epochs
@@ -423,7 +491,14 @@ def main():
     load_into_memory = True  # Set to True to load dataset into memory
     is_raw = True
 
+    # Extract the new flags
+    load_data_into_gpu = config.get("load_data_into_gpu", False)
+    efficient_storage = config.get("efficient_storage", False)
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if load_data_into_gpu and device.type != 'cuda':
+        print("Warning: 'load_data_into_gpu' is set to True but no CUDA device is available. Data will remain on CPU.")
+        load_data_into_gpu = False
 
     # Initialize the model, criterion, optimizer outside the loop
     model = GameInputPredictor(image_memory=image_memory).to(device)
@@ -468,7 +543,7 @@ def main():
     else:
         all_replay_dirs = [os.path.join(cache_dir, d) for d in os.listdir(
             cache_dir) if os.path.isdir(os.path.join(cache_dir, d))]
-    
+
     all_replay_dirs.sort()
     num_total_dirs = len(all_replay_dirs)
     print(f"Total replay directories: {num_total_dirs}")
@@ -491,14 +566,80 @@ def main():
 
     if subsets_per_full_epoch == 1:
         # We have only one subset, so we can initialize dataset and DataLoader once
-        dataset = GameDataset(
-            replay_dirs=all_replay_dirs,
-            image_memory=image_memory,
-            preprocess=preprocess,
-            load_into_memory=load_into_memory,
-            raw_dir=raw_dir,
-            is_raw=is_raw
-        )
+        if efficient_storage:
+            h5_path = os.path.join(cache_dir, f'subset_0.h5')
+            if os.path.exists(h5_path):
+                print(f"Loading dataset from HDF5 file: {h5_path}")
+                dataset = H5GameDataset(h5_path, device=device)
+            else:
+                print("HDF5 file not found. Processing and creating HDF5 file.")
+                dataset = GameDataset(
+                    replay_dirs=all_replay_dirs,
+                    image_memory=image_memory,
+                    preprocess=preprocess,
+                    load_into_memory=load_into_memory,
+                    raw_dir=raw_dir,
+                    is_raw=is_raw,
+                    load_data_into_gpu=load_data_into_gpu,  # Pass the flag
+                    device=device  # Pass the device
+                )
+                # Save to HDF5
+                print(f"Saving processed data to HDF5 file: {h5_path}")
+                with h5py.File(h5_path, 'w') as h5f:
+                    num_samples = len(dataset)
+                    # Define chunk sizes
+                    image_chunk = (1, 3, image_memory, 160, 240)  # One image per chunk
+                    input_chunk = (1, 16)  # One input per chunk
+                    reward_chunk = (1,)  # One reward per chunk
+
+                    # Create datasets with compression
+                    h5f.create_dataset(
+                        'images',
+                        shape=(num_samples, 3, image_memory, 160, 240),
+                        dtype=np.float32,
+                        compression='gzip',          # Choose 'gzip' or 'lzf'
+                        compression_opts=4,          # Compression level (1-9 for gzip)
+                        chunks=image_chunk
+                    )
+                    h5f.create_dataset(
+                        'inputs',
+                        shape=(num_samples, 16),
+                        dtype=np.float32,
+                        compression='gzip',
+                        compression_opts=4,
+                        chunks=input_chunk
+                    )
+                    h5f.create_dataset(
+                        'net_rewards',
+                        shape=(num_samples,),
+                        dtype=np.float32,
+                        compression='gzip',
+                        compression_opts=4,
+                        chunks=reward_chunk
+                    )
+                    
+                    for idx in tqdm(range(num_samples), desc="Saving to HDF5"):
+                        image, input_tensor, net_reward = dataset[idx]
+                        h5f['images'][idx] = image.cpu().numpy()
+                        h5f['inputs'][idx] = input_tensor.cpu().numpy()
+                        h5f['net_rewards'][idx] = net_reward.cpu().numpy()
+                    
+                    # Save min and max as attributes
+                    h5f.attrs['net_reward_min'] = float(dataset.net_reward_min)
+                    h5f.attrs['net_reward_max'] = float(dataset.net_reward_max)
+                # Reload dataset from HDF5
+                dataset = H5GameDataset(h5_path, device=device)
+        else:
+            dataset = GameDataset(
+                replay_dirs=all_replay_dirs,
+                image_memory=image_memory,
+                preprocess=preprocess,
+                load_into_memory=load_into_memory,
+                raw_dir=raw_dir,
+                is_raw=is_raw,
+                load_data_into_gpu=load_data_into_gpu,  # Pass the flag
+                device=device  # Pass the device
+            )
         
         # Check if dataset has samples
         if len(dataset) == 0:
@@ -517,7 +658,7 @@ def main():
         
         # Initialize DataLoader
         train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
-                                  num_workers=4, pin_memory=True)
+                                  num_workers=0, pin_memory=False)
         
         # Now, loop over num_full_epochs
         for full_epoch in range(num_full_epochs):
@@ -570,15 +711,80 @@ def main():
             for subset_idx, subset_dirs in enumerate(subsets):
                 print(f"\nTraining on subset {subset_idx + 1}/{len(subsets)}: {', '.join([os.path.basename(d) for d in subset_dirs])}")
                 
-                # Initialize dataset with the current subset of directories
-                dataset = GameDataset(
-                    replay_dirs=subset_dirs,
-                    image_memory=image_memory,
-                    preprocess=preprocess,
-                    load_into_memory=load_into_memory,
-                    raw_dir=raw_dir,
-                    is_raw=is_raw
-                )
+                if efficient_storage:
+                    h5_path = os.path.join(cache_dir, f'subset_{subset_idx}.h5')
+                    if os.path.exists(h5_path):
+                        print(f"Loading dataset from HDF5 file: {h5_path}")
+                        dataset = H5GameDataset(h5_path, device=device)
+                    else:
+                        print("HDF5 file not found. Processing and creating HDF5 file.")
+                        dataset = GameDataset(
+                            replay_dirs=subset_dirs,
+                            image_memory=image_memory,
+                            preprocess=preprocess,
+                            load_into_memory=load_into_memory,
+                            raw_dir=raw_dir,
+                            is_raw=is_raw,
+                            load_data_into_gpu=load_data_into_gpu,  # Pass the flag
+                            device=device  # Pass the device
+                        )
+                        # Save to HDF5
+                        print(f"Saving processed data to HDF5 file: {h5_path}")
+                        with h5py.File(h5_path, 'w') as h5f:
+                            num_samples = len(dataset)
+                            # Define chunk sizes
+                            image_chunk = (1, 3, image_memory, 160, 240)  # One image per chunk
+                            input_chunk = (1, 16)  # One input per chunk
+                            reward_chunk = (1,)  # One reward per chunk
+
+                            # Create datasets with compression
+                            h5f.create_dataset(
+                                'images',
+                                shape=(num_samples, 3, image_memory, 160, 240),
+                                dtype=np.float32,
+                                compression='gzip',          # Choose 'gzip' or 'lzf'
+                                compression_opts=4,          # Compression level (1-9 for gzip)
+                                chunks=image_chunk
+                            )
+                            h5f.create_dataset(
+                                'inputs',
+                                shape=(num_samples, 16),
+                                dtype=np.float32,
+                                compression='gzip',
+                                compression_opts=4,
+                                chunks=input_chunk
+                            )
+                            h5f.create_dataset(
+                                'net_rewards',
+                                shape=(num_samples,),
+                                dtype=np.float32,
+                                compression='gzip',
+                                compression_opts=4,
+                                chunks=reward_chunk
+                            )
+                            
+                            for idx in tqdm(range(num_samples), desc="Saving to HDF5"):
+                                image, input_tensor, net_reward = dataset[idx]
+                                h5f['images'][idx] = image.cpu().numpy()
+                                h5f['inputs'][idx] = input_tensor.cpu().numpy()
+                                h5f['net_rewards'][idx] = net_reward.cpu().numpy()
+                            
+                            # Save min and max as attributes
+                            h5f.attrs['net_reward_min'] = float(dataset.net_reward_min)
+                            h5f.attrs['net_reward_max'] = float(dataset.net_reward_max)
+                        # Reload dataset from HDF5
+                        dataset = H5GameDataset(h5_path, device=device)
+                else:
+                    dataset = GameDataset(
+                        replay_dirs=subset_dirs,
+                        image_memory=image_memory,
+                        preprocess=preprocess,
+                        load_into_memory=load_into_memory,
+                        raw_dir=raw_dir,
+                        is_raw=is_raw,
+                        load_data_into_gpu=load_data_into_gpu,  # Pass the flag
+                        device=device  # Pass the device
+                    )
                 
                 # Check if dataset has samples
                 if len(dataset) == 0:
@@ -597,7 +803,7 @@ def main():
                 
                 # Initialize DataLoader
                 train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
-                                          num_workers=4, pin_memory=True)
+                                          num_workers=0, pin_memory=False)
                 
                 # Train for num_epochs_per_subset epochs
                 end_epoch = total_epochs_trained + num_epochs_per_subset
@@ -630,13 +836,12 @@ def main():
                 del dataset
                 torch.cuda.empty_cache()
                 gc.collect()
-    
+
     overall_progress.close()
     print("Training completed successfully.")
 
     # Finish the wandb run
     wandb.finish()
-
 
 # Ensure that the main function is called when the script is run directly
 if __name__ == '__main__':

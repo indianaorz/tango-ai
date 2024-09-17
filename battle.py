@@ -23,9 +23,9 @@ APP_PATH = "./dist/tango-x86_64-linux.AppImage"
 
 # Common environment variables
 env_common = os.environ.copy()
-env_common["INIT_LINK_CODE"] = "gregarbattleset3"
+env_common["INIT_LINK_CODE"] = "gregarbattleset4"
 env_common["AI_MODEL_PATH"] = "ai_model"
-env_common["MATCHMAKING_ID"] = "gregarbattleset3"  # Replace with the actual matchmaking ID
+env_common["MATCHMAKING_ID"] = "gregarbattleset4"  # Replace with the actual matchmaking ID
 
 command_threshold = get_threshold()
 
