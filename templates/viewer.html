@@ -3,6 +3,7 @@
 <head>
     <title>Viewer - {{ folder_name }}</title>
     <style>
+        /* Your existing styles */
         body { font-family: Arial, sans-serif; }
         #carousel-container { text-align: center; margin-top: 20px; }
         .carousel-image { max-width: 100%; height: auto; margin: 10px; }
@@ -31,15 +32,15 @@
     
     <div id="metadata">
         <p>Frame: <span id="frame-number"></span> / <span id="total-frames"></span></p>
-        <p>Input (Metadata): <span id="input-data"></span></p>
-        <p>Input (Cache): <span id="input-data-cache"></span></p>
-        <p>Model Prediction: <span id="model-prediction"></span></p>
-        <p>Reward (Metadata): <span id="reward-data"></span></p>
-        <p>Punishment (Metadata): <span id="punishment-data"></span></p>
-        <p>Net Reward (Cache): <span id="net-reward-cache"></span></p>
-        <p>Next Reward: <span id="next-reward-data"></span></p>
-        <p>Next Punishment: <span id="next-punishment-data"></span></p>
-        <p>Winner: <span id="winner-status"></span></p>
+        <p>Input (Metadata): <span id="input-data">None</span></p>
+        <p>Input (Cache): <span id="input-data-cache">None</span></p>
+        <p>Model Prediction: <span id="model-prediction">None</span></p>
+        <p>Reward (Metadata): <span id="reward-data">None</span></p>
+        <p>Punishment (Metadata): <span id="punishment-data">None</span></p>
+        <p>Net Reward (Cache): <span id="net-reward-cache">None</span></p>
+        <p>Next Reward: <span id="next-reward-data">None</span></p>
+        <p>Next Punishment: <span id="next-punishment-data">None</span></p>
+        <p>Winner: <span id="winner-status">Undetermined</span></p>
     </div>
     
     <div id="slider-container">
@@ -50,6 +51,7 @@
         <button id="prev-button">Previous Frame</button>
         <button id="next-button">Next Frame</button>
         <button id="inference-button">Run Inference</button> <!-- Button to trigger inference -->
+        <button id="swap-player-button">Swap Player</button>
     </div>
 
     <!-- Auto-inference checkbox container -->
@@ -58,6 +60,34 @@
     </div>
 
     <script>
+        // Define bit positions for each key
+        const KEY_BIT_POSITIONS = {
+            'A': 8,
+            'DOWN': 7,
+            'UP': 6,
+            'LEFT': 5,
+            'RIGHT': 4,
+            'X': 1,
+            'Z': 0,
+            'S': 9
+        };
+        
+        // Function to convert binary string to button names
+        function binaryToButtons(binaryStr) {
+            let buttons = [];
+            for (const [button, pos] of Object.entries(KEY_BIT_POSITIONS)) {
+                // Ensure the binary string is long enough
+                if (binaryStr.length > pos) {
+                    // Bit positions are from right (LSB) to left (MSB)
+                    const bit = binaryStr.charAt(binaryStr.length - pos - 1);
+                    if (bit === '1') {
+                        buttons.push(button);
+                    }
+                }
+            }
+            return buttons;
+        }
+        
         var folderName = "{{ folder_name }}";
         var currentFrame = 0;
         var totalFrames = 0;
@@ -71,6 +101,37 @@
             slider.max = maxValue - 1;
             slider.disabled = false;  // Enable the slider once the max value is set
         }
+        // Swap Player button event listener
+        document.getElementById('swap-player-button').addEventListener('click', function() {
+            if (confirm('Are you sure you want to swap the player data? ')) {
+                swapPlayer();
+            }
+        });
+
+        function swapPlayer() {
+            fetch(`/folder/${folderName}/swap_player`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+            })
+            .then(response => {
+                if (!response.ok) {
+                    return response.json().then(errData => { throw errData; });
+                }
+                return response.json();
+            })
+            .then(data => {
+                alert(data.message);
+                // Reload the current frame to reflect changes
+                loadFrame(currentFrame);
+            })
+            .catch(error => {
+                console.error('Error swapping player:', error);
+                alert('Error swapping player: ' + (error.error || 'Unknown error'));
+            });
+        }
+
 
         function loadFrame(frameIndex) {
             fetch(`/folder/${folderName}/frame/${frameIndex}`)
@@ -83,14 +144,23 @@
                     // Update frame data
                     document.getElementById('frame-number').textContent = currentFrame + 1;
                     document.getElementById('total-frames').textContent = totalFrames;
-                    document.getElementById('input-data').textContent = data.input;
+                    
+                    // Convert binary strings to button names
+                    const inputButtons = data.input ? binaryToButtons(data.input) : [];
+                    const inputCacheButtons = data.pt_input_tensor ? binaryToButtons(data.pt_input_tensor.join('')) : [];
+                    const modelPredictionButtons = data.model_prediction ? binaryToButtons(data.model_prediction) : [];
+
+                    // Join button names with commas for display
+                    document.getElementById('input-data').textContent = inputButtons.length > 0 ? inputButtons.join(', ') : 'None';
+                    document.getElementById('input-data-cache').textContent = inputCacheButtons.length > 0 ? inputCacheButtons.join(', ') : 'None';
+                    document.getElementById('model-prediction').textContent = modelPredictionButtons.length > 0 ? modelPredictionButtons.join(', ') : 'None';
+
                     document.getElementById('reward-data').textContent = data.reward !== null ? data.reward : 'None';
                     document.getElementById('punishment-data').textContent = data.punishment !== null ? data.punishment : 'None';
 
                     // Update cache data
                     document.getElementById('net-reward-cache').textContent = data.pt_net_reward !== null ? data.pt_net_reward : 'None';
-                    document.getElementById('input-data-cache').textContent = data.pt_input_tensor !== null ? data.pt_input_tensor.join('') : 'None';
-
+                    
                     // Update next reward data
                     if (data.next_reward) {
                         document.getElementById('next-reward-data').textContent =
@@ -212,7 +282,9 @@
             fetch(`/folder/${folderName}/frame/${frameIndex}/inference`)
                 .then(response => response.json())
                 .then(data => {
-                    document.getElementById('model-prediction').textContent = data.model_prediction || 'None';
+                    // Convert model prediction binary to buttons
+                    const modelPredictionButtons = data.model_prediction ? binaryToButtons(data.model_prediction) : [];
+                    document.getElementById('model-prediction').textContent = modelPredictionButtons.length > 0 ? modelPredictionButtons.join(', ') : 'None';
                 })
                 .catch(error => {
                     console.error('Error running inference:', error);

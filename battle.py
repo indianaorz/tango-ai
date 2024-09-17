@@ -23,13 +23,13 @@ APP_PATH = "./dist/tango-x86_64-linux.AppImage"
 
 # Common environment variables
 env_common = os.environ.copy()
-env_common["INIT_LINK_CODE"] = "your_link_code"
+env_common["INIT_LINK_CODE"] = "gregarbattleset3"
 env_common["AI_MODEL_PATH"] = "ai_model"
-env_common["MATCHMAKING_ID"] = "your_matchmaking_id"  # Replace with the actual matchmaking ID
+env_common["MATCHMAKING_ID"] = "gregarbattleset3"  # Replace with the actual matchmaking ID
 
 command_threshold = get_threshold()
 
-GAMMA = float(os.getenv("GAMMA", 0.01))  # Default gamma is 0.1 (10% chance of random action)
+GAMMA = float(os.getenv("GAMMA", 0.05))  # Default gamma is 0.1 (10% chance of random action)
 
 # Define the server addresses and ports for each instance
 INSTANCES = [
@@ -39,7 +39,7 @@ INSTANCES = [
         'rom_path': 'bn6,0',
         'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
         'name': 'Instance 1',
-        'replay_path':'/home/lee/Documents/Tango/replays/lrtest.tangoreplay',
+        # 'replay_path':'/home/lee/Documents/Tango/replays/20240917185150-gregarbattleset1-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
         # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
         'is_player': False  # Set to True if you don't want this instance to send inputs
     },
@@ -131,7 +131,7 @@ IMAGE_MEMORY = get_image_memory() # Default to 1 if not set
 path = get_checkpoint_path(get_root_dir() + "/checkpoints",IMAGE_MEMORY)
 print(path)
 
-# load_model(path, IMAGE_MEMORY)
+load_model(path, IMAGE_MEMORY)
 
 # Initialize frame buffers and frame counters
 frame_buffers = {instance['port']: deque(maxlen=get_exponental_amount()**IMAGE_MEMORY) for instance in INSTANCES}

@@ -763,19 +763,13 @@ impl Session {
 
                         // Read player health directly
                         let player_health = core_ref.raw_read_16(player_health_address, segment);
-                        // println!("Player Health: {}", player_health);
-                        //break out if value is 0
-                        if player_health == 0 || player_health > 4000{
+                        if player_health == 0 || player_health > 4000 {
                             return;
                         }
 
                         // Log values for all possible opponent addresses
                         for &address in &possible_addresses {
                             let current_value = core_ref.raw_read_16(address, segment);
-                            // println!(
-                            //     "Possible Opponent Address: 0x{:08X}, Value: {}",
-                            //     address, current_value
-                            // );
 
                             // If the value isn't equal to the player's health, it's considered the opponent's health
                             if current_value != player_health {
@@ -784,35 +778,32 @@ impl Session {
                             }
                         }
 
-                        //get current enemy health value
-                        let opponent_health_address = OPPONENT_HEALTH_ADDRESS.lock().unwrap();
+                        // Check if opponent health address was found
+                        if let Some(opponent_health_address) = *OPPONENT_HEALTH_ADDRESS.lock() {
+                            // Continue with the rest of your logic
 
-                        // Update the global addresses
-                        *OPPONENT_HEALTH_ADDRESS.lock() = Some(opponent_health_address);
+                            // Get the opponent's current health
+                            let opponent_health = core_ref.raw_read_16(opponent_health_address, segment);
 
-                        //get the opponent's current health
-                        let opponent_health = core_ref.raw_read_16(opponent_health_address, segment);
-
-                        //find an address from the possible addresses that is NOT the opponent's health
-                        
-                        for &address in &possible_addresses {
-                            let current_value = core_ref.raw_read_16(address, segment);
-                            // println!(
-                            //     "Possible Player Address: 0x{:08X}, Value: {}",
-                            //     address, current_value
-                            // );
-                            if current_value != opponent_health{
-                                *PLAYER_HEALTH_ADDRESS.lock() = Some(address);
-                                break;
+                            // Find an address from the possible addresses that is NOT the opponent's health
+                            for &address in &possible_addresses {
+                                let current_value = core_ref.raw_read_16(address, segment);
+                                if current_value != opponent_health {
+                                    *PLAYER_HEALTH_ADDRESS.lock() = Some(address);
+                                    break;
+                                }
                             }
-                        }
-                        
 
-                        //only stop trying to set the values once we know the player and enemy health aren't the same
-                        if player_health != opponent_health {
-                            *addresses_set = true;
+                            // Only stop trying to set the values once we know the player and enemy health aren't the same
+                            if player_health != opponent_health {
+                                *addresses_set = true;
+                            }
+                        } else {
+                            println!("Could not determine opponent's health address.");
+                            return;
                         }
                     }
+
 
                     // Retrieve the health addresses
                     let player_health_addr = *PLAYER_HEALTH_ADDRESS.lock();

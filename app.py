@@ -6,16 +6,16 @@ import torch  # Import torch to load .pt files
 import numpy as np  # Import numpy for type conversion if needed
 from PIL import Image  # Import PIL for image loading
 from train import GameInputPredictor  # Import the model class
-from utils import get_checkpoint_path, get_exponential_sample, get_image_memory, get_threshold
+from utils import get_checkpoint_path, get_exponential_sample, get_image_memory, get_threshold, get_root_dir
 
 app = Flask(__name__)
 
-TRAINING_DATA_DIR = 'training_data'
-TRAINING_CACHE_DIR = 'training_cache'  # Ensure this path is correct
+TRAINING_DATA_DIR = get_root_dir() + '/training_data'
+TRAINING_CACHE_DIR = get_root_dir() + '/training_cache'  # Ensure this path is correct
 
 # Global configuration
-USE_MODEL = False  # Set to False to disable model loading and inference
-checkpoint_path='/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/checkpoints'
+USE_MODEL = True  # Set to False to disable model loading and inference
+checkpoint_path= get_root_dir() + '/checkpoints'
 IMAGE_MEMORY = get_image_memory() # Adjust as needed or make dynamic
 
 model = None
@@ -260,6 +260,69 @@ def frame_inference(folder_name, frame_index):
 @app.route('/training_data/<path:filename>')
 def training_data_files(filename):
     return send_from_directory(TRAINING_DATA_DIR, filename)
+
+# **Swap Player Route - Moved Above the Main Block**
+@app.route('/folder/<folder_name>/swap_player', methods=['POST'])
+def swap_player(folder_name):
+    print(f"Swapping player for folder {folder_name}")
+    folder_path = os.path.join(TRAINING_DATA_DIR, folder_name)
+    if not os.path.exists(folder_path):
+        return jsonify({'error': 'Folder not found'}), 404
+
+    # Process all data files in the folder
+    # Swap 'reward' and 'punishment' in each json file
+    json_files = glob.glob(os.path.join(folder_path, '*.json'))
+    json_files = [f for f in json_files if os.path.basename(f) != 'winner.json']
+
+    for json_file in json_files:
+        try:
+            with open(json_file, 'r') as f:
+                data = json.load(f)
+
+            # Swap 'reward' and 'punishment'
+            reward = data.get('reward')
+            punishment = data.get('punishment')
+            data['reward'] = punishment
+            data['punishment'] = reward
+
+            # Save back to file
+            with open(json_file, 'w') as f:
+                json.dump(data, f)
+        except Exception as e:
+            print(f"Error processing {json_file}: {e}")
+            return jsonify({'error': f"Error processing {json_file}: {e}"}), 500
+
+    # Switch 'winner' status in 'winner.json' if it exists
+    winner_file = os.path.join(folder_path, 'winner.json')
+    if os.path.exists(winner_file):
+        try:
+            with open(winner_file, 'r') as f:
+                winner_data = json.load(f)
+
+            is_winner = winner_data.get('is_winner')
+            if is_winner is not None:
+                # Switch winner status
+                winner_data['is_winner'] = not is_winner
+
+                # Save back to file
+                with open(winner_file, 'w') as f:
+                    json.dump(winner_data, f)
+        except Exception as e:
+            print(f"Error processing {winner_file}: {e}")
+            return jsonify({'error': f"Error processing {winner_file}: {e}"}), 500
+
+    return jsonify({'message': 'Player swapped successfully'}), 200
+
+# **Optional: Route to List All Registered Routes for Debugging**
+@app.route('/routes')
+def list_routes():
+    import urllib
+    output = []
+    for rule in app.url_map.iter_rules():
+        methods = ','.join(sorted(rule.methods))
+        line = urllib.parse.unquote(f"{rule.endpoint}: {rule.rule} [{methods}]")
+        output.append(line)
+    return "<br>".join(output)
 
 if __name__ == '__main__':
     # Load the model only if USE_MODEL is True

@@ -11,7 +11,7 @@ from io import BytesIO
 import sys
 import glob  # For file pattern matching
 import argparse  # For parsing command-line arguments
-from utils import get_root_dir()
+from utils import get_root_dir
 
 # Path to the Tango AppImage
 APP_PATH = "./dist/tango-x86_64-linux.AppImage"

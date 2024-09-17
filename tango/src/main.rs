@@ -84,7 +84,7 @@ use lazy_static::lazy_static;
 
 
 fn main() -> Result<(), anyhow::Error> {
-    std::env::set_var("RUST_BACKTRACE", "1");
+    std::env::set_var("RUST_BACKTRACE", "FULL");
 
     let args = Args::from_env()?; // Read arguments from environment variables
     println!("Parsed arguments from env: {:?}", args);

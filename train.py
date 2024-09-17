@@ -390,7 +390,6 @@ def train_model(model, train_loader, optimizer, criterion, device,
 
 
 TRAINING_CACHE_DIR = get_root_dir() + '/training_cache'
-
 def main():
     # Initialize wandb
     wandb.init(
@@ -398,9 +397,9 @@ def main():
         name="experiment_name",       # (Optional) Name for this run
         config={
             "batch_size": 64,
-            "learning_rate": 1e-5,
+            "learning_rate": 1e-4,
             "image_memory": get_image_memory(),
-            "num_epochs": 100,
+            "num_epochs": 50,
             "optimizer": "Adam",
             "loss_function": "BCEWithLogitsLoss",
             # Add other hyperparameters you want to track
@@ -416,7 +415,7 @@ def main():
     batch_size = config.batch_size
     learning_rate = config.learning_rate
     max_checkpoints = 5
-    subset_size = 10  # Number of directories per subset
+    subset_size = 20  # Number of directories per subset
     num_epochs_per_subset = 1  # Number of epochs per subset
     checkpoint_freq = 10  # Save a checkpoint every 10 epochs
     num_full_epochs = config.num_epochs
@@ -481,68 +480,51 @@ def main():
     # Calculate total subsets per full epoch based on subset_size
     subsets_per_full_epoch = (num_total_dirs + subset_size - 1) // subset_size  # Ceiling division
 
-    # Calculate total epochs based on full passes
-    total_epochs = num_full_epochs * subsets_per_full_epoch * num_epochs_per_subset
-
     # Keep track of total epochs trained
     total_epochs_trained = start_epoch
 
     # Create progress bar for overall training progress
+    total_epochs = num_full_epochs * num_epochs_per_subset  # Total epochs we will train
     overall_progress = tqdm(total=total_epochs,
                             desc="Overall Training Progress",
                             unit="epoch", position=0, leave=True)
 
-    for full_epoch in range(num_full_epochs):
-        print(f"\nStarting full epoch {full_epoch + 1}/{num_full_epochs}")
+    if subsets_per_full_epoch == 1:
+        # We have only one subset, so we can initialize dataset and DataLoader once
+        dataset = GameDataset(
+            replay_dirs=all_replay_dirs,
+            image_memory=image_memory,
+            preprocess=preprocess,
+            load_into_memory=load_into_memory,
+            raw_dir=raw_dir,
+            is_raw=is_raw
+        )
+        
+        # Check if dataset has samples
+        if len(dataset) == 0:
+            print("Warning: No samples found. Exiting.")
+            return
+        
+        net_reward_min = dataset.net_reward_min
+        net_reward_max = dataset.net_reward_max
 
-        # Shuffle directories at the start of each full epoch if desired
-        random.shuffle(all_replay_dirs)
+        # Convert to torch tensors
+        net_reward_min = torch.tensor(net_reward_min, dtype=torch.float32).to(device)
+        net_reward_max = torch.tensor(net_reward_max, dtype=torch.float32).to(device)
+        if net_reward_max == net_reward_min:
+            print("Warning: net_reward_max == net_reward_min, setting sample_weights to 1")
+            net_reward_max = net_reward_min + 1e-6
+        
+        # Initialize DataLoader
+        train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                                  num_workers=4, pin_memory=True)
+        
+        # Now, loop over num_full_epochs
+        for full_epoch in range(num_full_epochs):
+            print(f"\nStarting full epoch {full_epoch + 1}/{num_full_epochs}")
 
-        # Divide directories into subsets
-        subsets = [
-            all_replay_dirs[i:i + subset_size]
-            for i in range(0, num_total_dirs, subset_size)
-        ]
-
-        for subset_idx, subset_dirs in enumerate(subsets):
-            print(f"\nTraining on subset {subset_idx + 1}/{len(subsets)}: {', '.join([os.path.basename(d) for d in subset_dirs])}")
-
-            # Initialize dataset with the current subset of directories
-            dataset = GameDataset(
-                replay_dirs=subset_dirs,
-                image_memory=image_memory,
-                preprocess=preprocess,
-                load_into_memory=load_into_memory,
-                raw_dir=raw_dir,
-                is_raw=is_raw
-            )
-
-            # Check if dataset has samples
-            if len(dataset) == 0:
-                print(f"Warning: No samples found in subset {subset_idx + 1}. Skipping.")
-                continue
-
-            net_reward_min = dataset.net_reward_min
-            net_reward_max = dataset.net_reward_max
-
-            # Convert to torch tensors
-            net_reward_min = torch.tensor(net_reward_min,
-                                          dtype=torch.float32).to(device)
-            net_reward_max = torch.tensor(net_reward_max,
-                                          dtype=torch.float32).to(device)
-            if net_reward_max == net_reward_min:
-                print("Warning: net_reward_max == net_reward_min, "
-                      "setting sample_weights to 1")
-                net_reward_max = net_reward_min + 1e-6
-
-            # Modify DataLoader initialization
-            train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
-                                    num_workers=4, pin_memory=True)
-
-            # Calculate the epoch range for this subset
+            # Call train_model for num_epochs_per_subset epochs
             end_epoch = total_epochs_trained + num_epochs_per_subset
-
-            # Train on the current subset
             train_model(
                 model,
                 train_loader,
@@ -559,24 +541,96 @@ def main():
                 overall_progress_position=0,  # Position for progress bars
                 image_memory=image_memory
             )
-
+            
             # Update total epochs trained
             total_epochs_trained += num_epochs_per_subset
-
             # Update the overall progress bar
             overall_progress.update(num_epochs_per_subset)
+        
+        # After training, cleanup
+        if hasattr(train_loader, '_iterator') and train_loader._iterator is not None:
+            train_loader._iterator._shutdown_workers()
+        del train_loader
+        del dataset
+        torch.cuda.empty_cache()
+        gc.collect()
+    else:
+        for full_epoch in range(num_full_epochs):
+            print(f"\nStarting full epoch {full_epoch + 1}/{num_full_epochs}")
 
-            # Explicitly shutdown DataLoader workers
-            if hasattr(train_loader, '_iterator') and train_loader._iterator is not None:
-                train_loader._iterator._shutdown_workers()
+            # Shuffle directories at the start of each full epoch if desired
+            random.shuffle(all_replay_dirs)
+            
+            # Divide directories into subsets
+            subsets = [
+                all_replay_dirs[i:i + subset_size]
+                for i in range(0, num_total_dirs, subset_size)
+            ]
+            
+            for subset_idx, subset_dirs in enumerate(subsets):
+                print(f"\nTraining on subset {subset_idx + 1}/{len(subsets)}: {', '.join([os.path.basename(d) for d in subset_dirs])}")
                 
-            del train_loader
+                # Initialize dataset with the current subset of directories
+                dataset = GameDataset(
+                    replay_dirs=subset_dirs,
+                    image_memory=image_memory,
+                    preprocess=preprocess,
+                    load_into_memory=load_into_memory,
+                    raw_dir=raw_dir,
+                    is_raw=is_raw
+                )
+                
+                # Check if dataset has samples
+                if len(dataset) == 0:
+                    print(f"Warning: No samples found in subset {subset_idx + 1}. Skipping.")
+                    continue
+                
+                net_reward_min = dataset.net_reward_min
+                net_reward_max = dataset.net_reward_max
 
-            # Clear dataset attributes
-            del dataset
-            torch.cuda.empty_cache()
-            gc.collect()
-
+                # Convert to torch tensors
+                net_reward_min = torch.tensor(net_reward_min, dtype=torch.float32).to(device)
+                net_reward_max = torch.tensor(net_reward_max, dtype=torch.float32).to(device)
+                if net_reward_max == net_reward_min:
+                    print("Warning: net_reward_max == net_reward_min, setting sample_weights to 1")
+                    net_reward_max = net_reward_min + 1e-6
+                
+                # Initialize DataLoader
+                train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                                          num_workers=4, pin_memory=True)
+                
+                # Train for num_epochs_per_subset epochs
+                end_epoch = total_epochs_trained + num_epochs_per_subset
+                train_model(
+                    model,
+                    train_loader,
+                    optimizer,
+                    criterion,
+                    device,
+                    num_epochs=end_epoch,
+                    checkpoint_dir=checkpoint_dir,
+                    checkpoint_freq=checkpoint_freq,
+                    max_checkpoints=max_checkpoints,
+                    start_epoch=total_epochs_trained,
+                    net_reward_min=net_reward_min,
+                    net_reward_max=net_reward_max,
+                    overall_progress_position=0,  # Position for progress bars
+                    image_memory=image_memory
+                )
+                
+                # Update total epochs trained
+                total_epochs_trained += num_epochs_per_subset
+                # Update the overall progress bar
+                overall_progress.update(num_epochs_per_subset)
+                
+                # Cleanup
+                if hasattr(train_loader, '_iterator') and train_loader._iterator is not None:
+                    train_loader._iterator._shutdown_workers()
+                del train_loader
+                del dataset
+                torch.cuda.empty_cache()
+                gc.collect()
+    
     overall_progress.close()
     print("Training completed successfully.")
 

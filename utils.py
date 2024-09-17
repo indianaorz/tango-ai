@@ -4,13 +4,13 @@ import glob
 
 
 def get_root_dir():
-    return '/home/lee/tango' #'../TANGO'#'/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO'
+    return '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO'#'/home/lee/tango' #'../TANGO'#'/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO'
 
 def get_image_memory():
     return 1
 
 def get_threshold():
-    return 0.1
+    return 0.5
 
 
 default_checkpoint_path = get_root_dir() + '/checkpoints'

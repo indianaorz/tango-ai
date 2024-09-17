@@ -15,7 +15,7 @@ from utils import get_root_dir
 # TRAINING_CACHE_DIR = 'training_cache'
 TRAINING_DATA_DIR = get_root_dir() + '/training_data'
 TRAINING_CACHE_DIR = get_root_dir() + '/training_cache'
-WINDOW_SIZE = 60  # Number of frames to look ahead for rewards/punishments
+WINDOW_SIZE = 600  # Number of frames to look ahead for rewards/punishments
 
 def process_replay(replay_dir, output_dir=TRAINING_CACHE_DIR):
     # Extract the replay name
@@ -176,6 +176,10 @@ def process_replay(replay_dir, output_dir=TRAINING_CACHE_DIR):
 
         # Get net reward
         net_reward = cumulative_rewards[idx]
+
+        if(net_reward == 0):
+            print(f"Net reward is 0 at frame {idx}, skipping.")
+            continue
 
         # Create sample dictionary
         sample = {
