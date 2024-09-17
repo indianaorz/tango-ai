@@ -342,7 +342,7 @@ def train_model(model, train_loader, optimizer, criterion, device,
             'Train/Epoch': epoch + 1,
         })
 
-        save_at = os.path.join(checkpoint_dir, str(image_memory))  # Corrected path join
+        save_at = checkpoint_dir + str(image_memory) 
         if not os.path.exists(save_at):
             os.makedirs(save_at)
 
