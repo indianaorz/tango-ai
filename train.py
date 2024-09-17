@@ -10,12 +10,19 @@ from tqdm import tqdm
 import random
 from torch.cuda.amp import GradScaler, autocast
 import gc  # Import garbage collector
-from utils import get_exponential_sample, get_image_memory  # Import the helper function
+from utils import get_exponential_sample, get_image_memory, get_checkpoint_path, get_exponental_amount  # Import the helper function
+from cache_data import process_replay
 
+import shutil
+TEMP_DIR = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/temp'
+#create temp dir if it doesn't exist
+if not os.path.exists(TEMP_DIR):
+    os.makedirs(TEMP_DIR)
 
 class GameDataset(Dataset):
     def __init__(self, replay_dirs, image_memory=1,
-                 preprocess=True, load_into_memory=False):
+                 preprocess=True, load_into_memory=False,
+                 raw_dir = None, is_raw=False):
         self.image_memory = image_memory
         self.sample_paths = []
         self.data_in_memory = []
@@ -23,6 +30,19 @@ class GameDataset(Dataset):
         self.net_reward_max = float('-inf')
         self.preprocess = preprocess
         self.load_into_memory = load_into_memory
+
+        
+        
+        # Clear tmp dir, remove all subdirectories
+        for f in os.listdir(TEMP_DIR):
+            subdir_path = os.path.join(TEMP_DIR, f)
+            if os.path.isdir(subdir_path):
+                shutil.rmtree(subdir_path)
+        
+        if is_raw:
+            for replay_dir in replay_dirs:
+                process_replay(replay_dir, output_dir=TEMP_DIR)
+            replay_dirs = [os.path.join(TEMP_DIR, d) for d in os.listdir(TEMP_DIR) if os.path.isdir(os.path.join(TEMP_DIR, d))]
 
         if not replay_dirs:
             print("No directories provided to GameDataset.")
@@ -36,6 +56,11 @@ class GameDataset(Dataset):
             # Get sorted list of .pt files
             pt_files = sorted(glob.glob(os.path.join(replay_dir, '*.pt')))
             num_samples = len(pt_files)
+
+            #if the number of samples is > 18000, reduce the number of samples
+            if num_samples > 18000:
+                pt_files = pt_files[::2]
+                num_samples = len(pt_files)
 
             # Display progress for each .pt file within the directory
             if self.preprocess or self.load_into_memory:
@@ -113,7 +138,7 @@ class GameDataset(Dataset):
         step = 1
         while len(indices) < self.image_memory and current_idx - step >= 0:
             indices.append(current_idx - step)
-            step *= 2
+            step *= get_exponental_amount()
 
         # If not enough frames, pad with the earliest frame (index 0)
         while len(indices) < self.image_memory:
@@ -244,7 +269,7 @@ class GameInputPredictor(nn.Module):
 def train_model(model, train_loader, optimizer, criterion, device,
                 num_epochs, checkpoint_dir, checkpoint_freq,
                 max_checkpoints, start_epoch=0, net_reward_min=0.0,
-                net_reward_max=1.0, overall_progress_position=0):
+                net_reward_max=1.0, overall_progress_position=0, image_memory=1):
     scaler = GradScaler()
 
     if not os.path.exists(checkpoint_dir):
@@ -304,11 +329,11 @@ def train_model(model, train_loader, optimizer, criterion, device,
 
         avg_epoch_loss = epoch_loss / num_batches
         print(f"Epoch {epoch+1}/{num_epochs}, Average Loss: {avg_epoch_loss}")
-
+        save_at = checkpoint_dir + str(image_memory)
         # Save checkpoint if it's the right frequency
         if (epoch + 1) % checkpoint_freq == 0:
             checkpoint_path = os.path.join(
-                checkpoint_dir, f"checkpoint_epoch_{epoch+1}.pt")
+                save_at, f"checkpoint_epoch_{epoch+1}.pt")
             torch.save({
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
@@ -318,7 +343,7 @@ def train_model(model, train_loader, optimizer, criterion, device,
 
             # Remove old checkpoints
             existing_checkpoints = sorted(
-                glob.glob(os.path.join(checkpoint_dir,
+                glob.glob(os.path.join(save_at,
                                        'checkpoint_epoch_*.pt')),
                 key=lambda x: int(x.split('_')[-1].split('.')[0])
             )
@@ -327,10 +352,13 @@ def train_model(model, train_loader, optimizer, criterion, device,
                 os.remove(oldest_checkpoint)
                 print(f"Removed old checkpoint: {oldest_checkpoint}")
 
+TRAINING_CACHE_DIR = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/training_cache'
+
 def main():
-    cache_dir = 'training_cache'
+    cache_dir = TRAINING_CACHE_DIR
     image_memory = get_image_memory() #10 is max  # Exponentially spaced frames
-    checkpoint_dir = 'checkpoints' + str(image_memory)
+    checkpoint_dir = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/checkpoints'
+    raw_dir = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/training_data'
     batch_size = 64
     learning_rate = 1e-4
     max_checkpoints = 5
@@ -338,8 +366,9 @@ def main():
     num_epochs_per_subset = 10  # Number of epochs per subset
     checkpoint_freq = 50 # Save a checkpoint every 5 epochs
     num_full_epochs = 3  # Number of complete passes over all directories
-    preprocess = False  # Set to False to skip preprocessing the dataset
+    preprocess = True  # Set to False to skip preprocessing the dataset
     load_into_memory = True  # Set to True to load dataset into memory
+    is_raw = True
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -349,23 +378,41 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     # Check for existing checkpoints
-    existing_checkpoints = sorted(glob.glob(os.path.join(
-        checkpoint_dir, 'checkpoint_epoch_*.pt')))
+    latest_checkpoint = get_checkpoint_path(checkpoint_dir, image_memory)
     start_epoch = 0
-    if existing_checkpoints:
-        latest_checkpoint = existing_checkpoints[-1]
+    if latest_checkpoint:
         print(f"Loading checkpoint: {latest_checkpoint}")
+        
         checkpoint = torch.load(latest_checkpoint, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['epoch']
-        print(f"Resuming from epoch {start_epoch}")
+        
+        # Ensure 'model_state_dict' exists in the checkpoint
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            raise KeyError("Checkpoint does not contain 'model_state_dict'")
+        
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        else:
+            raise KeyError("Checkpoint does not contain 'optimizer_state_dict'")
+        
+        if 'epoch' in checkpoint:
+            start_epoch = checkpoint['epoch']
+            print(f"Resuming from epoch {start_epoch}")
+        else:
+            raise KeyError("Checkpoint does not contain 'epoch'")
     else:
         print("No checkpoint found, starting from scratch.")
 
     # List all replay directories
-    all_replay_dirs = [os.path.join(cache_dir, d) for d in os.listdir(
-        cache_dir) if os.path.isdir(os.path.join(cache_dir, d))]
+    # if raw, get all replay dirs from raw_dir
+    if is_raw:
+        all_replay_dirs = [os.path.join(raw_dir, d) for d in os.listdir(
+            raw_dir) if os.path.isdir(os.path.join(raw_dir, d))]
+    else:
+        all_replay_dirs = [os.path.join(cache_dir, d) for d in os.listdir(
+            cache_dir) if os.path.isdir(os.path.join(cache_dir, d))]
+    
     all_replay_dirs.sort()
     num_total_dirs = len(all_replay_dirs)
     print(f"Total replay directories: {num_total_dirs}")
@@ -408,7 +455,9 @@ def main():
                 replay_dirs=subset_dirs,
                 image_memory=image_memory,
                 preprocess=preprocess,
-                load_into_memory=load_into_memory
+                load_into_memory=load_into_memory,
+                raw_dir = raw_dir,
+                is_raw = is_raw
             )
 
             # Check if dataset has samples
@@ -449,7 +498,8 @@ def main():
                 start_epoch=total_epochs_trained,
                 net_reward_min=net_reward_min,
                 net_reward_max=net_reward_max,
-                overall_progress_position=0  # Position for progress bars
+                overall_progress_position=0,  # Position for progress bars
+                image_memory=image_memory
             )
 
             # Update total epochs trained

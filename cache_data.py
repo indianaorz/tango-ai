@@ -6,16 +6,20 @@ import numpy as np
 from PIL import Image
 import torch
 from tqdm import tqdm  # For progress bars
+import argparse  # For command-line arguments
+
 
 # Paths
-TRAINING_DATA_DIR = 'training_data'
-TRAINING_CACHE_DIR = 'training_cache'
+# TRAINING_DATA_DIR = 'training_data'
+# TRAINING_CACHE_DIR = 'training_cache'
+TRAINING_DATA_DIR = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/training_data'
+TRAINING_CACHE_DIR = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/training_cache'
 WINDOW_SIZE = 60  # Number of frames to look ahead for rewards/punishments
 
-def process_replay(replay_dir):
+def process_replay(replay_dir, output_dir=TRAINING_CACHE_DIR):
     # Extract the replay name
     replay_name = os.path.basename(replay_dir)
-    cache_dir = os.path.join(TRAINING_CACHE_DIR, replay_name)
+    cache_dir = os.path.join(output_dir, replay_name)
 
 
     # Check if the cache directory already exists and is non-empty

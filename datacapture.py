@@ -17,7 +17,7 @@ APP_PATH = "./dist/tango-x86_64-linux.AppImage"
 # Paths
 REPLAYS_DIR = '/home/lee/Documents/Tango/replays'
 # TRAINING_DATA_DIR = 'training_data'
-TRAINING_DATA_DIR = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO'
+TRAINING_DATA_DIR = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/training_data'
 # Common environment variables
 env_common = os.environ.copy()
 env_common["INIT_LINK_CODE"] = "your_link_code"
@@ -306,9 +306,9 @@ async def handle_connection(instance):
 # Main function to start instances and handle inputs
 def main():
     parser = argparse.ArgumentParser(description="Start Tango AppImage instances with a maximum number of replays.")
-    parser.add_argument('--max_replays', type=int, default=10,
+    parser.add_argument('--max_replays', type=int, default=None,
                         help='Maximum number of replays to process. If not set, all unprocessed replays will be processed.')
-    parser.add_argument('--batch_size', type=int, default=10,
+    parser.add_argument('--batch_size', type=int, default=20,
                         help='Number of instances to start per batch. Default is 10.')
     parser.add_argument('--start_port', type=int, default=12345,
                         help='Starting port number for instances. Default is 12345.')

@@ -27,7 +27,7 @@ env_common["INIT_LINK_CODE"] = "your_link_code"
 env_common["AI_MODEL_PATH"] = "ai_model"
 env_common["MATCHMAKING_ID"] = "your_matchmaking_id"  # Replace with the actual matchmaking ID
 
-command_threshold = 0.5
+command_threshold = 0.1
 
 GAMMA = float(os.getenv("GAMMA", 0.01))  # Default gamma is 0.1 (10% chance of random action)
 
@@ -123,7 +123,7 @@ transform = transforms.Compose([
 # Define image_memory
 IMAGE_MEMORY = get_image_memory() # Default to 1 if not set
 
-path = get_checkpoint_path("checkpoints",IMAGE_MEMORY)
+path = get_checkpoint_path("/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/checkpoints",IMAGE_MEMORY)
 print(path)
 
 load_model(path, IMAGE_MEMORY)
