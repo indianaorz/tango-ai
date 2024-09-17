@@ -19,8 +19,8 @@ def get_checkpoint_path(checkpoint_dir = default_checkpoint_path, image_memory =
     """
     Returns the path to the latest checkpoint in the given directory.
     """
-    #path should be checkpoints10
-    checkpoint_path = checkpoint_dir + str(image_memory)
+    #path should be checkpoints/10/
+    checkpoint_path =  os.path.join(checkpoint_dir, str(image_memory))
     checkpoint_files = glob.glob(os.path.join(checkpoint_path, '*.pt'))
     if not checkpoint_files:
         return None

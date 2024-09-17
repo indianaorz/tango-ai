@@ -20,11 +20,10 @@ import wandb  # Import wandb
 
 # Define constants
 
-TEMP_DIR = get_root_dir() + '/temp'
+TEMP_DIR = os.path.join(get_root_dir(), 'temp')
 
 # Create temp dir if it doesn't exist
-if not os.path.exists(TEMP_DIR):
-    os.makedirs(TEMP_DIR)
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 
 class GameDataset(Dataset):
@@ -326,134 +325,93 @@ class GameInputPredictor(nn.Module):
 
 
 def train_model(model, train_loader, optimizer, criterion, device,
-               num_epochs, checkpoint_dir, checkpoint_freq,
-               max_checkpoints, start_epoch=0, net_reward_min=0.0,
-               net_reward_max=1.0, overall_progress_position=0, image_memory=1):
-    scaler = GradScaler()
+               epoch, net_reward_min, net_reward_max, scaler):
+    model.train()
+    epoch_loss = 0.0
+    num_batches = len(train_loader)
 
-    if not os.path.exists(checkpoint_dir):
-        os.makedirs(checkpoint_dir)
+    # Create the progress bar for the epoch
+    epoch_progress = tqdm(train_loader,
+                          desc=f"Epoch {epoch+1}",
+                          leave=False, position=2, ncols=100)
 
-    for epoch in range(start_epoch, num_epochs):
-        model.train()
-        epoch_loss = 0.0
-        num_batches = len(train_loader)
+    for batch_idx, (images, inputs, net_rewards) in enumerate(epoch_progress):
+        images = images.to(device)
+        inputs = inputs.to(device).clamp(0, 1)
+        net_rewards = net_rewards.to(device)
 
-        # Create the progress bar for the epoch
-        epoch_progress = tqdm(train_loader,
-                              desc=f"Epoch {epoch+1}/{num_epochs}",
-                              leave=False, position=overall_progress_position+1)
+        net_rewards = (net_rewards - net_rewards.mean()) / (net_rewards.std() + 1e-6)
+        net_rewards = torch.clamp(net_rewards, min=-1.0, max=1.0)
 
-        for batch_idx, (images, inputs, net_rewards) in enumerate(epoch_progress):
-            images = images.to(device)
-            inputs = inputs.to(device).clamp(0, 1)
-            net_rewards = net_rewards.to(device)
+        optimizer.zero_grad()
 
-            net_rewards = (net_rewards - net_rewards.mean()) / (net_rewards.std() + 1e-6)
-            net_rewards = torch.clamp(net_rewards, min=-1.0, max=1.0)
+        with autocast():
+            outputs = model(images)
 
-            optimizer.zero_grad()
+            # Compute loss per sample
+            loss = criterion(outputs, inputs)
+            loss_per_sample = loss.mean(dim=1)
 
-            with autocast():
-                outputs = model(images)
+            # Compute sample weights
+            sample_weights = (net_rewards - net_reward_min) / (
+                net_reward_max - net_reward_min + 1e-6)
 
-                # Compute loss per sample
-                loss = criterion(outputs, inputs)
-                loss_per_sample = loss.mean(dim=1)
+            # Multiply loss per sample by sample weights
+            weighted_loss = loss_per_sample * sample_weights
 
-                # Compute sample weights
-                sample_weights = (net_rewards - net_reward_min) / (
-                    net_reward_max - net_reward_min + 1e-6)
+            # Compute mean loss over batch
+            loss = weighted_loss.mean()
 
-                # Multiply loss per sample by sample weights
-                weighted_loss = loss_per_sample * sample_weights
+        scaler.scale(loss).backward()
 
-                # Compute mean loss over batch
-                loss = weighted_loss.mean()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-            scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        epoch_loss += loss.item()
+        avg_loss = epoch_loss / (batch_idx + 1)
 
-            scaler.step(optimizer)
-            scaler.update()
-
-            epoch_loss += loss.item()
-            avg_loss = epoch_loss / (batch_idx + 1)
-
-            # Update the progress bar with the current and average loss
-            epoch_progress.set_postfix({
-                'Batch Loss': f'{loss.item():.6f}',
-                'Avg Loss': f'{avg_loss:.6f}'
-            })
-
-            # Log metrics to wandb
-            wandb.log({
-                'Train/Loss': loss.item(),
-                'Train/Avg_Loss': avg_loss,
-                'Train/Epoch': epoch + 1,
-                'Train/Batch': batch_idx + 1,
-            })
-
-            # Clear variables at the end of the loop
-            images = None
-            inputs = None
-            net_rewards = None
-            loss = None
-            outputs = None
-            torch.cuda.empty_cache()
-            gc.collect()
-
-        epoch_progress.close()
-
-
-
-        avg_epoch_loss = epoch_loss / num_batches
-        print(f"Epoch {epoch+1}/{num_epochs}, Average Loss: {avg_epoch_loss}")
-        
-        # Optionally, log epoch-level metrics
-        wandb.log({
-            'Train/Epoch_Avg_Loss': avg_epoch_loss,
-            'Train/Epoch': epoch + 1,
+        # Update the progress bar with the current and average loss
+        epoch_progress.set_postfix({
+            'Batch Loss': f'{loss.item():.6f}',
+            'Avg Loss': f'{avg_loss:.6f}'
         })
 
-        save_at = checkpoint_dir + str(image_memory) 
-        if not os.path.exists(save_at):
-            os.makedirs(save_at)
+        # Log metrics to wandb
+        wandb.log({
+            'Train/Batch_Loss': loss.item(),
+            'Train/Avg_Batch_Loss': avg_loss,
+            'Train/Epoch': epoch + 1,
+            'Train/Batch': batch_idx + 1,
+        })
+
+        # Clear variables at the end of the loop
+        images = None
+        inputs = None
+        net_rewards = None
+        loss = None
+        outputs = None
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    epoch_progress.close()
+
+    avg_epoch_loss = epoch_loss / num_batches
+    print(f"Epoch {epoch+1}, Average Loss: {avg_epoch_loss}")
+
+    # Optionally, log epoch-level metrics
+    wandb.log({
+        'Train/Epoch_Avg_Loss': avg_epoch_loss,
+        'Train/Epoch': epoch + 1,
+    })
+
+    return avg_epoch_loss
 
 
-        # Save checkpoint if it's the right frequency
-        if (epoch + 1) % checkpoint_freq == 0:
-            checkpoint_path = os.path.join(
-                save_at, f"checkpoint_epoch_{epoch+1}.pt")
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-            }, checkpoint_path)
-            print(f"Saved checkpoint: {checkpoint_path}")
-
-            # Save checkpoint as a wandb artifact
-            # artifact = wandb.Artifact('model-checkpoint', type='checkpoint')
-            # artifact.add_file(checkpoint_path)
-            # wandb.log_artifact(artifact)
-            # print(f"Uploaded checkpoint to wandb: {checkpoint_path}")
-
-            # Remove old checkpoints
-            existing_checkpoints = sorted(
-                glob.glob(os.path.join(save_at, 'checkpoint_epoch_*.pt')),
-                key=lambda x: int(x.split('_')[-1].split('.')[0])
-            )
-            if len(existing_checkpoints) > max_checkpoints:
-                oldest_checkpoint = existing_checkpoints[0]
-                os.remove(oldest_checkpoint)
-                print(f"Removed old checkpoint: {oldest_checkpoint}")
-
-
-TRAINING_CACHE_DIR = get_root_dir() + '/training_cache'
+TRAINING_CACHE_DIR = os.path.join(get_root_dir(), 'training_cache')
 # Create dir if not exist
-if not os.path.exists(TRAINING_CACHE_DIR):
-    os.makedirs(TRAINING_CACHE_DIR)
+os.makedirs(TRAINING_CACHE_DIR, exist_ok=True)
 
 
 def main():
@@ -465,7 +423,7 @@ def main():
             "batch_size": 256,
             "learning_rate": 1e-4,
             "image_memory": get_image_memory(),
-            "num_epochs": 10,
+            "num_epochs": 100,
             "optimizer": "Adam",
             "loss_function": "BCEWithLogitsLoss",
             "load_data_into_gpu": True,  # New flag added
@@ -478,14 +436,14 @@ def main():
 
     cache_dir = TRAINING_CACHE_DIR
     image_memory = config.image_memory  # Use wandb config
-    checkpoint_dir = get_root_dir() + '/checkpoints'
-    raw_dir = get_root_dir() + '/training_data'
+    checkpoint_dir = os.path.join(get_root_dir(), 'checkpoints')
+    raw_dir = os.path.join(get_root_dir(), 'training_data')
     batch_size = config.batch_size
     learning_rate = config.learning_rate
     max_checkpoints = 5
     subset_size = 8  # Number of directories per subset
     num_epochs_per_subset = 1  # Number of epochs per subset
-    checkpoint_freq = 10  # Save a checkpoint every 10 epochs
+    checkpoint_freq = 1  # Save a checkpoint every epoch
     num_full_epochs = config.num_epochs
     preprocess = True  # Set to False to skip preprocessing the dataset
     load_into_memory = True  # Set to True to load dataset into memory
@@ -559,10 +517,12 @@ def main():
     total_epochs_trained = start_epoch
 
     # Create progress bar for overall training progress
-    total_epochs = num_full_epochs * num_epochs_per_subset  # Total epochs we will train
-    overall_progress = tqdm(total=total_epochs,
+    overall_progress = tqdm(total=num_full_epochs,
                             desc="Overall Training Progress",
                             unit="epoch", position=0, leave=True)
+
+    # Initialize GradScaler for mixed precision
+    scaler = GradScaler()
 
     if subsets_per_full_epoch == 1:
         # We have only one subset, so we can initialize dataset and DataLoader once
@@ -618,7 +578,7 @@ def main():
                         chunks=reward_chunk
                     )
                     
-                    for idx in tqdm(range(num_samples), desc="Saving to HDF5"):
+                    for idx in tqdm(range(num_samples), desc="Saving to HDF5", position=1):
                         image, input_tensor, net_reward = dataset[idx]
                         h5f['images'][idx] = image.cpu().numpy()
                         h5f['inputs'][idx] = input_tensor.cpu().numpy()
@@ -660,34 +620,64 @@ def main():
         train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
                                   num_workers=0, pin_memory=False)
         
-        # Now, loop over num_full_epochs
-        for full_epoch in range(num_full_epochs):
-            print(f"\nStarting full epoch {full_epoch + 1}/{num_full_epochs}")
+        # Check if dataset has samples
+        if len(train_loader) == 0:
+            print("Warning: Train loader has no samples. Exiting.")
+            return
 
-            # Call train_model for num_epochs_per_subset epochs
-            end_epoch = total_epochs_trained + num_epochs_per_subset
-            train_model(
+        # Now, loop over num_full_epochs
+        for epoch in range(start_epoch, num_full_epochs):
+            print(f"\nStarting epoch {epoch + 1}/{num_full_epochs}")
+
+            # Train for one epoch
+            avg_epoch_loss = train_model(
                 model,
                 train_loader,
                 optimizer,
                 criterion,
                 device,
-                num_epochs=end_epoch,
-                checkpoint_dir=checkpoint_dir,
-                checkpoint_freq=checkpoint_freq,
-                max_checkpoints=max_checkpoints,
-                start_epoch=total_epochs_trained,
-                net_reward_min=net_reward_min,
-                net_reward_max=net_reward_max,
-                overall_progress_position=0,  # Position for progress bars
-                image_memory=image_memory
+                epoch,
+                net_reward_min,
+                net_reward_max,
+                scaler
             )
-            
-            # Update total epochs trained
-            total_epochs_trained += num_epochs_per_subset
+
+            # Checkpointing per epoch
+            if (epoch + 1) % checkpoint_freq == 0:
+                save_at = os.path.join(checkpoint_dir, str(image_memory))
+                os.makedirs(save_at, exist_ok=True)
+                checkpoint_path = os.path.join(
+                    save_at, f"checkpoint_epoch_{epoch+1}.pt")
+                torch.save({
+                    'epoch': epoch + 1,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                }, checkpoint_path)
+                print(f"Saved checkpoint: {checkpoint_path}")
+
+                # Optionally upload to wandb as an artifact
+                # artifact = wandb.Artifact('model-checkpoint', type='checkpoint')
+                # artifact.add_file(checkpoint_path)
+                # wandb.log_artifact(artifact)
+                # print(f"Uploaded checkpoint to wandb: {checkpoint_path}")
+
+                # Remove old checkpoints
+                existing_checkpoints = sorted(
+                    glob.glob(os.path.join(save_at, 'checkpoint_epoch_*.pt')),
+                    key=lambda x: int(x.split('_')[-1].split('.')[0])
+                )
+                if len(existing_checkpoints) > max_checkpoints:
+                    oldest_checkpoint = existing_checkpoints[0]
+                    os.remove(oldest_checkpoint)
+                    print(f"Removed old checkpoint: {oldest_checkpoint}")
+
             # Update the overall progress bar
-            overall_progress.update(num_epochs_per_subset)
-        
+            overall_progress.update(1)
+
+            # Cleanup
+            torch.cuda.empty_cache()
+            gc.collect()
+
         # After training, cleanup
         if hasattr(train_loader, '_iterator') and train_loader._iterator is not None:
             train_loader._iterator._shutdown_workers()
@@ -695,6 +685,7 @@ def main():
         del dataset
         torch.cuda.empty_cache()
         gc.collect()
+
     else:
         for full_epoch in range(num_full_epochs):
             print(f"\nStarting full epoch {full_epoch + 1}/{num_full_epochs}")
@@ -711,6 +702,9 @@ def main():
             for subset_idx, subset_dirs in enumerate(subsets):
                 print(f"\nTraining on subset {subset_idx + 1}/{len(subsets)}: {', '.join([os.path.basename(d) for d in subset_dirs])}")
                 
+                # Create a separate progress bar for subsets
+                subset_progress = tqdm(total=1, desc=f"Subset {subset_idx+1}/{len(subsets)}", position=1, leave=False)
+
                 if efficient_storage:
                     h5_path = os.path.join(cache_dir, f'subset_{subset_idx}.h5')
                     if os.path.exists(h5_path):
@@ -763,7 +757,7 @@ def main():
                                 chunks=reward_chunk
                             )
                             
-                            for idx in tqdm(range(num_samples), desc="Saving to HDF5"):
+                            for idx in tqdm(range(num_samples), desc="Saving to HDF5", position=2):
                                 image, input_tensor, net_reward = dataset[idx]
                                 h5f['images'][idx] = image.cpu().numpy()
                                 h5f['inputs'][idx] = input_tensor.cpu().numpy()
@@ -789,6 +783,8 @@ def main():
                 # Check if dataset has samples
                 if len(dataset) == 0:
                     print(f"Warning: No samples found in subset {subset_idx + 1}. Skipping.")
+                    subset_progress.update(1)
+                    subset_progress.close()
                     continue
                 
                 net_reward_min = dataset.net_reward_min
@@ -805,37 +801,73 @@ def main():
                 train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
                                           num_workers=0, pin_memory=False)
                 
-                # Train for num_epochs_per_subset epochs
-                end_epoch = total_epochs_trained + num_epochs_per_subset
-                train_model(
+                # Check if DataLoader has samples
+                if len(train_loader) == 0:
+                    print(f"Warning: Train loader for subset {subset_idx + 1} has no samples. Skipping.")
+                    subset_progress.update(1)
+                    subset_progress.close()
+                    continue
+
+                # Train for one epoch on this subset
+                avg_epoch_loss = train_model(
                     model,
                     train_loader,
                     optimizer,
                     criterion,
                     device,
-                    num_epochs=end_epoch,
-                    checkpoint_dir=checkpoint_dir,
-                    checkpoint_freq=checkpoint_freq,
-                    max_checkpoints=max_checkpoints,
-                    start_epoch=total_epochs_trained,
-                    net_reward_min=net_reward_min,
-                    net_reward_max=net_reward_max,
-                    overall_progress_position=0,  # Position for progress bars
-                    image_memory=image_memory
+                    full_epoch,
+                    net_reward_min,
+                    net_reward_max,
+                    scaler
                 )
-                
-                # Update total epochs trained
-                total_epochs_trained += num_epochs_per_subset
-                # Update the overall progress bar
-                overall_progress.update(num_epochs_per_subset)
-                
+
+                # Update subset progress
+                subset_progress.update(1)
+                subset_progress.close()
+
                 # Cleanup
-                if hasattr(train_loader, '_iterator') and train_loader._iterator is not None:
-                    train_loader._iterator._shutdown_workers()
-                del train_loader
-                del dataset
                 torch.cuda.empty_cache()
                 gc.collect()
+
+            # After completing all subsets for the current epoch, checkpoint
+            if (full_epoch + 1) % checkpoint_freq == 0:
+                save_at = os.path.join(checkpoint_dir, str(image_memory))
+                os.makedirs(save_at, exist_ok=True)
+                checkpoint_path = os.path.join(
+                    save_at, f"checkpoint_epoch_{full_epoch+1}.pt")
+                torch.save({
+                    'epoch': full_epoch + 1,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                }, checkpoint_path)
+                print(f"Saved checkpoint: {checkpoint_path}")
+
+                # Optionally upload to wandb as an artifact
+                # artifact = wandb.Artifact('model-checkpoint', type='checkpoint')
+                # artifact.add_file(checkpoint_path)
+                # wandb.log_artifact(artifact)
+                # print(f"Uploaded checkpoint to wandb: {checkpoint_path}")
+
+                # Remove old checkpoints
+                existing_checkpoints = sorted(
+                    glob.glob(os.path.join(save_at, 'checkpoint_epoch_*.pt')),
+                    key=lambda x: int(x.split('_')[-1].split('.')[0])
+                )
+                if len(existing_checkpoints) > max_checkpoints:
+                    oldest_checkpoint = existing_checkpoints[0]
+                    os.remove(oldest_checkpoint)
+                    print(f"Removed old checkpoint: {oldest_checkpoint}")
+
+            # Update the overall progress bar
+            overall_progress.update(1)
+
+            # Cleanup
+            if hasattr(train_loader, '_iterator') and train_loader._iterator is not None:
+                train_loader._iterator._shutdown_workers()
+            del train_loader
+            del dataset
+            torch.cuda.empty_cache()
+            gc.collect()
 
     overall_progress.close()
     print("Training completed successfully.")
