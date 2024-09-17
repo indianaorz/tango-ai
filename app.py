@@ -6,7 +6,7 @@ import torch  # Import torch to load .pt files
 import numpy as np  # Import numpy for type conversion if needed
 from PIL import Image  # Import PIL for image loading
 from train import GameInputPredictor  # Import the model class
-from utils import get_checkpoint_path, get_exponential_sample, get_image_memory
+from utils import get_checkpoint_path, get_exponential_sample, get_image_memory, get_threshold
 
 app = Flask(__name__)
 
@@ -15,6 +15,7 @@ TRAINING_CACHE_DIR = 'training_cache'  # Ensure this path is correct
 
 # Global configuration
 USE_MODEL = False  # Set to False to disable model loading and inference
+checkpoint_path='/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/checkpoints'
 IMAGE_MEMORY = get_image_memory() # Adjust as needed or make dynamic
 
 model = None
@@ -61,24 +62,20 @@ def frame_data(folder_name, frame_index):
         return "Frame index out of range", 404
 
     # Calculate the start index based on image_memory
-    start_index = frame_index
-    # Get the sequence of frame indices
     frame_indices = get_exponential_sample(list(range(total_frames)), frame_index, IMAGE_MEMORY)
-    print(frame_indices)
-    # If not enough frames, pad with the first frame
     while len(frame_indices) < IMAGE_MEMORY:
         frame_indices.insert(0, 0)
 
     # Load frame data for the sequence
     frames_data = []
     for idx in frame_indices:
-        if idx >= total_frames:
-            idx = total_frames - 1  # Prevent out-of-range
         frame_file = json_files[idx]
         with open(frame_file, 'r') as f:
             frame_data = json.load(f)
+            # **Modify image_path to be relative to folder_name**
+            image_filename = os.path.basename(frame_data.get('image_path', ''))
             frames_data.append({
-                'image_path': frame_data.get('image_path', ''),
+                'image_path': image_filename,  # Only the filename
                 'input': frame_data.get('input', ''),
                 'reward': frame_data.get('reward', None),
                 'punishment': frame_data.get('punishment', None),
@@ -88,8 +85,10 @@ def frame_data(folder_name, frame_index):
     current_frame_file = json_files[frame_index]
     with open(current_frame_file, 'r') as f:
         current_data = json.load(f)
+        # **Modify image_path to be relative to folder_name**
+        current_image_filename = os.path.basename(current_data.get('image_path', ''))
 
-    # Check if the player is the winner by reading the winner.json file
+    # Check if the player is the winner
     winner_file = os.path.join(folder_path, 'winner.json')
     is_winner = None
     if os.path.exists(winner_file):
@@ -177,8 +176,6 @@ def frame_data(folder_name, frame_index):
 
     return jsonify(response_data)
 
-
-# New route to handle inference on-demand
 @app.route('/folder/<folder_name>/frame/<int:frame_index>/inference')
 def frame_inference(folder_name, frame_index):
     if not USE_MODEL:
@@ -188,34 +185,28 @@ def frame_inference(folder_name, frame_index):
     if not os.path.exists(folder_path):
         return "Folder not found", 404
 
-    # Calculate the start index based on image_memory
-    start_index = frame_index - IMAGE_MEMORY + 1
-    if start_index < 0:
-        start_index = 0
+    # Get list of JSON files sorted by timestamp in filenames
+    json_files = sorted(glob.glob(os.path.join(folder_path, '*.json')))
+    json_files = [f for f in json_files if not os.path.basename(f) == 'winner.json']
+    total_frames = len(json_files)
+    if frame_index < 0 or frame_index >= total_frames:
+        return "Frame index out of range", 404
 
-    # Get the sequence of frame indices
+    # Calculate the start index based on image_memory
     frame_indices = get_exponential_sample(list(range(total_frames)), frame_index, IMAGE_MEMORY)
-    
-    # If not enough frames, pad with the first frame
     while len(frame_indices) < IMAGE_MEMORY:
         frame_indices.insert(0, 0)
 
     # Load frame data for the sequence
     frames_data = []
-    json_files = sorted(glob.glob(os.path.join(folder_path, '*.json')))
-    json_files = [f for f in json_files if not os.path.basename(f) == 'winner.json']
-    total_frames = len(json_files)
-
     for idx in frame_indices:
-        if idx >= total_frames:
-            idx = total_frames - 1  # Prevent out-of-range
         frame_file = json_files[idx]
-        if not os.path.exists(frame_file):
-            return jsonify({'error': f"Frame file {idx} not found"}), 404
         with open(frame_file, 'r') as f:
             frame_data = json.load(f)
+            # **Modify image_path to be relative to folder_name**
+            image_filename = os.path.basename(frame_data.get('image_path', ''))
             frames_data.append({
-                'image_path': frame_data.get('image_path', ''),
+                'image_path': image_filename,  # Only the filename
                 'input': frame_data.get('input', ''),
                 'reward': frame_data.get('reward', None),
                 'punishment': frame_data.get('punishment', None),
@@ -223,6 +214,7 @@ def frame_inference(folder_name, frame_index):
 
     # Load and preprocess images
     image_paths = [os.path.join(folder_path, frame['image_path']) for frame in frames_data]
+
     images = []
     for path in image_paths:
         if not os.path.exists(path):
@@ -252,7 +244,7 @@ def frame_inference(folder_name, frame_index):
                 outputs = model(stacked_frames)
                 probs = torch.sigmoid(outputs)
                 probs = probs.cpu().numpy()[0]
-                predicted_inputs = (probs >= 0.01).astype(int)  # Adjust threshold if needed
+                predicted_inputs = (probs >= get_threshold()).astype(int)  # Adjust threshold if needed
                 predicted_input_str = ''.join(map(str, predicted_inputs))
         except Exception as e:
             print(f"Error during inference: {e}")
@@ -272,7 +264,7 @@ def training_data_files(filename):
 if __name__ == '__main__':
     # Load the model only if USE_MODEL is True
     if USE_MODEL:
-        checkpoint_path = get_checkpoint_path()  # Adjust the path as needed
+        checkpoint_path = get_checkpoint_path(checkpoint_path, IMAGE_MEMORY)  # Adjust the path as needed
         if checkpoint_path:
             load_model(checkpoint_path, image_memory=IMAGE_MEMORY)
         else:

@@ -15,7 +15,8 @@
         td, th { padding: 5px; border: 1px solid #ccc; }
         #auto-inference-container { text-align: center; margin-top: 10px; }
         .frame-group { display: flex; justify-content: center; flex-wrap: wrap; }
-        .frame-group img { margin: 5px; }
+        .image-container { display: flex; flex-direction: column; align-items: center; margin: 5px; }
+        .frame-index { margin-top: 5px; font-size: 14px; color: #555; }
     </style>
 </head>
 <body>
@@ -114,27 +115,35 @@
                     const frameGroup = document.getElementById('frame-group');
                     frameGroup.innerHTML = ''; // Clear existing images
 
-                   // Load the sequence of images based on imageMemory
+                    // Load the sequence of images based on imageMemory
                     for (let i = 0; i < imageMemory; i++) {
-                        // Adjust imgIndex to ensure it's within the range of available frames
-                        const imgIndex = i;//frameIndex - (imageMemory - 1) + i;
+                        // Calculate the corresponding frame index for each image in the imageMemory
+                        const imgFrameIndex = frameIndex - (imageMemory - 1) + i;
 
-                        // Ensure imgIndex stays within valid bounds of the frames array
-                        // Adjust indices if imgIndex is outside the bounds of frames length
-                        const adjustedIndex = Math.max(0, Math.min(imgIndex, data.frames.length - 1));
+                        // Ensure imgFrameIndex stays within valid bounds
+                        const adjustedIndex = Math.max(0, Math.min(imgFrameIndex, data.frames.length - 1));
 
                         // Use adjustedIndex to access data.frames safely
-                        const imgSrc = `../${data.frames[adjustedIndex].image_path}`;
+                        const imgSrc = `../training_data/${folderName}/${data.frames[adjustedIndex].image_path}`;
                         console.log("Image Source:", imgSrc); // Debugging - check the image path
+
+                        // Create a container for each image and its frame index
+                        const imgContainer = document.createElement('div');
+                        imgContainer.className = 'image-container';
 
                         const img = document.createElement('img');
                         img.src = imgSrc;
                         img.alt = `Frame ${adjustedIndex + 1}`;
                         img.className = 'carousel-image';
-                        frameGroup.appendChild(img);
+                        imgContainer.appendChild(img);
+
+                        const caption = document.createElement('div');
+                        caption.className = 'frame-index';
+                        caption.textContent = `Frame ${frameIndex - adjustedIndex + 1}`;
+                        imgContainer.appendChild(caption);
+
+                        frameGroup.appendChild(imgContainer);
                     }
-
-
 
                     // Update slider
                     document.getElementById('frame-slider').value = currentFrame;

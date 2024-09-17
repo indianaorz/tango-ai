@@ -73,10 +73,15 @@ class GameDataset(Dataset):
             # Preprocess if flag is True
             if self.preprocess:
                 for idx in pt_progress:
-                    # Calculate exponentially spaced indices
-                    sample_pt_files = self.get_exponential_sample(pt_files, idx)
-                    if not sample_pt_files:
+                    # Generate list of indices corresponding to pt_files
+                    indices_list = list(range(len(pt_files)))
+                    # Use the common get_exponential_sample function from utils.py
+                    sampled_indices = get_exponential_sample(indices_list, idx, self.image_memory)
+                    if not sampled_indices:
                         continue  # Skip if insufficient frames
+
+                    # Map sampled indices to file paths
+                    sample_pt_files = [pt_files[i] for i in sampled_indices]
 
                     try:
                         # Load net_reward from the last file only
@@ -93,6 +98,7 @@ class GameDataset(Dataset):
                         }
                         self.sample_paths.append(sample_info)
 
+
                         # If loading into memory, load all samples now
                         if self.load_into_memory:
                             loaded_samples = [torch.load(file,
@@ -105,9 +111,15 @@ class GameDataset(Dataset):
                 pt_progress.close()
             else:
                 for idx in range(self.image_memory - 1, num_samples):
-                    sample_pt_files = self.get_exponential_sample(pt_files, idx)
-                    if not sample_pt_files:
+                    # Generate list of indices corresponding to pt_files
+                    indices_list = list(range(len(pt_files)))
+                    # Use the common get_exponential_sample function from utils.py
+                    sampled_indices = get_exponential_sample(indices_list, idx, self.image_memory)
+                    if not sampled_indices:
                         continue  # Skip if insufficient frames
+
+                    # Map sampled indices to file paths
+                    sample_pt_files = [pt_files[i] for i in sampled_indices]
 
                     sample_info = {'pt_files': sample_pt_files}
                     self.sample_paths.append(sample_info)
@@ -131,38 +143,21 @@ class GameDataset(Dataset):
         print(f"net_reward_min: {self.net_reward_min}, "
               f"net_reward_max: {self.net_reward_max}")
 
-    def get_exponential_sample(self, pt_files, current_idx):
-        """
-        Returns a list of .pt file paths sampled exponentially from the current index.
-        Ensures exactly `image_memory` frames by allowing duplicates when necessary.
-        """
-        indices = [current_idx]
-        step = 1
-        while len(indices) < self.image_memory and current_idx - step >= 0:
-            indices.append(current_idx - step)
-            step *= get_exponental_amount()
-
-        # If not enough frames, pad with the earliest frame (index 0)
-        while len(indices) < self.image_memory:
-            indices.append(0)
-
-        # If more frames than needed, truncate the list
-        if len(indices) > self.image_memory:
-            indices = indices[:self.image_memory]
-
-        # Sort the indices to have chronological order (oldest to newest)
-        indices_sorted = sorted(indices)
-
-        # Fetch the corresponding file paths
-        sample_pt_files = [pt_files[i] for i in indices_sorted]
-
-        # Debugging statement
-        # print(f"Selected indices for current_idx {current_idx}: {indices_sorted}")
-        return sample_pt_files
-
+    
+    def clear_memory(self):
+        self.sample_paths = []
+        self.data_in_memory = []
+        self.net_reward_min = float('inf')
+        self.net_reward_max = float('-inf')
+        gc.collect()
 
     def __len__(self):
         return len(self.sample_paths)
+
+    def __del__(self):
+        print("GameDataset __del__ called")
+        self.clear_memory()
+
 
     def __getitem__(self, idx):
         try:
@@ -288,6 +283,11 @@ def train_model(model, train_loader, optimizer, criterion, device,
             inputs = inputs.to(device).clamp(0, 1)
             net_rewards = net_rewards.to(device)
 
+            net_rewards = (net_rewards - net_rewards.mean()) / (net_rewards.std() + 1e-6)
+            net_rewards = torch.clamp(net_rewards, min=-1.0, max=1.0)
+
+
+
             optimizer.zero_grad()
 
             with autocast():
@@ -331,7 +331,18 @@ def train_model(model, train_loader, optimizer, criterion, device,
                 'Train/Batch': batch_idx + 1,
             })
 
+            # Clear variables at the end of the loop
+            images = None
+            inputs = None
+            net_rewards = None
+            loss = None
+            outputs = None
+            torch.cuda.empty_cache()
+            gc.collect()
+
         epoch_progress.close()
+
+
 
         avg_epoch_loss = epoch_loss / num_batches
         print(f"Epoch {epoch+1}/{num_epochs}, Average Loss: {avg_epoch_loss}")
@@ -345,6 +356,9 @@ def train_model(model, train_loader, optimizer, criterion, device,
         save_at = checkpoint_dir + str(image_memory) 
         if not os.path.exists(save_at):
             os.makedirs(save_at)
+
+
+        #need to clear memory here
 
         # Save checkpoint if it's the right frequency
         if (epoch + 1) % checkpoint_freq == 0:
@@ -383,7 +397,7 @@ def main():
         name="experiment_name",       # (Optional) Name for this run
         config={
             "batch_size": 64,
-            "learning_rate": 1e-4,
+            "learning_rate": 1e-5,
             "image_memory": get_image_memory(),
             "num_epochs": 100,
             "optimizer": "Adam",
@@ -401,9 +415,9 @@ def main():
     batch_size = config.batch_size
     learning_rate = config.learning_rate
     max_checkpoints = 5
-    subset_size = 1  # Number of directories per subset
+    subset_size = 10  # Number of directories per subset
     num_epochs_per_subset = 1  # Number of epochs per subset
-    checkpoint_freq = 50  # Save a checkpoint every 50 epochs
+    checkpoint_freq = 10  # Save a checkpoint every 10 epochs
     num_full_epochs = config.num_epochs
     preprocess = True  # Set to False to skip preprocessing the dataset
     load_into_memory = True  # Set to True to load dataset into memory
@@ -520,8 +534,9 @@ def main():
                       "setting sample_weights to 1")
                 net_reward_max = net_reward_min + 1e-6
 
+            # Modify DataLoader initialization
             train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
-                                      num_workers=4, pin_memory=True)
+                                    num_workers=4, pin_memory=True)
 
             # Calculate the epoch range for this subset
             end_epoch = total_epochs_trained + num_epochs_per_subset
@@ -550,9 +565,14 @@ def main():
             # Update the overall progress bar
             overall_progress.update(num_epochs_per_subset)
 
-            # Free memory
-            del dataset
+            # Explicitly shutdown DataLoader workers
+            if hasattr(train_loader, '_iterator') and train_loader._iterator is not None:
+                train_loader._iterator._shutdown_workers()
+                
             del train_loader
+
+            # Clear dataset attributes
+            del dataset
             torch.cuda.empty_cache()
             gc.collect()
 

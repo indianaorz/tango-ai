@@ -1,3 +1,4 @@
+#cache_data.py
 import os
 import json
 import glob
@@ -117,10 +118,16 @@ def process_replay(replay_dir, output_dir=TRAINING_CACHE_DIR):
         net_rewards += 1.0
     else:
         # Player lost, add 1 to punishments for every frame
-        net_rewards += 1.0
+        net_rewards -= 1.0
 
+    #linear decay
     # Precompute weights for the window
     weights = np.array([(WINDOW_SIZE - k) / WINDOW_SIZE for k in range(WINDOW_SIZE)], dtype=np.float32)
+
+    #exponential decay
+    # gamma = 0.99  # Discount factor
+    # weights = np.array([gamma ** (WINDOW_SIZE - k - 1) for k in range(WINDOW_SIZE)], dtype=np.float32)
+
     
     # Compute net rewards for each frame by convolving with the weights
     cumulative_rewards = []
@@ -179,6 +186,7 @@ def process_replay(replay_dir, output_dir=TRAINING_CACHE_DIR):
 
         # Save sample to cache
         sample_path = os.path.join(cache_dir, f'{idx:06d}.pt')
+
         try:
             torch.save(sample, sample_path)
         except Exception as e:

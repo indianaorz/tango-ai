@@ -3,7 +3,10 @@ import os
 import glob
 
 def get_image_memory():
-    return 5
+    return 1
+
+def get_threshold():
+    return 0.1
 
 #checkpoint path
 def get_checkpoint_path(checkpoint_dir = '/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO/checkpoints', image_memory = 1):

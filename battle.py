@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 import numpy as np  # Import numpy for type conversion if needed
 from PIL import Image  # Import PIL for image loading
 from train import GameInputPredictor  # Import the model class
-from utils import get_checkpoint_path, get_image_memory, get_exponential_sample,get_exponental_amount
+from utils import get_checkpoint_path, get_image_memory, get_exponential_sample,get_exponental_amount, get_threshold
 import random
 from collections import deque  # Import deque for frame buffering
 
@@ -27,7 +27,7 @@ env_common["INIT_LINK_CODE"] = "your_link_code"
 env_common["AI_MODEL_PATH"] = "ai_model"
 env_common["MATCHMAKING_ID"] = "your_matchmaking_id"  # Replace with the actual matchmaking ID
 
-command_threshold = 0.1
+command_threshold = get_threshold()
 
 GAMMA = float(os.getenv("GAMMA", 0.01))  # Default gamma is 0.1 (10% chance of random action)
 
@@ -73,6 +73,7 @@ KEY_MAPPINGS = {
     6: 'Z'         # 0000000000000001
 }
 RANDOM_MAPPINGS = {
+    0: 'A',        # 0000000100000000
     1: 'DOWN',     # 0000000010000000
     2: 'UP',       # 0000000001000000
     3: 'LEFT',     # 0000000000100000
@@ -161,7 +162,7 @@ def get_training_data_dir(replay_path):
         training_data_dir = os.path.join("training_data", "generic_instance")
     os.makedirs(training_data_dir, exist_ok=True)
     return training_data_dir
-
+05
 # Function to run the AppImage with specific ROM, SAVE paths, and PORT
 def run_instance(rom_path, save_path, port, replay_path):
     env = env_common.copy()
