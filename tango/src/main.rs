@@ -591,7 +591,8 @@ fn map_key_to_physical_key(key: &str) -> Option<Key> {
         "right" => Some(Key::Right),
         "z" => Some(Key::Z),
         "x" => Some(Key::X),
-        "a" => Some(Key::S),
+        "a" => Some(Key::A),
+        "s" => Some(Key::S),
         _ => None,
     }
 }
@@ -604,6 +605,7 @@ fn map_bit_to_key(bit: usize) -> Option<Key> {
         6 => Some(Key::Up),       // 0000000001000000
         5 => Some(Key::Left),     // 0000000000100000
         4 => Some(Key::Right),    // 0000000000010000
+        3 => Some(Key::S),        // 0000000000000100 ???
         1 => Some(Key::X),        // 0000000000000010
         0 => Some(Key::Z),        // 0000000000000001
         _ => None,
