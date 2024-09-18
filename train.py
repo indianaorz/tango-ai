@@ -273,35 +273,100 @@ class H5GameDataset(Dataset):
             self.h5_file.close()
 
 # Add this class to your train.py
+# Add this class below the H5GameDataset class in your train.py
+import threading
+import queue
+import threading
+import queue
+import gc
+from tqdm import tqdm
+import torch
+from torch.utils.data import Dataset
 
 class PreloadedH5GameDataset(H5GameDataset):
-    def __init__(self, h5_path, device='cpu'):
+    def __init__(self, h5_path, device='cpu', batch_size=1000, prefetch_batches=2, image_memory=1):
+        """
+        Initializes the PreloadedH5GameDataset.
+
+        Args:
+            h5_path (str): Path to the HDF5 file.
+            device (torch.device): Device to load data onto ('cpu' or 'cuda').
+            batch_size (int): Number of samples per batch during preloading.
+            prefetch_batches (int): Number of batches to prefetch.
+            image_memory (int): Depth dimension for image tensors.
+        """
         super(PreloadedH5GameDataset, self).__init__(h5_path, device)
+        self.image_memory = image_memory  # Define the missing attribute
+        self.batch_size = batch_size
+        self.prefetch_batches = prefetch_batches
         self.preload_data()
 
     def preload_data(self):
         print("Preloading data into GPU...")
-        # Load all data into CPU tensors
-        images = torch.tensor(self.images[:], dtype=torch.float32) / 255.0  # Normalize if needed
-        inputs = torch.tensor(self.inputs[:], dtype=torch.float32)
-        net_rewards = torch.tensor(self.net_rewards[:], dtype=torch.float32)
+        num_samples = len(self)
 
-        # Move data to GPU
-        if self.device.type != 'cpu':
-            print("Moving data to GPU...")
-            self.images = images.to(self.device, non_blocking=True)
-            self.inputs = inputs.to(self.device, non_blocking=True)
-            self.net_rewards = net_rewards.to(self.device, non_blocking=True)
-        else:
-            self.images = images
-            self.inputs = inputs
-            self.net_rewards = net_rewards
+        # Preallocate tensors on GPU
+        try:
+            images = torch.empty((num_samples, 3, self.image_memory, 160, 240), dtype=torch.float32, device=self.device)
+            inputs = torch.empty((num_samples, 16), dtype=torch.float32, device=self.device)
+            net_rewards = torch.empty(num_samples, dtype=torch.float32, device=self.device)
+        except RuntimeError as e:
+            print(f"Error allocating GPU memory: {e}")
+            raise
 
-        # Delete the original HDF5 references to free up memory
+        # Create a thread-safe queue
+        prefetch_queue = queue.Queue(maxsize=self.prefetch_batches)
+
+        def loader():
+            try:
+                for start_idx in range(0, num_samples, self.batch_size):
+                    end_idx = min(start_idx + self.batch_size, num_samples)
+
+                    # Load data from HDF5
+                    images_np = self.h5_file['images'][start_idx:end_idx]
+                    inputs_np = self.h5_file['inputs'][start_idx:end_idx]
+                    net_rewards_np = self.h5_file['net_rewards'][start_idx:end_idx]
+
+                    # Convert to torch tensors
+                    images_cpu = torch.from_numpy(images_np).float() / 255.0  # Normalize
+                    inputs_cpu = torch.from_numpy(inputs_np).float()
+                    net_rewards_cpu = torch.from_numpy(net_rewards_np).float()
+
+                    # Put the batch into the queue
+                    prefetch_queue.put((start_idx, images_cpu, inputs_cpu, net_rewards_cpu))
+            finally:
+                # Signal that loading is done
+                prefetch_queue.put(None)
+
+        # Start the loader thread
+        loader_thread = threading.Thread(target=loader, daemon=True)
+        loader_thread.start()
+
+        # Process the batches
+        while True:
+            batch = prefetch_queue.get()
+            if batch is None:
+                break  # No more data
+
+            start_idx, images_cpu, inputs_cpu, net_rewards_cpu = batch
+            batch_size_actual = images_cpu.size(0)
+
+            # Asynchronously copy to GPU
+            try:
+                images[start_idx:start_idx+batch_size_actual].copy_(images_cpu, non_blocking=True)
+                inputs[start_idx:start_idx+batch_size_actual].copy_(inputs_cpu, non_blocking=True)
+                net_rewards[start_idx:start_idx+batch_size_actual].copy_(net_rewards_cpu, non_blocking=True)
+            except RuntimeError as e:
+                print(f"Error copying data to GPU: {e}")
+                raise
+
+        # Assign preloaded tensors to class attributes
+        self.images = images
+        self.inputs = inputs
+        self.net_rewards = net_rewards
+
+        # Delete the HDF5 file reference to free up CPU memory
         del self.h5_file
-        del images
-        del inputs
-        del net_rewards
         gc.collect()
         print("Data preloading completed.")
 
@@ -311,6 +376,7 @@ class PreloadedH5GameDataset(H5GameDataset):
         input_tensor = self.inputs[idx]
         net_reward = self.net_rewards[idx]
         return image, input_tensor, net_reward
+
 
 
 class GameInputPredictor(nn.Module):
@@ -452,7 +518,6 @@ def train_model(model, train_loader, optimizer, criterion, device,
 TRAINING_CACHE_DIR = os.path.join(get_root_dir(), 'training_cache')
 # Create dir if not exist
 os.makedirs(TRAINING_CACHE_DIR, exist_ok=True)
-
 def main():
     # Initialize wandb
     wandb.init(
@@ -569,7 +634,12 @@ def main():
             h5_path = os.path.join(cache_dir, f'subset_0.h5')
             if os.path.exists(h5_path):
                 print(f"Loading dataset from HDF5 file: {h5_path}")
-                dataset = PreloadedH5GameDataset(h5_path, device=device)
+                dataset = PreloadedH5GameDataset(
+                    h5_path=h5_path, 
+                    device=device, 
+                    batch_size=1000,  # Adjust based on your system's memory
+                    prefetch_batches=2  # Adjust based on desired prefetching
+                )
             else:
                 print("HDF5 file not found. Processing and creating HDF5 file.")
                 dataset = GameDataset(
@@ -627,7 +697,12 @@ def main():
                     h5f.attrs['net_reward_min'] = float(dataset.net_reward_min)
                     h5f.attrs['net_reward_max'] = float(dataset.net_reward_max)
                 # Reload dataset from HDF5 using the preloaded dataset
-                dataset = PreloadedH5GameDataset(h5_path, device=device)
+                dataset = PreloadedH5GameDataset(
+                    h5_path=h5_path, 
+                    device=device, 
+                    batch_size=1000,  # Adjust based on your system's memory
+                    prefetch_batches=2  # Adjust based on desired prefetching
+                )
         else:
             dataset = GameDataset(
                 replay_dirs=subset_dirs,
@@ -755,7 +830,12 @@ def main():
                     h5_path = os.path.join(cache_dir, f'subset_{subset_idx}.h5')
                     if os.path.exists(h5_path):
                         print(f"Loading dataset from HDF5 file: {h5_path}")
-                        dataset = PreloadedH5GameDataset(h5_path, device=device)
+                        dataset = PreloadedH5GameDataset(
+                            h5_path=h5_path, 
+                            device=device, 
+                            batch_size=1000,  # Adjust based on your system's memory
+                            prefetch_batches=4  # Adjust based on desired prefetching
+                        )
                     else:
                         print("HDF5 file not found. Processing and creating HDF5 file.")
                         dataset = GameDataset(
@@ -813,7 +893,12 @@ def main():
                             h5f.attrs['net_reward_min'] = float(dataset.net_reward_min)
                             h5f.attrs['net_reward_max'] = float(dataset.net_reward_max)
                         # Reload dataset from HDF5 using the preloaded dataset
-                        dataset = PreloadedH5GameDataset(h5_path, device=device)
+                        dataset = PreloadedH5GameDataset(
+                            h5_path=h5_path, 
+                            device=device, 
+                            batch_size=1000,  # Adjust based on your system's memory
+                            prefetch_batches=4  # Adjust based on desired prefetching
+                        )
                 else:
                     dataset = GameDataset(
                         replay_dirs=subset_dirs,
