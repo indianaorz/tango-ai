@@ -1,4 +1,4 @@
-#cache_data.py
+# cache_data.py
 import os
 import json
 import glob
@@ -8,11 +8,9 @@ from PIL import Image
 import torch
 from tqdm import tqdm  # For progress bars
 import argparse  # For command-line arguments
-from utils import get_root_dir
+from utils import get_root_dir, position_to_grid  # Ensure position_to_grid is imported
 
 # Paths
-# TRAINING_DATA_DIR = 'training_data'
-# TRAINING_CACHE_DIR = 'training_cache'
 TRAINING_DATA_DIR = get_root_dir() + '/training_data'
 TRAINING_CACHE_DIR = get_root_dir() + '/training_cache'
 WINDOW_SIZE = 600  # Number of frames to look ahead for rewards/punishments
@@ -22,14 +20,13 @@ def process_replay(replay_dir, output_dir=TRAINING_CACHE_DIR):
     replay_name = os.path.basename(replay_dir)
     cache_dir = os.path.join(output_dir, replay_name)
 
-
     # Check if the cache directory already exists and is non-empty
     if os.path.exists(cache_dir) and os.listdir(cache_dir):
         print(f"Cache already exists for {replay_name}, skipping this replay.")
         return  # Skip processing this replay as it is already cached
-        
+
     os.makedirs(cache_dir, exist_ok=True)
-    
+
     # Path to winner.json
     winner_file = os.path.join(replay_dir, 'winner.json')
     is_winner = None
@@ -44,91 +41,128 @@ def process_replay(replay_dir, output_dir=TRAINING_CACHE_DIR):
     else:
         print(f"winner.json not found in {replay_dir}, skipping this folder.")
         return  # Skip processing this folder
-    
+
     if is_winner is None:
         print(f"Winner status is undecided in {replay_dir}, skipping this folder.")
         return  # Skip processing this folder
-    
-    # Modify rewards and punishments based on winner status
+
     # Collect all JSON files (exclude winner.json)
     json_files = sorted(glob.glob(os.path.join(replay_dir, '*.json')))
     json_files = [f for f in json_files if not os.path.basename(f) == 'winner.json']
 
-    frames = []
-    for json_file in json_files:
+    if not json_files:
+        print(f"No JSON files found in {replay_dir}, skipping this folder.")
+        return
+
+    # First Pass: Determine max player_health and enemy_health
+    max_player_health = 0
+    max_enemy_health = 0
+    temp_frames = []
+
+    print(f"First pass: Determining max health values in {replay_name}")
+    for json_file in tqdm(json_files, desc="Scanning health values"):
         with open(json_file, 'r') as f:
             try:
                 data = json.load(f)
             except json.JSONDecodeError:
                 print(f"Invalid JSON format in {json_file}, skipping this frame.")
                 continue  # Skip this frame due to invalid JSON
-            
-            # Extract timestamp from filename or use current time if not available
-            try:
-                timestamp_str = os.path.splitext(os.path.basename(json_file))[0]
-                # Attempt to extract timestamp as integer
-                timestamp = int(timestamp_str)
-            except ValueError:
-                # If timestamp extraction fails, use the file's last modified time
-                timestamp = int(os.path.getmtime(json_file) * 1000)
-            
-            image_path = data.get('image_path')
-            input_str = data.get('input')
-            reward = data.get('reward') or 0
-            punishment = data.get('punishment') or 0
-            
-            if image_path is None:
-                print(f"No 'image_path' found in {json_file}, skipping this frame.")
-                continue  # Skip frames without image_path
-            
-            # Construct the absolute path to the image
-            image_abs_path = os.path.join(replay_dir, os.path.basename(image_path))
-            if not os.path.exists(image_abs_path):
-                print(f"Image file {image_abs_path} does not exist, skipping this frame.")
-                continue  # Skip frames with missing images
-            
-            frames.append({
-                'timestamp': timestamp,
-                'image_path': image_abs_path,
-                'input_str': input_str,
-                'reward': reward,
-                'punishment': punishment
-            })
-    
+
+            player_health = data.get('player_health', 0)
+            enemy_health = data.get('enemy_health', 0)
+
+            if isinstance(player_health, (int, float)) and player_health > max_player_health:
+                max_player_health = player_health
+
+            if isinstance(enemy_health, (int, float)) and enemy_health > max_enemy_health:
+                max_enemy_health = enemy_health
+
+            temp_frames.append(data)
+
+    if max_player_health == 0 or max_enemy_health == 0:
+        print(f"Max player_health or enemy_health is zero in {replay_dir}, skipping.")
+        return  # Avoid division by zero
+
+    print(f"Max Player Health: {max_player_health}, Max Enemy Health: {max_enemy_health}")
+
+    # Second Pass: Process frames with normalization and additional inputs
+    frames = []
+    for data in temp_frames:
+        # Extract timestamp
+        try:
+            timestamp_str = os.path.splitext(os.path.basename(data.get('image_path', '0.png')))[0]
+            timestamp = int(timestamp_str.split('_')[0])  # Adjust based on filename pattern
+        except (ValueError, IndexError):
+            timestamp = int(time.time() * 1000)  # Use current time if extraction fails
+
+        image_path = data.get('image_path')
+        input_str = data.get('input')
+        reward = data.get('reward') or 0
+        punishment = data.get('punishment') or 0
+        player_health = data.get('player_health', 0) / max_player_health
+        enemy_health = data.get('enemy_health', 0) / max_enemy_health
+        player_position = data.get('player_position', [0, 0])
+        enemy_position = data.get('enemy_position', [0, 0])
+        inside_window = data.get('inside_window', False)
+        if inside_window is None:
+            print(f"Invalid 'inside_window' value in frame with timestamp {timestamp}, skipping this frame.")
+            continue  # Skip frames with invalid inside_window
+
+
+        if image_path is None:
+            print(f"No 'image_path' found in frame with timestamp {timestamp}, skipping this frame.")
+            continue  # Skip frames without image_path
+
+        # Construct the absolute path to the image
+        image_abs_path = os.path.join(replay_dir, os.path.basename(image_path))
+        if not os.path.exists(image_abs_path):
+            print(f"Image file {image_abs_path} does not exist, skipping this frame.")
+            continue  # Skip frames with missing images
+
+        # Convert positions to grids
+        player_grid = position_to_grid(player_position[0], player_position[1])
+        enemy_grid = position_to_grid(enemy_position[0], enemy_position[1])
+
+        frames.append({
+            'timestamp': timestamp,
+            'image_path': image_abs_path,
+            'input_str': input_str,
+            'reward': reward,
+            'punishment': punishment,
+            'player_health': player_health,
+            'enemy_health': enemy_health,
+            'player_grid': player_grid,      # 6x3 grid
+            'enemy_grid': enemy_grid,        # 6x3 grid
+            'inside_window': inside_window   # 0 or 1
+        })
+
     if not frames:
-        print(f"No valid frames found in {replay_dir}, skipping this folder.")
+        print(f"No valid frames found after processing in {replay_dir}, skipping this folder.")
         return  # Skip if no valid frames are found
-    
+
     # Sort frames by timestamp
     frames.sort(key=lambda x: x['timestamp'])
-    
+
     num_frames = len(frames)
-    
+
     # Extract rewards and punishments for all frames
     rewards = np.array([frame['reward'] for frame in frames], dtype=np.float32)
     punishments = np.array([frame['punishment'] for frame in frames], dtype=np.float32)
-    
-    
+
     # Compute net rewards
     net_rewards = rewards - punishments
-    
+
     # Modify rewards or punishments based on winner status
     if is_winner:
         # Player won, add 1 to rewards for every frame
         net_rewards += 1.0
     else:
-        # Player lost, add 1 to punishments for every frame
+        # Player lost, subtract 1 from net rewards for every frame
         net_rewards -= 1.0
 
-    #linear decay
-    # Precompute weights for the window
+    # Linear decay weights
     weights = np.array([(WINDOW_SIZE - k) / WINDOW_SIZE for k in range(WINDOW_SIZE)], dtype=np.float32)
 
-    #exponential decay
-    # gamma = 0.99  # Discount factor
-    # weights = np.array([gamma ** (WINDOW_SIZE - k - 1) for k in range(WINDOW_SIZE)], dtype=np.float32)
-
-    
     # Compute net rewards for each frame by convolving with the weights
     cumulative_rewards = []
     for t in range(num_frames):
@@ -141,7 +175,7 @@ def process_replay(replay_dir, output_dir=TRAINING_CACHE_DIR):
         # Compute net reward
         net_reward = np.sum(net_rewards[start:end] * window_weights)
         cumulative_rewards.append(net_reward)
-    
+
     # Process frames and save tensors
     for idx, frame in enumerate(tqdm(frames, desc=f'Processing {replay_name}')):
         input_str = frame['input_str']
@@ -177,15 +211,20 @@ def process_replay(replay_dir, output_dir=TRAINING_CACHE_DIR):
         # Get net reward
         net_reward = cumulative_rewards[idx]
 
-        if(net_reward == 0):
+        if net_reward == 0:
             print(f"Net reward is 0 at frame {idx}, skipping.")
             continue
 
-        # Create sample dictionary
+        # Create sample dictionary with new inputs
         sample = {
             'image': image_tensor,
             'input': input_tensor,
-            'net_reward': net_reward
+            'net_reward': net_reward,
+            'player_health': torch.tensor(frame['player_health'], dtype=torch.float32),
+            'enemy_health': torch.tensor(frame['enemy_health'], dtype=torch.float32),
+            'player_grid': torch.tensor(frame['player_grid'], dtype=torch.float32),  # Shape: (6, 3)
+            'enemy_grid': torch.tensor(frame['enemy_grid'], dtype=torch.float32),    # Shape: (6, 3)
+            'inside_window': torch.tensor(frame['inside_window'], dtype=torch.float32)  # Scalar
         }
 
         # Save sample to cache

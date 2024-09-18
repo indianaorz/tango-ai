@@ -1,4 +1,4 @@
-#data_capture.py
+# data_capture.py
 import subprocess
 import os
 import time
@@ -12,6 +12,16 @@ import sys
 import glob  # For file pattern matching
 import argparse  # For parsing command-line arguments
 from utils import get_root_dir
+from tqdm import tqdm  # Import tqdm for progress bar
+import logging  # Import logging module
+
+# Configure logging
+logging.basicConfig(
+    filename='data_capture.log',
+    filemode='a',
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
 # Path to the Tango AppImage
 APP_PATH = "./dist/tango-x86_64-linux.AppImage"
@@ -36,11 +46,9 @@ def get_training_data_dir(replay_path):
 # Function to get a list of unprocessed replays with an optional maximum limit
 def get_unprocessed_replays(max_replays=None):
     """
-    Retrieves a list of unprocessed replay files. Optionally limits the number
-    of replays returned based on the max_replays parameter.
+    Retrieves a list of unprocessed replay files. Optionally limits the number of replays returned based on the max_replays parameter.
     
-    A replay is considered unprocessed if its corresponding training data directory
-    does not exist or if the winner status in winner.json is undecided.
+    A replay is considered unprocessed if its corresponding training data directory does not exist or if the winner status in winner.json is undecided.
 
     Args:
         max_replays (int, optional): Maximum number of replays to return. Defaults to None.
@@ -50,7 +58,7 @@ def get_unprocessed_replays(max_replays=None):
     """
     # Get all replay files with 'bn6' in their name
     replay_files = glob.glob(os.path.join(REPLAYS_DIR, '*bn6*.tangoreplay'))
-    
+    print(f"Found {len(replay_files)} replay files.")
     unprocessed_replays = []
     for replay_file in replay_files:
         replay_name = os.path.basename(replay_file).split('.')[0]
@@ -74,7 +82,7 @@ def get_unprocessed_replays(max_replays=None):
                 except json.JSONDecodeError:
                     # If winner.json is corrupted, consider the replay as unprocessed
                     unprocessed_replays.append(replay_file)
-                    print(f"Invalid JSON format in {winner_file}, considering {replay_name} unprocessed.")
+                    logging.warning(f"Invalid JSON format in {winner_file}, considering {replay_name} unprocessed.")
             else:
                 # If winner.json does not exist, consider it processed (or handle differently if needed)
                 pass
@@ -82,7 +90,7 @@ def get_unprocessed_replays(max_replays=None):
         # Stop adding more replays if max_replays is reached
         if max_replays is not None and len(unprocessed_replays) >= max_replays:
             break
-
+    print(f"Found {len(unprocessed_replays)} unprocessed replays.")
     return unprocessed_replays
 
 
@@ -94,8 +102,23 @@ def run_instance(rom_path, save_path, port, replay_path):
     env["PORT"] = str(port)
     env["REPLAY_PATH"] = replay_path
 
+    logging.info(f"Running instance with ROM_PATH: {rom_path}, SAVE_PATH: {save_path}, PORT: {port}")
     print(f"Running instance with ROM_PATH: {rom_path}, SAVE_PATH: {save_path}, PORT: {port}")
-    subprocess.Popen([APP_PATH], env=env)
+    try:
+        subprocess.Popen([APP_PATH], env=env)
+    except Exception as e:
+        logging.error(f"Failed to start instance on port {port}: {e}")
+        print(f"Failed to start instance on port {port}: {e}")
+
+# Function to check if a port is open
+async def is_port_open(host, port, timeout=5):
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout)
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except:
+        return False
 
 # Function to start instances in batches
 def start_instances_in_batches(instances, batch_size=10):
@@ -107,22 +130,41 @@ def start_instances_in_batches(instances, batch_size=10):
         batch_size (int, optional): Number of instances to start per batch. Defaults to 10.
     """
     total_instances = len(instances)
-    for i in range(0, total_instances, batch_size):
-        batch = instances[i:i+batch_size]
-        # Start instances in the current batch
-        for instance in batch:
-            run_instance(instance['rom_path'], instance['save_path'], instance['port'], instance['replay_path'])
-            time.sleep(0.5)  # Adjust sleep time based on app's boot time
-        # Wait for the batch to complete
-        print(f"Processing batch {i // batch_size + 1} of {((total_instances - 1) // batch_size) + 1}")
-        asyncio.run(process_batch(batch))
-        # Optionally, you can add a delay or cleanup here if needed
+    num_batches = (total_instances + batch_size - 1) // batch_size  # Calculate total number of batches
+
+    with tqdm(total=num_batches, desc="Processing Batches", unit="batch") as pbar:
+        for i in range(0, total_instances, batch_size):
+            batch = instances[i:i+batch_size]
+            batch_number = (i // batch_size) + 1
+            logging.info(f"Starting batch {batch_number} with {len(batch)} instances.")
+            print(f"Starting batch {batch_number} with {len(batch)} instances.")
+
+            # Start instances in the current batch
+            for instance in batch:
+                run_instance(instance['rom_path'], instance['save_path'], instance['port'], instance['replay_path'])
+                logging.info(f"Started instance {instance['name']} on port {instance['port']}.")
+                print(f"Started instance {instance['name']} on port {instance['port']}.")
+                time.sleep(0.5)  # Adjust sleep time based on app's boot time
+
+            # Wait for the batch to complete
+            logging.info(f"Processing batch {batch_number} of {num_batches}")
+            print(f"Processing batch {batch_number} of {num_batches}")
+            try:
+                asyncio.run(process_batch(batch))
+                logging.info(f"Completed batch {batch_number} of {num_batches}")
+                print(f"Completed batch {batch_number} of {num_batches}")
+            except Exception as e:
+                logging.error(f"Error processing batch {batch_number}: {e}")
+                print(f"Error processing batch {batch_number}: {e}")
+            pbar.update(1)
+            # Optionally, you can add a delay or cleanup here if needed
 
 # Function to process a batch of instances
 async def process_batch(instances):
     tasks = [asyncio.create_task(handle_connection(instance)) for instance in instances]
     # Wait for all handle_connection tasks to complete
-    await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks, return_exceptions=True)
+    logging.info("Batch processing completed.")
     print("Batch processing completed.")
 
 # Placeholder predict method for AI inference (currently random actions)
@@ -142,10 +184,15 @@ def save_image_from_base64(encoded_image, port, training_data_dir):
     return image_path
 
 # Function to save a game state as JSON
-def save_game_state(image_path, input_binary, reward=None, punishment=None, training_data_dir=None):
+def save_game_state(image_path, input_binary, player_health, enemy_health, player_position, enemy_position, inside_window, reward=None, punishment=None, training_data_dir=None):
     game_state = {
         "image_path": image_path,
         "input": input_binary,
+        "player_health": player_health,
+        "enemy_health": enemy_health,
+        "player_position": player_position,
+        "enemy_position": enemy_position,
+        "inside_window": inside_window,
         "reward": reward,
         "punishment": punishment
     }
@@ -164,6 +211,7 @@ async def send_input_command(writer, command):
     except (ConnectionResetError, BrokenPipeError):
         raise
     except Exception as e:
+        logging.error(f"Failed to send command: {e}")
         print(f"Failed to send command: {e}")
         raise
 
@@ -173,6 +221,7 @@ async def request_screen_image(writer):
         command = {'type': 'request_screen', 'key': ''}
         await send_input_command(writer, command)
     except Exception as e:
+        logging.error(f"Failed to request screen image: {e}")
         print(f"Failed to request screen image: {e}")
         raise
 
@@ -190,6 +239,7 @@ async def receive_messages(reader, port, training_data_dir):
         while True:
             data = await reader.read(4096)
             if not data:
+                logging.info(f"Connection closed by peer on port {port}.")
                 print(f"Connection closed by peer on port {port}.")
                 break
             buffer += data.decode()
@@ -214,10 +264,35 @@ async def receive_messages(reader, port, training_data_dir):
                         current_input = int_to_binary_string(int(details))
 
                     elif event == "screen_image":
-                        image_path = save_image_from_base64(details, port, training_data_dir)
+                        # Parse the details JSON
+                        try:
+                            screen_data = json.loads(details)
+                            encoded_image = screen_data.get("image", "")
+                            player_health = screen_data.get("player_health", 0)
+                            enemy_health = screen_data.get("enemy_health", 0)
+                            player_position = screen_data.get("player_position", None)
+                            enemy_position = screen_data.get("enemy_position", None)
+                            inside_window = screen_data.get("inside_window", False)
+                        except json.JSONDecodeError:
+                            logging.warning(f"Failed to parse screen_image details: {details}")
+                            print(f"Failed to parse screen_image details: {details}")
+                            continue
+
+                        image_path = save_image_from_base64(encoded_image, port, training_data_dir)
                         
-                        # Save game state when an image is received
-                        save_game_state(image_path, current_input, current_reward, current_punishment, training_data_dir)
+                        # Save game state with additional data
+                        save_game_state(
+                            image_path=image_path,
+                            input_binary=current_input,
+                            player_health=player_health,
+                            enemy_health=enemy_health,
+                            player_position=player_position,
+                            enemy_position=enemy_position,
+                            inside_window=inside_window,
+                            reward=current_reward,
+                            punishment=current_punishment,
+                            training_data_dir=training_data_dir
+                        )
                         
                         # Reset rewards/punishments after saving
                         current_reward = None
@@ -227,26 +302,31 @@ async def receive_messages(reader, port, training_data_dir):
                         try:
                             current_reward = int(details.split(":")[1].strip())
                         except ValueError:
+                            logging.warning(f"Failed to parse reward message: {details}")
                             print(f"Failed to parse reward message: {details}")
 
                     elif event == "punishment":
                         try:
                             current_punishment = int(details.split(":")[1].strip())
                         except ValueError:
+                            logging.warning(f"Failed to parse punishment message: {details}")
                             print(f"Failed to parse punishment message: {details}")
                     elif event == "winner":
                         player_won = details.lower() == "true"
                         save_winner_status(training_data_dir, player_won)
 
                     else:
+                        logging.info(f"Received message: Event - {event}, Details - {details}")
                         print(f"Received message: Event - {event}, Details - {details}")
 
                 except json.JSONDecodeError:
                     break
 
     except (ConnectionResetError, BrokenPipeError):
+        logging.warning(f"Connection was reset by peer on port {port}, closing receiver.")
         print(f"Connection was reset by peer on port {port}, closing receiver.")
     except Exception as e:
+        logging.error(f"Failed to receive message on port {port}: {e}")
         print(f"Failed to receive message on port {port}: {e}")
 
 # Function to save the winner status in the replay folder
@@ -257,12 +337,29 @@ def save_winner_status(training_data_dir, player_won):
     file_path = os.path.join(training_data_dir, "winner.json")
     with open(file_path, 'w') as f:
         json.dump(winner_status, f)
+    logging.info(f"Saved winner status: {winner_status} in {file_path}")
+    print(f"Saved winner status: {winner_status} in {file_path}")
 
 # Function to handle connection to a specific instance and predict actions based on screen capture
-async def handle_connection(instance):
+async def handle_connection(instance, connection_timeout=10):
+    writer = None  # Initialize writer to ensure it's accessible in finally block
     try:
-        reader, writer = await asyncio.open_connection(instance['address'], instance['port'])
-        print(f"Connected to {instance['name']} at {instance['address']}:{instance['port']}")
+        # Attempt to establish a connection with a timeout
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(instance['address'], instance['port']),
+                timeout=connection_timeout
+            )
+            logging.info(f"Connected to {instance['name']} at {instance['address']}:{instance['port']}")
+            print(f"Connected to {instance['name']} at {instance['address']}:{instance['port']}")
+        except asyncio.TimeoutError:
+            logging.error(f"Connection to {instance['name']} timed out after {connection_timeout} seconds.")
+            print(f"Connection to {instance['name']} timed out after {connection_timeout} seconds.")
+            return  # Exit the function if connection times out
+        except Exception as e:
+            logging.error(f"Failed to connect to {instance['name']}: {e}")
+            print(f"Failed to connect to {instance['name']}: {e}")
+            return  # Exit the function on other connection errors
 
         # Get the training data directory based on the replay path
         training_data_dir = get_training_data_dir(instance['replay_path'])
@@ -284,26 +381,30 @@ async def handle_connection(instance):
                     await send_input_command(writer, command)
 
             except (ConnectionResetError, BrokenPipeError):
+                logging.warning(f"Connection to {instance['name']} was reset. Stopping send loop.")
                 print(f"Connection to {instance['name']} was reset. Stopping send loop.")
                 break  # Exit the loop
             except Exception as e:
+                logging.error(f"An error occurred in connection to {instance['name']}: {e}")
                 print(f"An error occurred in connection to {instance['name']}: {e}")
                 break  # Exit the loop on other exceptions
 
         # Wait for the receive_messages task to finish
         await receive_task
 
-    except ConnectionRefusedError:
-        print(f"Failed to connect to {instance['name']}. Is the application running?")
     except Exception as e:
-        print(f"An error occurred with {instance['name']}: {e}")
+        logging.error(f"Unhandled exception with {instance['name']}: {e}")
+        print(f"Unhandled exception with {instance['name']}: {e}")
     finally:
-        try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception as e:
-            print(f"Error closing connection to {instance['name']}: {e}")
-        print(f"Connection to {instance['name']} closed.")
+        if writer:
+            try:
+                writer.close()
+                await writer.wait_closed()
+                logging.info(f"Connection to {instance['name']} closed.")
+                print(f"Connection to {instance['name']} closed.")
+            except Exception as e:
+                logging.error(f"Error closing connection to {instance['name']}: {e}")
+                print(f"Error closing connection to {instance['name']}: {e}")
 
 # Main function to start instances and handle inputs
 def main():
@@ -311,7 +412,7 @@ def main():
     parser.add_argument('--max_replays', type=int, default=None,
                         help='Maximum number of replays to process. If not set, all unprocessed replays will be processed.')
     parser.add_argument('--batch_size', type=int, default=20,
-                        help='Number of instances to start per batch. Default is 10.')
+                        help='Number of instances to start per batch. Default is 20.')
     parser.add_argument('--start_port', type=int, default=12345,
                         help='Starting port number for instances. Default is 12345.')
 
@@ -321,12 +422,23 @@ def main():
     batch_size = args.batch_size
     starting_port = args.start_port
 
+    print(f"Starting instances with max_replays={max_replays}, batch_size={batch_size}, starting_port={starting_port}")
+
     # Get the list of unprocessed replays
     unprocessed_replays = get_unprocessed_replays(max_replays)
 
     if not unprocessed_replays:
+        logging.info("No unprocessed replays found.")
         print("No unprocessed replays found.")
         return
+
+    # Log and print the list of unprocessed replays
+    logging.info(f"Found {len(unprocessed_replays)} unprocessed replays:")
+    for replay in unprocessed_replays:
+        logging.info(f" - {replay}")
+    print("List of unprocessed replays:")
+    for replay in unprocessed_replays:
+        print(f" - {replay}")
 
     print(f"Found {len(unprocessed_replays)} unprocessed replays.")
 
@@ -340,6 +452,7 @@ def main():
         # Check if the training data directory exists
         training_data_dir = os.path.join(TRAINING_DATA_DIR, replay_name)
         if os.path.exists(training_data_dir):
+            logging.info(f"Training data for {replay_name} already exists. Skipping.")
             print(f"Training data for {replay_name} already exists. Skipping.")
             continue
 
@@ -357,16 +470,19 @@ def main():
         port += 1  # Increment port for the next instance
 
     if not instances:
+        logging.info("No new instances to process.")
         print("No new instances to process.")
         return
 
+    logging.info(f"Starting {len(instances)} instances.")
     print(f"Starting {len(instances)} instances.")
 
-    # Start instances in batches
+    # Start instances in batches with a progress bar
     start_instances_in_batches(instances, batch_size=batch_size)
 
 if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
+        logging.info("Script interrupted by user. Exiting...")
         print("\nExiting...")

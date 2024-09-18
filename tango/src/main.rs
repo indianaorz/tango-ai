@@ -43,7 +43,7 @@ use keyboard::Key;
 
 mod global; // Include the global module
 
-use crate::global::{get_punishments,get_rewards,add_reward, add_punishment, clear_rewards, clear_punishments, get_screen_image, get_local_input, clear_local_input, get_winner, SCREEN_IMAGE, RewardPunishment};
+use crate::global::{get_punishments,get_rewards,add_reward, add_punishment, clear_rewards, clear_punishments, get_screen_image, get_local_input, clear_local_input, get_winner,get_player_health,get_player_position,get_enemy_health,get_enemy_position, get_is_player_inside_window, SCREEN_IMAGE, RewardPunishment};
 use crate::global::{REWARDS, PUNISHMENTS}; // Import the global variables
 
 use base64::{encode}; // Add base64 for encoding images as strings
@@ -682,11 +682,22 @@ struct OutputMessage {
     event: String,
     details: String,
 }
+
+
+#[derive(Serialize, Debug)]
+struct ScreenImageDetails {
+    image: String, // Base64-encoded PNG image
+    player_health: u16,
+    enemy_health: u16,
+    player_position: Option<(u16, u16)>,
+    enemy_position: Option<(u16, u16)>,
+    inside_window: Option<bool>,
+}
 use image::codecs::png::PngEncoder;
 use image::ImageEncoder;
 use image::ColorType; // Make sure to import ColorType from the image crate
 use egui::Color32;
-// Modify the handle_tcp_client function to send the screen_image event
+
 async fn handle_tcp_client(
     mut socket: tokio::net::TcpStream,
     tx: mpsc::UnboundedSender<InputCommand>,
@@ -733,15 +744,33 @@ async fn handle_tcp_client(
                                                 // Encode PNG data in base64
                                                 let encoded_image = encode(png_data);
 
-                                                // Send the encoded image back
-                                                let response = OutputMessage {
-                                                    event: "screen_image".to_string(),
-                                                    details: encoded_image,
+                                                // Retrieve additional game state data
+                                                let player_health = get_player_health();
+                                                let enemy_health = get_enemy_health();
+                                                let player_position = get_player_position();
+                                                let enemy_position = get_enemy_position();
+                                                let inside_window = get_is_player_inside_window();
+                                                // Create ScreenImageDetails
+                                                let screen_details = ScreenImageDetails {
+                                                    image: encoded_image,
+                                                    player_health,
+                                                    enemy_health,
+                                                    player_position,
+                                                    enemy_position,
+                                                    inside_window
                                                 };
 
-                                                // Log the event being sent for debugging
-                                                // println!("Sending screen_image event: {:?}", response);
+                                                // Serialize ScreenImageDetails to JSON
+                                                let details_json = serde_json::to_string(&screen_details)
+                                                    .expect("Failed to serialize screen details");
 
+                                                // Create OutputMessage
+                                                let response = OutputMessage {
+                                                    event: "screen_image".to_string(),
+                                                    details: details_json,
+                                                };
+
+                                                // Send the response back to Python
                                                 if let Err(e) = send_message_to_python(&mut socket, &response).await {
                                                     println!("Failed to send screen image: {}", e);
                                                 }
@@ -789,7 +818,6 @@ async fn handle_tcp_client(
         }
     }
 }
-
 
 
 // Function to send messages back to the Python app

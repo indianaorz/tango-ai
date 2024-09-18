@@ -34,8 +34,52 @@ lazy_static! {
 
     pub static ref WINNER_STATE: Arc<Mutex<WinnerState>> = Arc::new(Mutex::new(WinnerState { player_won: None }));
 
+    // New globals for additional data points
+    pub static ref PLAYER_POSITION: Arc<Mutex<Option<(u16, u16)>>> = Arc::new(Mutex::new(None));
+    pub static ref ENEMY_POSITION: Arc<Mutex<Option<(u16, u16)>>> = Arc::new(Mutex::new(None));
+    pub static ref GRID_STATE: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
+    pub static ref PLAYER_FORMS_USED: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
+    pub static ref ENEMY_FORMS_USED: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
+    pub static ref IS_PLAYER_INSIDE_WINDOW: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None)); // New flag
+
+    //player and enemy health
+    pub static ref PLAYER_HEALTH: Arc<Mutex<u16>> = Arc::new(Mutex::new(100));
+    pub static ref ENEMY_HEALTH: Arc<Mutex<u16>> = Arc::new(Mutex::new(100));
+
+    //player health index
+    pub static ref PLAYER_HEALTH_INDEX: Arc<Mutex<u16>> = Arc::new(Mutex::new(2));
 }
 
+
+// Function to set the player health index
+pub fn set_player_health_index(index: u16) {
+    println!("Setting player health index to: {:?}", index);
+    let mut player_health_index = PLAYER_HEALTH_INDEX.lock();
+    *player_health_index = index;
+}
+pub fn get_player_health_index() -> u16 {
+    let player_health_index = PLAYER_HEALTH_INDEX.lock();
+    *player_health_index
+}
+
+// Function to set the player health
+pub fn set_player_health(health: u16) {
+    let mut player_health = PLAYER_HEALTH.lock();
+    *player_health = health;
+}
+pub fn get_player_health() -> u16 {
+    let player_health = PLAYER_HEALTH.lock();
+    *player_health
+}
+//enemy health
+pub fn set_enemy_health(health: u16) {
+    let mut enemy_health = ENEMY_HEALTH.lock();
+    *enemy_health = health;
+}
+pub fn get_enemy_health() -> u16 {
+    let enemy_health = ENEMY_HEALTH.lock();
+    *enemy_health
+}
 
 // Function to set the winner state
 pub fn set_winner(player_won: bool) {
@@ -134,4 +178,72 @@ pub fn set_replay_path(path: String) {
 pub fn get_replay_path() -> Option<String> {
     let replay_path = REPLAY_PATH.lock();
     replay_path.clone()
+}
+
+
+
+// Player Position
+pub fn set_player_position(position: (u16, u16)) {
+    let mut pos = PLAYER_POSITION.lock();
+    *pos = Some(position);
+}
+
+pub fn get_player_position() -> Option<(u16, u16)> {
+    let pos = PLAYER_POSITION.lock();
+    *pos
+}
+
+// Enemy Position
+pub fn set_enemy_position(position: (u16, u16)) {
+    let mut pos = ENEMY_POSITION.lock();
+    *pos = Some(position);
+}
+
+pub fn get_enemy_position() -> Option<(u16, u16)> {
+    let pos = ENEMY_POSITION.lock();
+    *pos
+}
+
+// Grid State
+pub fn set_grid_state(state: Vec<String>) {
+    let mut gs = GRID_STATE.lock();
+    *gs = Some(state);
+}
+
+pub fn get_grid_state() -> Option<Vec<String>> {
+    let gs = GRID_STATE.lock();
+    gs.clone()
+}
+
+// Player Forms Used
+pub fn set_player_forms_used(forms: Vec<String>) {
+    let mut pf = PLAYER_FORMS_USED.lock();
+    *pf = Some(forms);
+}
+
+pub fn get_player_forms_used() -> Option<Vec<String>> {
+    let pf = PLAYER_FORMS_USED.lock();
+    pf.clone()
+}
+
+// Enemy Forms Used
+pub fn set_enemy_forms_used(forms: Vec<String>) {
+    let mut ef = ENEMY_FORMS_USED.lock();
+    *ef = Some(forms);
+}
+
+pub fn get_enemy_forms_used() -> Option<Vec<String>> {
+    let ef = ENEMY_FORMS_USED.lock();
+    ef.clone()
+}
+
+// Is Player Inside Window
+pub fn set_is_player_inside_window(is_inside: bool) {
+    let mut flag = IS_PLAYER_INSIDE_WINDOW.lock();
+    *flag = Some(is_inside);
+}
+
+pub fn get_is_player_inside_window() -> Option<bool> {
+    let flag = IS_PLAYER_INSIDE_WINDOW.lock();
+    *flag
 }

@@ -1,0 +1,54 @@
+sudo umount /dev/nvme0n1p3
+sudo systemctl restart dbus -- caused crash
+
+The error message you shared indicates that your system is unable to mount the partition /dev/nvme0n1p3. The specific causes mentioned include:
+
+Wrong file system type: The partition might use an unsupported or incorrect file system type.
+Bad option or bad superblock: There could be an issue with the superblock of the partition, which holds critical information about the file system.
+Missing codepage or helper program: Your system might be missing a tool or package required to mount the partition, such as NTFS drivers if it's an NTFS file system.
+Here are a few steps to troubleshoot:
+
+Check the file system type: You can check the file system type of the partition with the following command:
+
+bash
+Copy code
+sudo blkid /dev/nvme0n1p3
+Run a file system check: If the file system type is correct, you might need to run a file system check. If it's an ext4 partition, use:
+
+bash
+Copy code
+sudo fsck /dev/nvme0n1p3
+Ensure correct mounting options: If you're manually trying to mount the partition, ensure you are using the correct mount options.
+
+Install necessary drivers: If it's an NTFS partition, make sure the ntfs-3g driver is installed:
+
+bash
+Copy code
+sudo apt-get install ntfs-3g
+Inspect the superblock: If you suspect the superblock is corrupted, you can try to restore it using a backup superblock (if available) for ext file systems:
+
+bash
+Copy code
+sudo e2fsck -b 32768 /dev/nvme0n1p3
+Let me know if you'd like further guidance on any of these steps!
+
+
+
+
+
+
+
+sudo mount -t ntfs-3g /dev/nvme0n1p3 /mnt
+sudo ntfsfix /dev/nvme0n1p3
+Mounting volume... OK
+Processing of $MFT and $MFTMirr completed successfully.
+Checking the alternate boot sector... OK
+NTFS volume version is 3.1.
+NTFS partition /dev/nvme0n1p3 was processed successfully.
+
+
+
+sudo smartctl -a /dev/nvme0n1
+
+sudo ntfsfix /dev/nvme0n1p3
+sudo mount /dev/nvme0n1p3 /media/lee/

@@ -10,13 +10,14 @@ from utils import get_checkpoint_path, get_exponential_sample, get_image_memory,
 
 app = Flask(__name__)
 
-TRAINING_DATA_DIR = get_root_dir() + '/training_data'
-TRAINING_CACHE_DIR = get_root_dir() + '/training_cache'  # Ensure this path is correct
+# Define directories
+TRAINING_DATA_DIR = os.path.join(get_root_dir(), 'training_data')
+TRAINING_CACHE_DIR = os.path.join(get_root_dir(), 'training_cache')  # Ensure this path is correct
 
 # Global configuration
-USE_MODEL = True  # Set to False to disable model loading and inference
-checkpoint_path= get_root_dir() + '/checkpoints'
-IMAGE_MEMORY = get_image_memory() # Adjust as needed or make dynamic
+USE_MODEL = False  # Set to False to disable model loading and inference
+checkpoint_path = os.path.join(get_root_dir(), 'checkpoints')
+IMAGE_MEMORY = get_image_memory()  # Adjust as needed or make dynamic
 
 model = None
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -35,28 +36,49 @@ def load_model(checkpoint_path, image_memory=1):
 
 @app.route('/')
 def index():
+    """
+    Home route that lists all available folders in the training data directory.
+    """
     # Get list of folders in training_data
     folders = [name for name in os.listdir(TRAINING_DATA_DIR)
                if os.path.isdir(os.path.join(TRAINING_DATA_DIR, name))]
     return render_template('index.html', folders=folders)
 
+
 @app.route('/folder/<folder_name>')
 def folder_view(folder_name):
-    # Check if folder exists
-    folder_path = os.path.join(TRAINING_DATA_DIR, folder_name)
-    if not os.path.exists(folder_path):
+    """
+    Route to view a specific folder's contents.
+    Now also passes a sorted list of all folders and the current folder's index.
+    """
+    # Get list of folders sorted alphabetically
+    folders = sorted([name for name in os.listdir(TRAINING_DATA_DIR)
+                      if os.path.isdir(os.path.join(TRAINING_DATA_DIR, name))])
+    
+    if folder_name not in folders:
         return "Folder not found", 404
-    return render_template('viewer.html', folder_name=folder_name, image_memory=IMAGE_MEMORY)
+
+    current_index = folders.index(folder_name)
+    
+    return render_template('viewer.html', 
+                           folder_name=folder_name, 
+                           image_memory=IMAGE_MEMORY,
+                           folders=folders,
+                           current_index=current_index)
 
 @app.route('/folder/<folder_name>/frame/<int:frame_index>')
 def frame_data(folder_name, frame_index):
+    """
+    Route to fetch data for a specific frame within a folder.
+    Includes new data points: player_health, enemy_health, player_position, enemy_position, inside_window.
+    """
     folder_path = os.path.join(TRAINING_DATA_DIR, folder_name)
     if not os.path.exists(folder_path):
         return "Folder not found", 404
 
     # Get list of JSON files sorted by timestamp in filenames
     json_files = sorted(glob.glob(os.path.join(folder_path, '*.json')))
-    json_files = [f for f in json_files if not os.path.basename(f) == 'winner.json']
+    json_files = [f for f in json_files if os.path.basename(f) != 'winner.json']
     total_frames = len(json_files)
     if frame_index < 0 or frame_index >= total_frames:
         return "Frame index out of range", 404
@@ -72,7 +94,7 @@ def frame_data(folder_name, frame_index):
         frame_file = json_files[idx]
         with open(frame_file, 'r') as f:
             frame_data = json.load(f)
-            # **Modify image_path to be relative to folder_name**
+            # Modify image_path to be relative to folder_name
             image_filename = os.path.basename(frame_data.get('image_path', ''))
             frames_data.append({
                 'image_path': image_filename,  # Only the filename
@@ -85,7 +107,7 @@ def frame_data(folder_name, frame_index):
     current_frame_file = json_files[frame_index]
     with open(current_frame_file, 'r') as f:
         current_data = json.load(f)
-        # **Modify image_path to be relative to folder_name**
+        # Modify image_path to be relative to folder_name
         current_image_filename = os.path.basename(current_data.get('image_path', ''))
 
     # Check if the player is the winner
@@ -153,7 +175,7 @@ def frame_data(folder_name, frame_index):
         pt_net_reward = None
         input_tensor_list = None
 
-    # Prepare response data without running inference
+    # Prepare response data including new fields
     response_data = {
         'current_frame': frame_index,
         'total_frames': total_frames,
@@ -170,6 +192,11 @@ def frame_data(folder_name, frame_index):
             'frames_ahead': frames_ahead_punishment
         } if next_punishment is not None else None,
         'winner': is_winner,  # Include the winner status from winner.json
+        'player_health': current_data.get('player_health', 0),
+        'enemy_health': current_data.get('enemy_health', 0),
+        'player_position': current_data.get('player_position', None),
+        'enemy_position': current_data.get('enemy_position', None),
+        'inside_window': current_data.get('inside_window', False),
         'pt_net_reward': pt_net_reward,  # Add net_reward from .pt file
         'pt_input_tensor': input_tensor_list,  # Add input tensor from .pt file
     }
@@ -178,6 +205,10 @@ def frame_data(folder_name, frame_index):
 
 @app.route('/folder/<folder_name>/frame/<int:frame_index>/inference')
 def frame_inference(folder_name, frame_index):
+    """
+    Route to perform inference on a specific frame using the AI model.
+    Returns the model's prediction.
+    """
     if not USE_MODEL:
         return jsonify({'error': 'Inference is disabled because USE_MODEL is set to False'}), 403
 
@@ -187,7 +218,7 @@ def frame_inference(folder_name, frame_index):
 
     # Get list of JSON files sorted by timestamp in filenames
     json_files = sorted(glob.glob(os.path.join(folder_path, '*.json')))
-    json_files = [f for f in json_files if not os.path.basename(f) == 'winner.json']
+    json_files = [f for f in json_files if os.path.basename(f) != 'winner.json']
     total_frames = len(json_files)
     if frame_index < 0 or frame_index >= total_frames:
         return "Frame index out of range", 404
@@ -203,7 +234,7 @@ def frame_inference(folder_name, frame_index):
         frame_file = json_files[idx]
         with open(frame_file, 'r') as f:
             frame_data = json.load(f)
-            # **Modify image_path to be relative to folder_name**
+            # Modify image_path to be relative to folder_name
             image_filename = os.path.basename(frame_data.get('image_path', ''))
             frames_data.append({
                 'image_path': image_filename,  # Only the filename
@@ -259,11 +290,16 @@ def frame_inference(folder_name, frame_index):
 
 @app.route('/training_data/<path:filename>')
 def training_data_files(filename):
+    """
+    Route to serve static files (images) from the training_data directory.
+    """
     return send_from_directory(TRAINING_DATA_DIR, filename)
 
-# **Swap Player Route - Moved Above the Main Block**
 @app.route('/folder/<folder_name>/swap_player', methods=['POST'])
 def swap_player(folder_name):
+    """
+    Route to swap player data (e.g., swap rewards and punishments).
+    """
     print(f"Swapping player for folder {folder_name}")
     folder_path = os.path.join(TRAINING_DATA_DIR, folder_name)
     if not os.path.exists(folder_path):
@@ -284,6 +320,17 @@ def swap_player(folder_name):
             punishment = data.get('punishment')
             data['reward'] = punishment
             data['punishment'] = reward
+
+            #swap healths and positions too
+            player_health = data.get('player_health')
+            enemy_health = data.get('enemy_health')
+            player_position = data.get('player_position')
+            enemy_position = data.get('enemy_position')
+            data['player_health'] = enemy_health
+            data['enemy_health'] = player_health
+            data['player_position'] = enemy_position
+            data['enemy_position'] = player_position
+
 
             # Save back to file
             with open(json_file, 'w') as f:
@@ -313,9 +360,11 @@ def swap_player(folder_name):
 
     return jsonify({'message': 'Player swapped successfully'}), 200
 
-# **Optional: Route to List All Registered Routes for Debugging**
 @app.route('/routes')
 def list_routes():
+    """
+    Optional route to list all registered routes for debugging purposes.
+    """
     import urllib
     output = []
     for rule in app.url_map.iter_rules():
@@ -325,11 +374,15 @@ def list_routes():
     return "<br>".join(output)
 
 if __name__ == '__main__':
+    """
+    Entry point of the Flask application.
+    Loads the AI model if enabled and starts the server.
+    """
     # Load the model only if USE_MODEL is True
     if USE_MODEL:
-        checkpoint_path = get_checkpoint_path(checkpoint_path, IMAGE_MEMORY)  # Adjust the path as needed
-        if checkpoint_path:
-            load_model(checkpoint_path, image_memory=IMAGE_MEMORY)
+        checkpoint_path_full = get_checkpoint_path(checkpoint_path, IMAGE_MEMORY)  # Adjust the path as needed
+        if checkpoint_path_full and os.path.exists(checkpoint_path_full):
+            load_model(checkpoint_path_full, image_memory=IMAGE_MEMORY)
         else:
             print("No checkpoint found. Model not loaded.")
     else:

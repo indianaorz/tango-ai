@@ -3,7 +3,7 @@
 <head>
     <title>Viewer - {{ folder_name }}</title>
     <style>
-        /* Your existing styles */
+        /* Existing Styles */
         body { font-family: Arial, sans-serif; }
         #carousel-container { text-align: center; margin-top: 20px; }
         .carousel-image { max-width: 100%; height: auto; margin: 10px; }
@@ -11,26 +11,83 @@
         #navigation { margin-top: 20px; text-align: center; }
         button, input[type="range"] { margin: 5px; }
         #folder-link { margin-bottom: 20px; display: block; }
-        #slider-container { text-align: center; margin-top: 20px; }
+        #slider-container { text-align: center; margin: 20px auto; }
         table { margin: 0 auto; border-collapse: collapse; }
         td, th { padding: 5px; border: 1px solid #ccc; }
         #auto-inference-container { text-align: center; margin-top: 10px; }
         .frame-group { display: flex; justify-content: center; flex-wrap: wrap; }
         .image-container { display: flex; flex-direction: column; align-items: center; margin: 5px; }
         .frame-index { margin-top: 5px; font-size: 14px; color: #555; }
+
+        /* New Styles for the Grid */
+        #grid-container {
+            display: grid;
+            grid-template-columns: repeat(6, 50px);
+            grid-template-rows: repeat(3, 50px);
+            gap: 5px;
+            justify-content: center;
+            margin: 30px auto;
+            width: 330px; /* (50px * 6) + (5px * 5) */
+        }
+
+        .grid-cell {
+            width: 50px;
+            height: 50px;
+            border: 2px solid #ccc;
+            box-sizing: border-box;
+            position: relative;
+        }
+
+        .grid-cell.player {
+            background-color: red;
+        }
+
+        .grid-cell.enemy {
+            background-color: blue;
+        }
+
+        /* Optional: Labeling Rows and Columns */
+        #grid-labels {
+            display: grid;
+            grid-template-columns: repeat(6, 50px);
+            grid-template-rows: repeat(4, 20px);
+            gap: 5px;
+            justify-content: center;
+            margin: 10px auto;
+            width: 330px;
+        }
+
+        .grid-label {
+            font-size: 12px;
+            text-align: center;
+            color: #555;
+        }
+
+        /* New Styles for Checkbox */
+        #last-frame-container {
+            text-align: center;
+            margin: 10px auto;
+        }
     </style>
 </head>
 <body>
     <a id="folder-link" href="/">&#8592; Back to Folders</a>
     <h1>Viewing Folder: {{ folder_name }}</h1>
     
+    <div id="last-frame-container">
+        <label><input type="checkbox" id="last-frame-checkbox"> Start at Last Frame</label>
+    </div>
+
     <div id="carousel-container">
         <div class="frame-group" id="frame-group">
             <!-- Dynamically populated with multiple images -->
         </div>
     </div>
     
-    <div id="metadata">
+    <div id="metadata" style="position:fixed; left:100px; top:150px;">
+        <!-- New Data Points -->
+        <p>Player Health: <span id="player-health">N/A</span></p>
+        <p>Enemy Health: <span id="enemy-health">N/A</span></p>
         <p>Frame: <span id="frame-number"></span> / <span id="total-frames"></span></p>
         <p>Input (Metadata): <span id="input-data">None</span></p>
         <p>Input (Cache): <span id="input-data-cache">None</span></p>
@@ -41,6 +98,34 @@
         <p>Next Reward: <span id="next-reward-data">None</span></p>
         <p>Next Punishment: <span id="next-punishment-data">None</span></p>
         <p>Winner: <span id="winner-status">Undetermined</span></p>
+        
+        <p>Player Position: <span id="player-position">N/A</span></p>
+        <p>Enemy Position: <span id="enemy-position">N/A</span></p>
+        <p>Inside Window: <span id="inside-window">N/A</span></p>
+    </div>
+    
+    <!-- Grid Container -->
+    <div id="grid-container">
+        <div class="grid-cell" id="grid-cell-0-0"></div>
+        <div class="grid-cell" id="grid-cell-0-1"></div>
+        <div class="grid-cell" id="grid-cell-0-2"></div>
+        <div class="grid-cell" id="grid-cell-0-3"></div>
+        <div class="grid-cell" id="grid-cell-0-4"></div>
+        <div class="grid-cell" id="grid-cell-0-5"></div>
+        
+        <div class="grid-cell" id="grid-cell-1-0"></div>
+        <div class="grid-cell" id="grid-cell-1-1"></div>
+        <div class="grid-cell" id="grid-cell-1-2"></div>
+        <div class="grid-cell" id="grid-cell-1-3"></div>
+        <div class="grid-cell" id="grid-cell-1-4"></div>
+        <div class="grid-cell" id="grid-cell-1-5"></div>
+        
+        <div class="grid-cell" id="grid-cell-2-0"></div>
+        <div class="grid-cell" id="grid-cell-2-1"></div>
+        <div class="grid-cell" id="grid-cell-2-2"></div>
+        <div class="grid-cell" id="grid-cell-2-3"></div>
+        <div class="grid-cell" id="grid-cell-2-4"></div>
+        <div class="grid-cell" id="grid-cell-2-5"></div>
     </div>
     
     <div id="slider-container">
@@ -94,16 +179,23 @@
         var autoInference = false; // Flag for auto-inference
         var imageMemory = JSON.parse('{{ image_memory | tojson | default(1) }}'); // Correctly pass image_memory from backend
 
+        // Pass the sorted folders and current index from Flask to JavaScript
+        var sortedFolders = {{ folders | tojson }};
+        var currentFolderIndex = {{ current_index }};
+        
         console.log("Image Memory:", imageMemory); // Debugging
+        console.log("Sorted Folders:", sortedFolders);
+        console.log("Current Folder Index:", currentFolderIndex);
 
         function updateSliderMax(maxValue) {
             const slider = document.getElementById('frame-slider');
             slider.max = maxValue - 1;
             slider.disabled = false;  // Enable the slider once the max value is set
         }
+
         // Swap Player button event listener
         document.getElementById('swap-player-button').addEventListener('click', function() {
-            if (confirm('Are you sure you want to swap the player data? ')) {
+            if (confirm('Are you sure you want to swap the player data?')) {
                 swapPlayer();
             }
         });
@@ -131,7 +223,6 @@
                 alert('Error swapping player: ' + (error.error || 'Unknown error'));
             });
         }
-
 
         function loadFrame(frameIndex) {
             fetch(`/folder/${folderName}/frame/${frameIndex}`)
@@ -181,6 +272,16 @@
                     const winnerText = data.winner === true ? "Yes" : data.winner === false ? "No" : "Undetermined";
                     document.getElementById('winner-status').textContent = winnerText;
 
+                    // **Update New Data Points**
+                    document.getElementById('player-health').textContent = data.player_health !== undefined ? data.player_health : 'N/A';
+                    document.getElementById('enemy-health').textContent = data.enemy_health !== undefined ? data.enemy_health : 'N/A';
+                    document.getElementById('player-position').textContent = data.player_position ? `(${data.player_position[0]}, ${data.player_position[1]})` : 'N/A';
+                    document.getElementById('enemy-position').textContent = data.enemy_position ? `(${data.enemy_position[0]}, ${data.enemy_position[1]})` : 'N/A';
+                    document.getElementById('inside-window').textContent = data.inside_window !== undefined ? data.inside_window : 'N/A';
+
+                    // **Render the Grid Based on Positions**
+                    renderGrid(data.player_position, data.enemy_position);
+
                     // Update images
                     const frameGroup = document.getElementById('frame-group');
                     frameGroup.innerHTML = ''; // Clear existing images
@@ -209,7 +310,7 @@
 
                         const caption = document.createElement('div');
                         caption.className = 'frame-index';
-                        caption.textContent = `Frame ${frameIndex - adjustedIndex + 1}`;
+                        caption.textContent = `Frame ${adjustedIndex + 1}`;
                         imgContainer.appendChild(caption);
 
                         frameGroup.appendChild(imgContainer);
@@ -242,7 +343,7 @@
                 loadFrame(currentFrame - 1);
             }
         });
-    
+
         document.getElementById('next-button').addEventListener('click', function() {
             if (currentFrame < totalFrames - 1) {
                 loadFrame(currentFrame + 1);
@@ -258,24 +359,80 @@
         document.getElementById('auto-inference-checkbox').addEventListener('change', function() {
             autoInference = this.checked;
         });
-    
+
         // Slider change event
         document.getElementById('frame-slider').addEventListener('input', function() {
             loadFrame(parseInt(this.value));
         });
-    
-        // Keyboard navigation
+
+        // Keyboard navigation for folders and frame index setting
         document.addEventListener('keydown', function(event) {
-            if (event.key === 'ArrowLeft') {
+            // Navigate between folders using Up and Down arrow keys
+            if (event.key === 'ArrowUp') {
+                navigateToPreviousFolder();
+            } else if (event.key === 'ArrowDown') {
+                navigateToNextFolder();
+            } else if (event.key === 'ArrowLeft') {
+                // Left arrow for previous frame
                 if (currentFrame > 0) {
                     loadFrame(currentFrame - 1);
                 }
             } else if (event.key === 'ArrowRight') {
+                // Right arrow for next frame
                 if (currentFrame < totalFrames - 1) {
                     loadFrame(currentFrame + 1);
                 }
             }
         });
+
+        // Function to navigate to the previous folder
+        function navigateToPreviousFolder() {
+            if (currentFolderIndex > 0) {
+                const previousFolder = sortedFolders[currentFolderIndex - 1];
+                const lastFrame = getLastFrameParam();
+                window.location.href = `/folder/${previousFolder}${lastFrame ? '?last_frame=true' : ''}`;
+            }
+        }
+
+        // Function to navigate to the next folder
+        function navigateToNextFolder() {
+            if (currentFolderIndex < sortedFolders.length - 1) {
+                const nextFolder = sortedFolders[currentFolderIndex + 1];
+                const lastFrame = getLastFrameParam();
+                window.location.href = `/folder/${nextFolder}${lastFrame ? '?last_frame=true' : ''}`;
+            }
+        }
+
+        // Function to get the 'last_frame' URL parameter
+        function getLastFrameParam() {
+            const urlParams = new URLSearchParams(window.location.search);
+            return urlParams.get('last_frame') === 'true';
+        }
+
+        // Function to set or remove the 'last_frame' URL parameter
+        function setLastFrameParam(value) {
+            const url = new URL(window.location);
+            if (value) {
+                url.searchParams.set('last_frame', 'true');
+            } else {
+                url.searchParams.delete('last_frame');
+            }
+            history.replaceState(null, '', url);
+        }
+
+        // Initialize the 'Start at Last Frame' checkbox based on URL parameter
+        function initializeLastFrameCheckbox() {
+            const lastFrame = getLastFrameParam();
+            const checkbox = document.getElementById('last-frame-checkbox');
+            checkbox.checked = lastFrame;
+
+            // When the checkbox state changes, update the URL parameter
+            checkbox.addEventListener('change', function() {
+                setLastFrameParam(this.checked);
+                // Reload the page to apply the frame index change
+                window.location.reload();
+            });
+        }
 
         // Function to run inference when button is clicked
         function runInference(frameIndex) {
@@ -291,8 +448,97 @@
                 });
         }
 
+        // Function to render the grid based on player and enemy positions
+        function renderGrid(playerPos, enemyPos) {
+            // Define grid boundaries
+            const gridStartX = 20;
+            const gridEndX = 220;
+            const gridStartY = 258;
+            const gridEndY = 773;
+
+            const gridWidth = gridEndX - gridStartX; // 200
+            const gridHeight = gridEndY - gridStartY; // 515
+
+            const columns = 6;
+            const rows = 3;
+
+            const columnWidth = gridWidth / columns; // ≈33.33
+            const rowHeight = gridHeight / rows; // ≈171.67
+
+            // Helper function to determine the closest grid cell
+            function getClosestCell(x, y) {
+                // Calculate column index
+                let col = Math.floor((x - gridStartX) / columnWidth);
+                col = Math.max(0, Math.min(columns - 1, col));
+
+                // Calculate row index
+                let row = Math.floor((y - gridStartY) / rowHeight);
+                row = Math.max(0, Math.min(rows - 1, row));
+
+                return { row, col };
+            }
+
+            // Clear previous highlights
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < columns; c++) {
+                    const cell = document.getElementById(`grid-cell-${r}-${c}`);
+                    cell.classList.remove('player');
+                    cell.classList.remove('enemy');
+                }
+            }
+
+            // Highlight Player Position
+            if (playerPos && playerPos.length === 2) {
+                //make sure values are not > 1000, if they are don't render
+                if (playerPos[0] < 1000 && playerPos[1] <  1000) {
+                    const { row, col } = getClosestCell(playerPos[0], playerPos[1]);
+                    const playerCell = document.getElementById(`grid-cell-${row}-${col}`);
+                    playerCell.classList.add('player');
+                }
+            }
+
+            // Highlight Enemy Position
+            if (enemyPos && enemyPos.length === 2) {
+                //make sure values are not > 1000, if they are don't render
+                if (enemyPos[0] <  1000 && enemyPos[1] < 1000) {
+                    const { row, col } = getClosestCell(enemyPos[0], enemyPos[1]);
+                    const enemyCell = document.getElementById(`grid-cell-${row}-${col}`);
+                    enemyCell.classList.add('enemy');
+                }
+            }
+        }
+
+        // Function to determine the initial frame index based on URL parameter
+        function determineInitialFrame(totalFrames) {
+            const urlParams = new URLSearchParams(window.location.search);
+            const lastFrame = urlParams.get('last_frame') === 'true';
+            if (lastFrame) {
+                return totalFrames - 1;
+            }
+            return 0;
+        }
+
         // Initial load
-        loadFrame(0);
+        function initialLoad() {
+            // Initialize the 'Start at Last Frame' checkbox
+            initializeLastFrameCheckbox();
+
+            // Load frame data
+            // First, fetch the total frames to determine initial frame index
+            fetch(`/folder/${folderName}/frame/0`)
+                .then(response => response.json())
+                .then(data => {
+                    totalFrames = data.total_frames;
+                    currentFrame = determineInitialFrame(totalFrames);
+                    loadFrame(currentFrame);
+                })
+                .catch(error => {
+                    console.error('Error during initial load:', error);
+                });
+        }
+
+        // Start the initial load after the page has fully loaded
+        window.onload = initialLoad;
     </script>
     
 </body>
