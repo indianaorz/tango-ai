@@ -272,6 +272,46 @@ class H5GameDataset(Dataset):
         if hasattr(self, 'h5_file'):
             self.h5_file.close()
 
+# Add this class to your train.py
+
+class PreloadedH5GameDataset(H5GameDataset):
+    def __init__(self, h5_path, device='cpu'):
+        super(PreloadedH5GameDataset, self).__init__(h5_path, device)
+        self.preload_data()
+
+    def preload_data(self):
+        print("Preloading data into GPU...")
+        # Load all data into CPU tensors
+        images = torch.tensor(self.images[:], dtype=torch.float32) / 255.0  # Normalize if needed
+        inputs = torch.tensor(self.inputs[:], dtype=torch.float32)
+        net_rewards = torch.tensor(self.net_rewards[:], dtype=torch.float32)
+
+        # Move data to GPU
+        if self.device.type != 'cpu':
+            print("Moving data to GPU...")
+            self.images = images.to(self.device, non_blocking=True)
+            self.inputs = inputs.to(self.device, non_blocking=True)
+            self.net_rewards = net_rewards.to(self.device, non_blocking=True)
+        else:
+            self.images = images
+            self.inputs = inputs
+            self.net_rewards = net_rewards
+
+        # Delete the original HDF5 references to free up memory
+        del self.h5_file
+        del images
+        del inputs
+        del net_rewards
+        gc.collect()
+        print("Data preloading completed.")
+
+    def __getitem__(self, idx):
+        # Directly return the preloaded data
+        image = self.images[idx]
+        input_tensor = self.inputs[idx]
+        net_reward = self.net_rewards[idx]
+        return image, input_tensor, net_reward
+
 
 class GameInputPredictor(nn.Module):
     def __init__(self, image_memory=1):
@@ -413,7 +453,6 @@ TRAINING_CACHE_DIR = os.path.join(get_root_dir(), 'training_cache')
 # Create dir if not exist
 os.makedirs(TRAINING_CACHE_DIR, exist_ok=True)
 
-
 def main():
     # Initialize wandb
     wandb.init(
@@ -442,7 +481,6 @@ def main():
     learning_rate = config.learning_rate
     max_checkpoints = 5
     subset_size = 8  # Number of directories per subset
-    num_epochs_per_subset = 1  # Number of epochs per subset
     checkpoint_freq = 1  # Save a checkpoint every epoch
     num_full_epochs = config.num_epochs
     preprocess = True  # Set to False to skip preprocessing the dataset
@@ -513,9 +551,6 @@ def main():
     # Calculate total subsets per full epoch based on subset_size
     subsets_per_full_epoch = (num_total_dirs + subset_size - 1) // subset_size  # Ceiling division
 
-    # Keep track of total epochs trained
-    total_epochs_trained = start_epoch
-
     # Create progress bar for overall training progress
     overall_progress = tqdm(total=num_full_epochs,
                             desc="Overall Training Progress",
@@ -525,22 +560,26 @@ def main():
     scaler = GradScaler()
 
     if subsets_per_full_epoch == 1:
-        # We have only one subset, so we can initialize dataset and DataLoader once
+        # Handle the single subset case
+        subset_dirs = all_replay_dirs
+        print(f"\nTraining on single subset: {', '.join([os.path.basename(d) for d in subset_dirs])}")
+        
+        # Create HDF5 path
         if efficient_storage:
             h5_path = os.path.join(cache_dir, f'subset_0.h5')
             if os.path.exists(h5_path):
                 print(f"Loading dataset from HDF5 file: {h5_path}")
-                dataset = H5GameDataset(h5_path, device=device)
+                dataset = PreloadedH5GameDataset(h5_path, device=device)
             else:
                 print("HDF5 file not found. Processing and creating HDF5 file.")
                 dataset = GameDataset(
-                    replay_dirs=all_replay_dirs,
+                    replay_dirs=subset_dirs,
                     image_memory=image_memory,
                     preprocess=preprocess,
                     load_into_memory=load_into_memory,
                     raw_dir=raw_dir,
                     is_raw=is_raw,
-                    load_data_into_gpu=load_data_into_gpu,  # Pass the flag
+                    load_data_into_gpu=False,  # Data will be loaded by PreloadedH5GameDataset
                     device=device  # Pass the device
                 )
                 # Save to HDF5
@@ -587,11 +626,11 @@ def main():
                     # Save min and max as attributes
                     h5f.attrs['net_reward_min'] = float(dataset.net_reward_min)
                     h5f.attrs['net_reward_max'] = float(dataset.net_reward_max)
-                # Reload dataset from HDF5
-                dataset = H5GameDataset(h5_path, device=device)
+                # Reload dataset from HDF5 using the preloaded dataset
+                dataset = PreloadedH5GameDataset(h5_path, device=device)
         else:
             dataset = GameDataset(
-                replay_dirs=all_replay_dirs,
+                replay_dirs=subset_dirs,
                 image_memory=image_memory,
                 preprocess=preprocess,
                 load_into_memory=load_into_memory,
@@ -617,15 +656,29 @@ def main():
             net_reward_max = net_reward_min + 1e-6
         
         # Initialize DataLoader
-        train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
-                                  num_workers=0, pin_memory=False)
+        if efficient_storage:
+            train_loader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=True,  # Shuffle is handled by DataLoader
+                num_workers=0,  # No workers since data is already on GPU
+                pin_memory=False  # Not needed as data is already on GPU
+            )
+        else:
+            train_loader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=4,  # Adjust based on your CPU cores
+                pin_memory=True  # Speeds up data transfer to GPU
+            )
         
-        # Check if dataset has samples
+        # Check if DataLoader has samples
         if len(train_loader) == 0:
             print("Warning: Train loader has no samples. Exiting.")
             return
 
-        # Now, loop over num_full_epochs
+        # Loop over epochs
         for epoch in range(start_epoch, num_full_epochs):
             print(f"\nStarting epoch {epoch + 1}/{num_full_epochs}")
 
@@ -678,16 +731,9 @@ def main():
             torch.cuda.empty_cache()
             gc.collect()
 
-        # After training, cleanup
-        if hasattr(train_loader, '_iterator') and train_loader._iterator is not None:
-            train_loader._iterator._shutdown_workers()
-        del train_loader
-        del dataset
-        torch.cuda.empty_cache()
-        gc.collect()
-
     else:
-        for full_epoch in range(num_full_epochs):
+        # Handle multiple subsets
+        for full_epoch in range(start_epoch, num_full_epochs):
             print(f"\nStarting full epoch {full_epoch + 1}/{num_full_epochs}")
 
             # Shuffle directories at the start of each full epoch if desired
@@ -709,7 +755,7 @@ def main():
                     h5_path = os.path.join(cache_dir, f'subset_{subset_idx}.h5')
                     if os.path.exists(h5_path):
                         print(f"Loading dataset from HDF5 file: {h5_path}")
-                        dataset = H5GameDataset(h5_path, device=device)
+                        dataset = PreloadedH5GameDataset(h5_path, device=device)
                     else:
                         print("HDF5 file not found. Processing and creating HDF5 file.")
                         dataset = GameDataset(
@@ -719,7 +765,7 @@ def main():
                             load_into_memory=load_into_memory,
                             raw_dir=raw_dir,
                             is_raw=is_raw,
-                            load_data_into_gpu=load_data_into_gpu,  # Pass the flag
+                            load_data_into_gpu=False,  # Data will be loaded by PreloadedH5GameDataset
                             device=device  # Pass the device
                         )
                         # Save to HDF5
@@ -766,8 +812,8 @@ def main():
                             # Save min and max as attributes
                             h5f.attrs['net_reward_min'] = float(dataset.net_reward_min)
                             h5f.attrs['net_reward_max'] = float(dataset.net_reward_max)
-                        # Reload dataset from HDF5
-                        dataset = H5GameDataset(h5_path, device=device)
+                        # Reload dataset from HDF5 using the preloaded dataset
+                        dataset = PreloadedH5GameDataset(h5_path, device=device)
                 else:
                     dataset = GameDataset(
                         replay_dirs=subset_dirs,
@@ -798,8 +844,22 @@ def main():
                     net_reward_max = net_reward_min + 1e-6
                 
                 # Initialize DataLoader
-                train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
-                                          num_workers=0, pin_memory=False)
+                if efficient_storage:
+                    train_loader = DataLoader(
+                        dataset,
+                        batch_size=batch_size,
+                        shuffle=True,  # Shuffle is handled by DataLoader
+                        num_workers=0,  # No workers since data is already on GPU
+                        pin_memory=False  # Not needed as data is already on GPU
+                    )
+                else:
+                    train_loader = DataLoader(
+                        dataset,
+                        batch_size=batch_size,
+                        shuffle=True,
+                        num_workers=4,  # Adjust based on your CPU cores
+                        pin_memory=True  # Speeds up data transfer to GPU
+                    )
                 
                 # Check if DataLoader has samples
                 if len(train_loader) == 0:
@@ -826,6 +886,8 @@ def main():
                 subset_progress.close()
 
                 # Cleanup
+                del train_loader
+                del dataset
                 torch.cuda.empty_cache()
                 gc.collect()
 
@@ -862,13 +924,10 @@ def main():
             overall_progress.update(1)
 
             # Cleanup
-            if hasattr(train_loader, '_iterator') and train_loader._iterator is not None:
-                train_loader._iterator._shutdown_workers()
-            del train_loader
-            del dataset
             torch.cuda.empty_cache()
             gc.collect()
 
+    # After the training loop
     overall_progress.close()
     print("Training completed successfully.")
 
