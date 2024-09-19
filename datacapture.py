@@ -119,6 +119,41 @@ async def is_port_open(host, port, timeout=5):
         return True
     except:
         return False
+        
+# Function to track net rewards within a 10-second window and apply punishment if needed
+async def track_rewards_and_apply_punishment(instance, training_data_dir, window_duration=10):
+    """
+    Tracks the rewards over a specified time window and applies punishment if no net rewards are gained.
+
+    Args:
+        instance (dict): Instance data containing instance name and port.
+        training_data_dir (str): Path to the training data directory.
+        window_duration (int): Duration of the reward window in seconds.
+    """
+    net_rewards = 0
+    while True:
+        await asyncio.sleep(window_duration)
+        
+        # Check if there are no net rewards within the time window
+        if net_rewards <= 0:
+            punishment = -10  # Apply a negative punishment
+            current_time = int(time.time() * 1000)
+            punishment_filename = f"{current_time}_punishment.json"
+            punishment_data = {
+                "time": current_time,
+                "punishment": punishment,
+                "reason": "No net rewards within the time window."
+            }
+            punishment_file_path = os.path.join(training_data_dir, punishment_filename)
+            
+            with open(punishment_file_path, 'w') as f:
+                json.dump(punishment_data, f)
+            
+            logging.info(f"Applied punishment to instance {instance['name']} for lack of net rewards.")
+            print(f"Applied punishment to instance {instance['name']} for lack of net rewards.")
+        
+        # Reset net rewards for the next window
+        net_rewards = 0
 
 # Function to start instances in batches
 def start_instances_in_batches(instances, batch_size=10):
@@ -262,6 +297,7 @@ async def receive_messages(reader, port, training_data_dir):
 
                     if event == "local_input":
                         current_input = int_to_binary_string(int(details))
+                        # print(f"Received local_input: {current_input}")
 
                     elif event == "screen_image":
                         # Parse the details JSON

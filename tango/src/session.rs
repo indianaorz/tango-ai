@@ -403,8 +403,10 @@ impl Session {
 
                 if(current_player_health == 0 && !current_opponent_health == 0
                 || !current_player_health == 0 && current_opponent_health == 0){
-                    set_winner(is_offerer);
-                }
+                    //close the program
+                        // Exit the application after sending the winner message
+                        std::process::exit(0);
+                        }
             }
         }
         

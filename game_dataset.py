@@ -26,7 +26,7 @@ class GameDataset(Dataset):
         self.device = device  # Device to load data onto if flag is True
 
         # Define TEMP_DIR if needed
-        TEMP_DIR = get_root_dir() + '/temp_cache'
+        TEMP_DIR = os.path.join(get_root_dir(), 'temp_cache')
         os.makedirs(TEMP_DIR, exist_ok=True)
 
         # Clear tmp dir, remove all subdirectories
@@ -37,8 +37,17 @@ class GameDataset(Dataset):
 
         if is_raw:
             for replay_dir in replay_dirs:
-                process_replay(replay_dir, output_dir=TEMP_DIR)
-            replay_dirs = [os.path.join(TEMP_DIR, d) for d in os.listdir(TEMP_DIR) if os.path.isdir(os.path.join(TEMP_DIR, d))]
+                # Update the argument names here
+                process_replay(
+                    replay_dir, 
+                    planning_output_dir=os.path.join(TEMP_DIR, 'planning'), 
+                    battle_output_dir=os.path.join(TEMP_DIR, 'battle')
+                )
+            # Update replay_dirs to include both planning and battle directories
+            planning_dirs = [os.path.join(TEMP_DIR, 'planning', d) for d in os.listdir(os.path.join(TEMP_DIR, 'planning')) if os.path.isdir(os.path.join(TEMP_DIR, 'planning', d))]
+            battle_dirs = [os.path.join(TEMP_DIR, 'battle', d) for d in os.listdir(os.path.join(TEMP_DIR, 'battle')) if os.path.isdir(os.path.join(TEMP_DIR, 'battle', d))]
+            # Combine both directories for the dataset
+            replay_dirs = planning_dirs + battle_dirs
 
         if not replay_dirs:
             print("No directories provided to GameDataset.")

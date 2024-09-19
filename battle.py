@@ -26,44 +26,100 @@ APP_PATH = "./dist/tango-x86_64-linux.AppImage"
 env_common = os.environ.copy()
 env_common["INIT_LINK_CODE"] = "valuesearch"
 env_common["AI_MODEL_PATH"] = "ai_model"
-env_common["MATCHMAKING_ID"] = "valuesearch"  # Replace with the actual matchmaking ID
 
 command_threshold = get_threshold()
 
-GAMMA = float(os.getenv("GAMMA", 0.05))  # Default gamma is 0.01 (1% chance of random action)
+GAMMA = float(os.getenv("GAMMA", 0.00))  # Default gamma is 0.01 (1% chance of random action)
 
 from threading import Lock
 model_lock = Lock()
 
 
+
 # Initialize maximum health values
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
-
+INSTANCES = []
+battle_count = 1
 # Define the server addresses and ports for each instance
-INSTANCES = [
-    {
+# INSTANCES = [
+#     {
+#         'address': '127.0.0.1',
+#         'port': 12344,
+#         'rom_path': 'bn6,0',
+#         'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
+#         'name': 'Instance 1',
+#         'init_link_code': 'areana1',
+#         # 'replay_path':'/home/lee/Documents/Tango/replays/20240917185150-gregarbattleset1-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
+#         # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
+#         'is_player': False  # Set to True if you don't want this instance to send inputs
+#     },
+#     {
+#         'address': '127.0.0.1',
+#         'port': 12345,
+#         'rom_path': 'bn6,0',
+#         'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
+#         'name': 'Instance 1',
+#         'init_link_code': 'areana1',
+#         # 'replay_path':'/home/lee/Documents/Tango/replays/20240917185150-gregarbattleset1-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
+#         # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
+#         'is_player': False  # Set to True if you don't want this instance to send inputs
+#     },
+#     # Additional instances can be added here
+# ]
+
+# Paths
+SAVES_DIR = '/home/lee/Documents/Tango/saves'
+
+# Define a function to filter save files based on the ROM type
+def get_random_save(rom_path):
+    # Filter based on the rom_path: 'bn6,0' for Gregar, 'bn6,1' for Falzar
+    if rom_path == 'bn6,0':
+        saves = [f for f in os.listdir(SAVES_DIR) if 'Gregar' in f]
+    elif rom_path == 'bn6,1':
+        saves = [f for f in os.listdir(SAVES_DIR) if 'Falzar' in f]
+    else:
+        raise ValueError("Unknown ROM path.")
+    
+    if not saves:
+        raise FileNotFoundError(f"No save files found for ROM: {rom_path}")
+    
+    return os.path.join(SAVES_DIR, random.choice(saves))
+
+# Function to create an instance configuration
+def create_instance(port, rom_path, init_link_code, is_player=False):
+    return {
         'address': '127.0.0.1',
-        'port': 12344,
-        'rom_path': 'bn6,0',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
-        'name': 'Instance 1',
-        # 'replay_path':'/home/lee/Documents/Tango/replays/20240917185150-gregarbattleset1-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
-        # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
-        'is_player': False  # Set to True if you don't want this instance to send inputs
-    },
-    {
-        'address': '127.0.0.1',
-        'port': 12345,
-        'rom_path': 'bn6,0',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
-        'name': 'Instance 1',
-        # 'replay_path':'/home/lee/Documents/Tango/replays/20240917185150-gregarbattleset1-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
-        # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
-        'is_player': False  # Set to True if you don't want this instance to send inputs
-    },
-    # Additional instances can be added here
-]
+        'port': port,
+        'rom_path': rom_path,
+        'save_path': get_random_save(rom_path),
+        'name': f'Instance {port}',
+        'init_link_code': init_link_code,
+        'is_player': is_player
+    }
+
+# Function to generate battles
+def generate_battles(num_matches):
+    battles = []
+    port_base = 12344  # Starting port number
+
+    for match in range(num_matches):
+        # Generate a unique init_link_code for this match
+        init_link_code = f"arena{match}"
+
+        # Randomly choose the ROM path for this match
+        rom_path = random.choice(['bn6,0', 'bn6,1'])
+
+        # Generate two instances for each match
+        instance1 = create_instance(port_base, rom_path, init_link_code)
+        instance2 = create_instance(port_base + 1, rom_path, init_link_code)
+        INSTANCES.append(instance1)
+        INSTANCES.append(instance2)
+        port_base += 2  # Increment the port numbers
+
+    return battles
+
+generate_battles(battle_count)
 
 # Key mappings based on model output indices
 KEY_MAPPINGS = {
@@ -97,7 +153,8 @@ KEY_BIT_POSITIONS = {
     'RIGHT': 4,
     'X': 1,
     'Z': 0,
-    'S': 9
+    'S': 9,
+    'RETURN':3 #0000000000001000
 }
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -150,7 +207,9 @@ def model_output_to_key(output):
         'LEFT': 5,
         'RIGHT': 4,
         'X': 1,
-        'Z': 0
+        'Z': 0,
+        'S': 9,
+        'RETURN':3
     }
 
     # Define a dynamic threshold to determine which key activations are significant
@@ -260,6 +319,7 @@ def predict(frames, player_grid, enemy_grid, inside_window, player_health, enemy
             return {'type': 'key_press', 'key': '0000000000000000'}  # Return no key press on failure
 
     print(f"Model predicted binary command: {predicted_input_str}")
+
     #output actual model output
     # print(f"Model output: {probs}")
 
@@ -384,10 +444,11 @@ def get_training_data_dir(replay_path):
     return training_data_dir
 
 # Function to run the AppImage with specific ROM, SAVE paths, and PORT
-def run_instance(rom_path, save_path, port, replay_path):
+def run_instance(rom_path, save_path, port, replay_path, init_link_code):
     env = env_common.copy()
     env["ROM_PATH"] = rom_path
     env["SAVE_PATH"] = save_path
+    env["INIT_LINK_CODE"] = init_link_code
     env["PORT"] = str(port)
     if replay_path:
         env["REPLAY_PATH"] = replay_path
@@ -405,7 +466,8 @@ def start_instances():
             instance['rom_path'],
             instance['save_path'],
             instance['port'],
-            instance.get('replay_path', None)
+            instance.get('replay_path', None),
+            instance['init_link_code']
         )
         time.sleep(0.5)  # Adjust sleep time based on app's boot time
 
@@ -444,6 +506,9 @@ async def receive_messages(reader, writer, port, training_data_dir):
     current_player_position = None
     current_enemy_position = None
     current_inside_window = None
+
+    game_instance = next((inst for inst in INSTANCES if inst['port'] == port), None)
+    is_replay = game_instance.get('replay_path', None) is not None
 
     # Define the minimum required frames for exponential sampling
     minimum_required_frames = 2**(IMAGE_MEMORY - 1) if IMAGE_MEMORY > 1 else 1
@@ -512,9 +577,8 @@ async def receive_messages(reader, writer, port, training_data_dir):
                     player_health_tensor = torch.tensor([normalized_player_health], dtype=torch.float32, device=device).unsqueeze(0)  # Shape: (1, 1)
                     enemy_health_tensor = torch.tensor([normalized_enemy_health], dtype=torch.float32, device=device).unsqueeze(0)    # Shape: (1, 1)
 
-
                     # Save the image and retrieve it
-                    save_result = save_image_from_base64(encoded_image, port, training_data_dir)
+                    save_result = save_image_from_base64(encoded_image, port, training_data_dir) if is_replay else (None, Image.open(BytesIO(base64.b64decode(encoded_image))))
                     if save_result is None:
                         print(f"Port {port}: No screen image available.")
                         continue
@@ -591,6 +655,17 @@ async def receive_messages(reader, writer, port, training_data_dir):
                                 player_health_tensor,     # Shape: (1, 1)
                                 enemy_health_tensor       # Shape: (1, 1)
                             )
+                            #don't allow sending the return command unless inside_window is true
+                            # Ensure the command for the RETURN key is ignored unless inside_window == 1
+                            if command['key'][15 - KEY_BIT_POSITIONS['RETURN']] == '1' and current_inside_window == 0:
+                                # Replace the '1' with '0' at the correct bit position for 'RETURN'
+                                command['key'] = (
+                                    command['key'][:15 - KEY_BIT_POSITIONS['RETURN']] + '0' + command['key'][15 - KEY_BIT_POSITIONS['RETURN'] + 1:]
+                                )
+                                print(f"Port {port}: Return command attempted while not inside window. Ignoring.")
+                            #else print that return was used when it is used
+                            elif command['key'][15 - KEY_BIT_POSITIONS['RETURN']] == '1':
+                                print(f"Port {port}: Return command used.")
                             await send_input_command(writer, command, port)
                             # print(f"Port {port}: Sent command: {command}")
 

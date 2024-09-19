@@ -58,7 +58,6 @@ struct Args {
     ai_model: String,
     rom: String,
     save: String,
-    matchmaking_id: String,
     port: u16, // Added port number
     replay_path: Option<String>, // Add replay path argument
 }
@@ -70,7 +69,6 @@ impl Args {
             ai_model: std::env::var("AI_MODEL_PATH")?,
             rom: std::env::var("ROM_PATH")?,
             save: std::env::var("SAVE_PATH")?,
-            matchmaking_id: std::env::var("MATCHMAKING_ID")?,
             port: std::env::var("PORT")?.parse::<u16>()?, // Read port from environment variable
             replay_path: std::env::var("REPLAY_PATH").ok(), // Read replay path from environment variable
         })
@@ -608,6 +606,7 @@ fn map_bit_to_key(bit: usize) -> Option<Key> {
         9 => Some(Key::S),        // 0000001000000000 
         1 => Some(Key::X),        // 0000000000000010
         0 => Some(Key::Z),        // 0000000000000001
+        3 => Some(Key::Return),    // 0000000000001000 -> enter
         _ => None,
     }
 }
@@ -769,6 +768,13 @@ async fn handle_tcp_client(
                                                     event: "screen_image".to_string(),
                                                     details: details_json,
                                                 };
+
+                                                //exit app if player or enemy health is 0
+                                                if player_health == 0 && enemy_health != 0
+                                                || enemy_health == 0 && player_health != 0 {
+                                                    println!("Game Over");
+                                                    std::process::exit(0);
+                                                }
 
                                                 // Send the response back to Python
                                                 if let Err(e) = send_message_to_python(&mut socket, &response).await {
