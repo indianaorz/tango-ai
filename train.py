@@ -66,6 +66,7 @@ def train_model(model, train_loader, optimizer, criterion, device,
 
         with autocast():
             # Forward pass with additional inputs
+
             outputs = model(images, player_grid, enemy_grid, inside_window, player_health, enemy_health)  # Shape: (batch_size, 16)
 
             # Compute loss per sample

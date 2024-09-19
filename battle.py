@@ -30,7 +30,15 @@ env_common["MATCHMAKING_ID"] = "valuesearch"  # Replace with the actual matchmak
 
 command_threshold = get_threshold()
 
-GAMMA = float(os.getenv("GAMMA", 0.01))  # Default gamma is 0.01 (1% chance of random action)
+GAMMA = float(os.getenv("GAMMA", 0.1))  # Default gamma is 0.01 (1% chance of random action)
+
+from threading import Lock
+model_lock = Lock()
+
+
+# Initialize maximum health values
+max_player_health = 1.0  # Start with a default value to avoid division by zero
+max_enemy_health = 1.0
 
 # Define the server addresses and ports for each instance
 INSTANCES = [
@@ -52,7 +60,7 @@ INSTANCES = [
         'name': 'Instance 1',
         # 'replay_path':'/home/lee/Documents/Tango/replays/20240917185150-gregarbattleset1-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
         # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
-        'is_player': True  # Set to True if you don't want this instance to send inputs
+        'is_player': False  # Set to True if you don't want this instance to send inputs
     },
     # Additional instances can be added here
 ]
@@ -183,22 +191,29 @@ def generate_random_action():
     print(f"Generated random binary command: {binary_string} from keys {selected_keys}")
     return binary_string
 
+# Update max health if the current health exceeds it
+def update_max_health(player_health, enemy_health):
+    global max_player_health, max_enemy_health
+    if player_health > max_player_health:
+        max_player_health = player_health
+    if enemy_health > max_enemy_health:
+        max_enemy_health = enemy_health
+
+# Normalize health values
+def normalize_health(player_health, enemy_health):
+    normalized_player_health = player_health / max_player_health
+    normalized_enemy_health = enemy_health / max_enemy_health
+    return normalized_player_health, normalized_enemy_health
+
+
+
 # Function to perform inference with the AI model
 def predict(frames, player_grid, enemy_grid, inside_window, player_health, enemy_health):
     """
     Predict the next action based on a sequence of frames and additional game state information.
-
-    Args:
-        frames (list of PIL.Image): List of PIL.Image objects, length == IMAGE_MEMORY
-        player_grid (torch.Tensor): Player position grid of shape (1, 6, 3)
-        enemy_grid (torch.Tensor): Enemy position grid of shape (1, 6, 3)
-        inside_window (torch.Tensor): Inside window flag of shape (1, 1)
-        player_health (torch.Tensor): Normalized player health of shape (1, 1)
-        enemy_health (torch.Tensor): Normalized enemy health of shape (1, 1)
-
-    Returns:
-        dict: Command to be sent to the game
     """
+    global model_lock  # Ensure we're using the global lock
+
     # Preprocess and stack frames
     preprocessed_frames = []
     for img in frames:
@@ -209,42 +224,44 @@ def predict(frames, player_grid, enemy_grid, inside_window, player_health, enemy
         img = transform(img).unsqueeze(0).to(device)
         preprocessed_frames.append(img)
 
-    # Stack frames along the temporal (depth) dimension
-    # Resulting shape: (1, 3, D, 160, 240)
     try:
         stacked_frames = torch.stack(preprocessed_frames, dim=2).to(device)  # Shape: (1, 3, D, 160, 240)
-        # print(f"Stacked frames shape: {stacked_frames.shape}")  # Debugging line
     except Exception as e:
-        # print(f"Error stacking frames: {e}")
         return {'type': 'key_press', 'key': '0000000000000000'}
 
-    # Debugging: Check devices of additional tensors
-    # print(f"Player Grid Device: {player_grid.device}")
-    # print(f"Enemy Grid Device: {enemy_grid.device}")
-    # print(f"Inside Window Tensor Device: {inside_window.device}")
-    # print(f"Player Health Tensor Device: {player_health.device}")
-    # print(f"Enemy Health Tensor Device: {enemy_health.device}")
-
     predicted_input_str = None
-    try:
-        with torch.no_grad():
-            outputs = model(
-                stacked_frames,
-                player_grid,       # Shape: (1, 6, 3)
-                enemy_grid,        # Shape: (1, 6, 3)
-                inside_window,     # Shape: (1, 1)
-                player_health,     # Shape: (1, 1)
-                enemy_health       # Shape: (1, 1)
-            )
-            probs = torch.sigmoid(outputs)
-            probs = probs.cpu().numpy()[0]
-            predicted_inputs = (probs >= command_threshold).astype(int)
-            predicted_input_str = ''.join(map(str, predicted_inputs))
-    except Exception as e:
-        print(f"Error during inference: {e}")
-        return {'type': 'key_press', 'key': '0000000000000000'}  # Return no key press on failure
+
+
+
+    # Acquire the lock before performing model inference
+    with model_lock:
+        try:
+            with torch.no_grad():
+                # log inputs for debug
+                # print(f"player_grid: {player_grid}")
+                # print(f"enemy_grid: {enemy_grid}")
+                # print(f"inside_window: {inside_window}")
+                # print(f"player_health: {player_health}")
+                # print(f"enemy_health: {enemy_health}")
+                outputs = model(
+                    stacked_frames,
+                    player_grid,       # Shape: (1, 6, 3)
+                    enemy_grid,        # Shape: (1, 6, 3)
+                    inside_window,     # Shape: (1, 1)
+                    player_health,     # Shape: (1, 1)
+                    enemy_health       # Shape: (1, 1)
+                )
+                probs = torch.sigmoid(outputs)
+                probs = probs.cpu().numpy()[0]
+                predicted_inputs = (probs >= command_threshold).astype(int)
+                predicted_input_str = ''.join(map(str, predicted_inputs))
+        except Exception as e:
+            print(f"Error during inference: {e}")
+            return {'type': 'key_press', 'key': '0000000000000000'}  # Return no key press on failure
 
     print(f"Model predicted binary command: {predicted_input_str}")
+    #output actual model output
+    # print(f"Model output: {probs}")
 
     # Decide whether to take a random action based on GAMMA
     if random.random() < GAMMA:
@@ -279,6 +296,7 @@ def save_image_from_base64(encoded_image, port, training_data_dir):
         filename = f"{port}_{int(time.time() * 1000)}.png"
         image_path = os.path.join(training_data_dir, filename)
         image.save(image_path)
+        # print(f"Saved image from port {port} to {image_path}")
         return image_path, image
     except Exception as e:
         print(f"Failed to save image from port {port}: {e}")
@@ -432,27 +450,28 @@ async def receive_messages(reader, writer, port, training_data_dir):
 
     try:
         while True:
-            data = await reader.read(4096)
+            # Read data from the connection
+            data = await reader.read(8192)
             if not data:
                 print(f"Port {port}: Connection closed by peer.")
                 break
+
             buffer += data.decode()
 
-            while True:
-                json_end_index = buffer.find('}\n')
-                if json_end_index == -1:
-                    json_end_index = buffer.find('}')
-                if json_end_index == -1:
-                    break
-
-                json_message = buffer[:json_end_index + 1].strip()
-                buffer = buffer[json_end_index + 1:]
-
+            # Split the buffer by newlines to process each message
+            while "\n" in buffer:
                 try:
-                    parsed_message = json.loads(json_message)
+                    message, buffer = buffer.split("\n", 1)  # Split off the first complete message
+                    message = message.strip()  # Clean up any whitespace
+
+                    if not message:
+                        continue  # Ignore empty messages
+
+                    parsed_message = json.loads(message)
                 except json.JSONDecodeError:
-                    # print(f"Port {port}: Failed to parse JSON message: {json_message}")
+                    print(f"Port {port}: Failed to parse JSON message: {json_message}")
                     continue
+
 
                 event = parsed_message.get("event", "Unknown")
                 details = parsed_message.get("details", "No details provided")
@@ -476,7 +495,7 @@ async def receive_messages(reader, writer, port, training_data_dir):
                         current_inside_window = float(screen_data.get("inside_window", 0))
 
                         #log
-                        print(f"Port {port}: Received screen image with player health: {current_player_health}, enemy health: {current_enemy_health}, player position: {current_player_position}, enemy position: {current_enemy_position}, inside window: {current_inside_window}")
+                        # print(f"Port {port}: Received screen image with player health: {current_player_health}, enemy health: {current_enemy_health}, player position: {current_player_position}, enemy position: {current_enemy_position}, inside window: {current_inside_window}")
                         
                     except json.JSONDecodeError:
                         print(f"Port {port}: Failed to parse screen_image details: {details}")
@@ -486,9 +505,13 @@ async def receive_messages(reader, writer, port, training_data_dir):
                     player_grid = compute_grid(current_player_position).to(device)  # Shape: (6, 3)
                     enemy_grid = compute_grid(current_enemy_position).to(device)    # Shape: (6, 3)
                     inside_window_tensor = torch.tensor([current_inside_window], dtype=torch.float32, device=device).unsqueeze(0)  # Shape: (1, 1)
+                    # Before passing health to the model
+                    update_max_health(current_player_health, current_enemy_health)
+                    normalized_player_health, normalized_enemy_health = normalize_health(current_player_health, current_enemy_health)
 
-                    player_health_tensor = torch.tensor([current_player_health], dtype=torch.float32, device=device).unsqueeze(0)      # Shape: (1, 1)
-                    enemy_health_tensor = torch.tensor([current_enemy_health], dtype=torch.float32, device=device).unsqueeze(0)        # Shape: (1, 1)
+                    player_health_tensor = torch.tensor([normalized_player_health], dtype=torch.float32, device=device).unsqueeze(0)  # Shape: (1, 1)
+                    enemy_health_tensor = torch.tensor([normalized_enemy_health], dtype=torch.float32, device=device).unsqueeze(0)    # Shape: (1, 1)
+
 
                     # Save the image and retrieve it
                     save_result = save_image_from_base64(encoded_image, port, training_data_dir)
@@ -639,7 +662,7 @@ async def handle_connection(instance):
         receive_task = asyncio.create_task(receive_messages(reader, writer, instance['port'], training_data_dir))
 
         # Set inference interval for higher frequency (e.g., 60 times per second)
-        inference_interval = 1 / 10.0  # seconds
+        inference_interval = 1 / 60.0  # seconds
         # If the instance is doing a replay, adjust the interval
         if instance.get('replay_path'):
             inference_interval = inference_interval / 4.0

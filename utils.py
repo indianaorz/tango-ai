@@ -10,7 +10,7 @@ def get_image_memory():
     return 1
 
 def get_threshold():
-    return 0.5
+    return 0.1
 
 
 default_checkpoint_path = get_root_dir() + '/checkpoints'

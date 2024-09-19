@@ -707,7 +707,7 @@ async fn handle_tcp_client(
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<OutputMessage>();
     *output_tx.lock() = Some(msg_tx);
 
-    let mut buf = vec![0; 1024];
+    let mut buf = vec![0; 8192];
     loop {
         tokio::select! {
             // Reading from the socket
