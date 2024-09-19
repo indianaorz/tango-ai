@@ -272,91 +272,91 @@ async def receive_messages(reader, port, training_data_dir):
 
     try:
         while True:
-            data = await reader.read(4096)
+            # Read data from the connection
+            data = await reader.read(8192)
             if not data:
-                logging.info(f"Connection closed by peer on port {port}.")
-                print(f"Connection closed by peer on port {port}.")
+                print(f"Port {port}: Connection closed by peer.")
                 break
+
             buffer += data.decode()
 
-            while True:
+            # Split the buffer by newlines to process each message
+            while "\n" in buffer:
                 try:
-                    # Look for JSON object termination
-                    json_end_index = buffer.find('}\n')
-                    if json_end_index == -1:
-                        json_end_index = buffer.find('}')
-                    if json_end_index == -1:
-                        break
+                    message, buffer = buffer.split("\n", 1)  # Split off the first complete message
+                    message = message.strip()  # Clean up any whitespace
 
-                    json_message = buffer[:json_end_index + 1].strip()
-                    buffer = buffer[json_end_index + 1:]
+                    if not message:
+                        continue  # Ignore empty messages
 
-                    parsed_message = json.loads(json_message)
-                    event = parsed_message.get("event", "Unknown")
-                    details = parsed_message.get("details", "No details provided")
-
-                    if event == "local_input":
-                        current_input = int_to_binary_string(int(details))
-                        # print(f"Received local_input: {current_input}")
-
-                    elif event == "screen_image":
-                        # Parse the details JSON
-                        try:
-                            screen_data = json.loads(details)
-                            encoded_image = screen_data.get("image", "")
-                            player_health = screen_data.get("player_health", 0)
-                            enemy_health = screen_data.get("enemy_health", 0)
-                            player_position = screen_data.get("player_position", None)
-                            enemy_position = screen_data.get("enemy_position", None)
-                            inside_window = screen_data.get("inside_window", False)
-                        except json.JSONDecodeError:
-                            logging.warning(f"Failed to parse screen_image details: {details}")
-                            print(f"Failed to parse screen_image details: {details}")
-                            continue
-
-                        image_path = save_image_from_base64(encoded_image, port, training_data_dir)
-                        
-                        # Save game state with additional data
-                        save_game_state(
-                            image_path=image_path,
-                            input_binary=current_input,
-                            player_health=player_health,
-                            enemy_health=enemy_health,
-                            player_position=player_position,
-                            enemy_position=enemy_position,
-                            inside_window=inside_window,
-                            reward=current_reward,
-                            punishment=current_punishment,
-                            training_data_dir=training_data_dir
-                        )
-                        
-                        # Reset rewards/punishments after saving
-                        current_reward = None
-                        current_punishment = None
-
-                    elif event == "reward":
-                        try:
-                            current_reward = int(details.split(":")[1].strip())
-                        except ValueError:
-                            logging.warning(f"Failed to parse reward message: {details}")
-                            print(f"Failed to parse reward message: {details}")
-
-                    elif event == "punishment":
-                        try:
-                            current_punishment = int(details.split(":")[1].strip())
-                        except ValueError:
-                            logging.warning(f"Failed to parse punishment message: {details}")
-                            print(f"Failed to parse punishment message: {details}")
-                    elif event == "winner":
-                        player_won = details.lower() == "true"
-                        save_winner_status(training_data_dir, player_won)
-
-                    else:
-                        logging.info(f"Received message: Event - {event}, Details - {details}")
-                        print(f"Received message: Event - {event}, Details - {details}")
-
+                    parsed_message = json.loads(message)
                 except json.JSONDecodeError:
-                    break
+                    print(f"Port {port}: Failed to parse JSON message: {json_message}")
+                    continue
+
+
+                event = parsed_message.get("event", "Unknown")
+                details = parsed_message.get("details", "No details provided")
+
+                if event == "local_input":
+                    current_input = int_to_binary_string(int(details))
+                    # print(f"Received local_input: {current_input}")
+
+                elif event == "screen_image":
+                    # Parse the details JSON
+                    try:
+                        screen_data = json.loads(details)
+                        encoded_image = screen_data.get("image", "")
+                        player_health = screen_data.get("player_health", 0)
+                        enemy_health = screen_data.get("enemy_health", 0)
+                        player_position = screen_data.get("player_position", None)
+                        enemy_position = screen_data.get("enemy_position", None)
+                        inside_window = screen_data.get("inside_window", False)
+                    except json.JSONDecodeError:
+                        logging.warning(f"Failed to parse screen_image details: {details}")
+                        print(f"Failed to parse screen_image details: {details}")
+                        continue
+
+                    image_path = save_image_from_base64(encoded_image, port, training_data_dir)
+                    
+                    # Save game state with additional data
+                    save_game_state(
+                        image_path=image_path,
+                        input_binary=current_input,
+                        player_health=player_health,
+                        enemy_health=enemy_health,
+                        player_position=player_position,
+                        enemy_position=enemy_position,
+                        inside_window=inside_window,
+                        reward=current_reward,
+                        punishment=current_punishment,
+                        training_data_dir=training_data_dir
+                    )
+                    
+                    # Reset rewards/punishments after saving
+                    current_reward = None
+                    current_punishment = None
+
+                elif event == "reward":
+                    try:
+                        current_reward = int(details.split(":")[1].strip())
+                    except ValueError:
+                        logging.warning(f"Failed to parse reward message: {details}")
+                        print(f"Failed to parse reward message: {details}")
+
+                elif event == "punishment":
+                    try:
+                        current_punishment = int(details.split(":")[1].strip())
+                    except ValueError:
+                        logging.warning(f"Failed to parse punishment message: {details}")
+                        print(f"Failed to parse punishment message: {details}")
+                elif event == "winner":
+                    player_won = details.lower() == "true"
+                    save_winner_status(training_data_dir, player_won)
+
+                else:
+                    logging.info(f"Received message: Event - {event}, Details - {details}")
+                    print(f"Received message: Event - {event}, Details - {details}")
 
     except (ConnectionResetError, BrokenPipeError):
         logging.warning(f"Connection was reset by peer on port {port}, closing receiver.")
@@ -404,7 +404,7 @@ async def handle_connection(instance, connection_timeout=10):
         receive_task = asyncio.create_task(receive_messages(reader, instance['port'], training_data_dir))
 
         # Set a delay to request images
-        image_request_interval = 1 / 60.0 / 4.0  # seconds
+        image_request_interval = 1 / 60.0# / 4.0  # seconds
 
         while not reader.at_eof():
             try:
@@ -445,7 +445,7 @@ async def handle_connection(instance, connection_timeout=10):
 # Main function to start instances and handle inputs
 def main():
     parser = argparse.ArgumentParser(description="Start Tango AppImage instances with a maximum number of replays.")
-    parser.add_argument('--max_replays', type=int, default=None,
+    parser.add_argument('--max_replays', type=int, default=1,
                         help='Maximum number of replays to process. If not set, all unprocessed replays will be processed.')
     parser.add_argument('--batch_size', type=int, default=20,
                         help='Number of instances to start per batch. Default is 20.')
