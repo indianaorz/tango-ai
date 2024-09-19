@@ -30,9 +30,14 @@ from game_dataset import GameDataset
 from game_input_predictor import GameInputPredictor
 from preloaded_h5_game_dataset import PreloadedH5GameDataset
 
+# Helper function for clearing memory, cache and forcing garbage collection
+def clear_memory():
+    torch.cuda.empty_cache()
+    gc.collect()
 
+# Same train_model function as before but now clears memory at the end of each batch
 def train_model(model, train_loader, optimizer, criterion, device,
-               epoch, net_reward_min, net_reward_max, scaler):
+                epoch, net_reward_min, net_reward_max, scaler):
     model.train()
     epoch_loss = 0.0
     num_batches = len(train_loader)
@@ -103,18 +108,7 @@ def train_model(model, train_loader, optimizer, criterion, device,
         })
 
         # Clear variables at the end of the loop to free memory
-        images = None
-        inputs = None
-        player_health = None
-        enemy_health = None
-        player_grid = None
-        enemy_grid = None
-        inside_window = None
-        net_rewards = None
-        loss = None
-        outputs = None
-        torch.cuda.empty_cache()
-        gc.collect()
+        clear_memory()
 
     epoch_progress.close()
 
@@ -455,8 +449,7 @@ def main():
             )
 
             #clear memory
-            torch.cuda.empty_cache()
-            gc.collect()
+            clear_memory()
 
             # Update subset progress
             subset_progress.update(1)
@@ -497,8 +490,7 @@ def main():
             # Cleanup
             del train_loader
             del dataset
-            torch.cuda.empty_cache()
-            gc.collect()
+            clear_memory()
 
     # After the training loop
     overall_progress.close()
