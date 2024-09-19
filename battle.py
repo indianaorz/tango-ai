@@ -30,7 +30,7 @@ env_common["MATCHMAKING_ID"] = "valuesearch"  # Replace with the actual matchmak
 
 command_threshold = get_threshold()
 
-GAMMA = float(os.getenv("GAMMA", 0.1))  # Default gamma is 0.01 (1% chance of random action)
+GAMMA = float(os.getenv("GAMMA", 0.05))  # Default gamma is 0.01 (1% chance of random action)
 
 from threading import Lock
 model_lock = Lock()

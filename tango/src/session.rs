@@ -400,6 +400,11 @@ impl Session {
 
                 set_player_health(current_player_health);
                 set_enemy_health(current_opponent_health);
+
+                if(current_player_health == 0 && !current_opponent_health == 0
+                || !current_player_health == 0 && current_opponent_health == 0){
+                    set_winner(is_offerer);
+                }
             }
         }
         
