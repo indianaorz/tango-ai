@@ -10,7 +10,7 @@ def get_image_memory():
     return 1
 
 def get_threshold():
-    return 0.5
+    return 0.01
 
 
 default_checkpoint_path = get_root_dir() + '/checkpoints'
@@ -23,6 +23,7 @@ def get_checkpoint_path(checkpoint_dir = default_checkpoint_path, image_memory =
     checkpoint_path =  os.path.join(checkpoint_dir, str(image_memory))
     checkpoint_files = glob.glob(os.path.join(checkpoint_path, '*.pt'))
     if not checkpoint_files:
+        print(f"No checkpoint files found in {checkpoint_path}")
         return None
     return max(checkpoint_files, key=os.path.getctime)
 

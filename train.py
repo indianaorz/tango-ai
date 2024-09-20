@@ -1,15 +1,18 @@
 # train.py
+
 import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 import glob
 import numpy as np
 from tqdm import tqdm
 import random
 from torch.cuda.amp import GradScaler, autocast
 import gc  # Import garbage collector
+import wandb  # Import wandb for experiment tracking
+
 from utils import (
     get_exponential_sample,
     get_image_memory,
@@ -17,11 +20,12 @@ from utils import (
     get_exponental_amount,
     get_root_dir
 )  # Import the helper functions
-from cache_data import process_replay
+from cache_data import process_replay  # May not be needed anymore if preprocessing is separate
 
-import h5py
-import shutil
-import wandb  # Import wandb
+from h5_game_dataset import H5GameDataset
+from game_dataset import GameDataset
+from game_input_predictor import GameInputPredictor
+from preloaded_h5_game_dataset import PreloadedH5GameDataset
 
 # Define constants
 TEMP_DIR = os.path.join(get_root_dir(), 'temp')
@@ -29,10 +33,7 @@ TEMP_DIR = os.path.join(get_root_dir(), 'temp')
 # Create temp dir if it doesn't exist
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-from h5_game_dataset import H5GameDataset
-from game_dataset import GameDataset
-from game_input_predictor import GameInputPredictor
-from preloaded_h5_game_dataset import PreloadedH5GameDataset
+image_memory = get_image_memory()
 
 # Helper function for clearing memory, cache and forcing garbage collection
 def clear_memory():
@@ -42,6 +43,21 @@ def clear_memory():
 # Define a separate train_model function that can handle multiple models
 def train_model(model, train_loader, optimizer, criterion, device,
                epoch, net_reward_min, net_reward_max, scaler, model_name):
+    """
+    Trains the given model for one epoch.
+
+    Parameters:
+    - model: The neural network model to train.
+    - train_loader: DataLoader providing the training data.
+    - optimizer: Optimizer for updating model weights.
+    - criterion: Loss function.
+    - device: Device to run the training on (CPU or GPU).
+    - epoch: Current epoch number.
+    - net_reward_min: Minimum net reward in the dataset.
+    - net_reward_max: Maximum net reward in the dataset.
+    - scaler: GradScaler for mixed precision.
+    - model_name: Identifier for the model (e.g., "Planning_Model").
+    """
     model.train()
     epoch_loss = 0.0
     num_batches = len(train_loader)
@@ -53,14 +69,32 @@ def train_model(model, train_loader, optimizer, criterion, device,
 
     for batch_idx, batch in enumerate(epoch_progress):
         # Extract fields from the batch dictionary
-        images = batch['image'].to(device)                    # Shape: (batch_size, 3, D, 160, 240)
-        inputs = batch['input'].to(device)                    # Shape: (batch_size, 16)
-        player_health = batch['player_health'].unsqueeze(1).to(device)    # Shape: (batch_size, 1)
-        enemy_health = batch['enemy_health'].unsqueeze(1).to(device)      # Shape: (batch_size, 1)
-        player_grid = batch['player_grid'].to(device)          # Shape: (batch_size, 6, 3)
-        enemy_grid = batch['enemy_grid'].to(device)            # Shape: (batch_size, 6, 3)
-        inside_window = batch['inside_window'].unsqueeze(1).to(device)  # Shape: (batch_size, 1)
-        net_rewards = batch['net_reward'].to(device)            # Shape: (batch_size,)
+        images = batch['image']  # Shape: (batch_size, image_memory, 3, 160, 240)
+
+        # Handle image_memory
+        if image_memory > 1:
+            # Assuming images are sequences: (batch_size, image_memory, 3, 160, 240)
+            if images.dim() != 5:
+                raise ValueError(f"Expected 5D tensor for image_memory={image_memory}, but got {images.dim()}D tensor.")
+            # Permute to [batch_size, 3, image_memory, 160, 240]
+            images = images.permute(0, 2, 1, 3, 4)
+        else:
+            # For image_memory=1, add a singleton dimension
+            if images.dim() != 4:
+                raise ValueError(f"Expected 4D tensor for image_memory=1, but got {images.dim()}D tensor.")
+            images = images.unsqueeze(2)  # New shape: (batch_size, 3, 1, 160, 240)
+
+        # Move images to device
+        images = images.to(device, non_blocking=False)  # Utilize non_blocking transfers with pin_memory
+
+        # Move other tensors to device
+        inputs = batch['input'].to(device, non_blocking=False)                    # Shape: (batch_size, 16)
+        player_health = batch['player_health'].unsqueeze(1).to(device, non_blocking=False)    # Shape: (batch_size, 1)
+        enemy_health = batch['enemy_health'].unsqueeze(1).to(device, non_blocking=False)      # Shape: (batch_size, 1)
+        player_grid = batch['player_grid'].to(device, non_blocking=False)          # Shape: (batch_size, 6, 3)
+        enemy_grid = batch['enemy_grid'].to(device, non_blocking=False)            # Shape: (batch_size, 6, 3)
+        inside_window = batch['inside_window'].unsqueeze(1).to(device, non_blocking=False)  # Shape: (batch_size, 1)
+        net_rewards = batch['net_reward'].to(device, non_blocking=False)            # Shape: (batch_size,)
 
         # Normalize net_rewards to [0, 1] instead of [-1, 1]
         net_rewards_normalized = (net_rewards - net_reward_min) / (net_reward_max - net_reward_min + 1e-6)
@@ -138,14 +172,14 @@ def main():
         project="sigma_5_mem_1_sub",  # Replace with your wandb project name
         name="experiment_name",       # (Optional) Name for this run
         config={
-            "batch_size": 256,
+            "batch_size": 256,  # Increased batch size for better GPU utilization
             "learning_rate": 1e-4,
             "image_memory": get_image_memory(),
             "num_epochs": 100,
             "optimizer": "Adam",
             "loss_function": "BCEWithLogitsLoss",
-            "load_data_into_gpu": True,  # New flag added
-            "efficient_storage": True,   # New flag for efficient storage
+            "load_data_into_gpu": False,  # Set to False to avoid moving data in Dataset
+            "efficient_storage": False,   # Set to False to enable multi-threaded loading and pin_memory
             # Add other hyperparameters you want to track
         }
     )
@@ -159,7 +193,7 @@ def main():
     batch_size = config.batch_size
     learning_rate = config.learning_rate
     max_checkpoints = 5
-    subset_size = 2  # Number of directories per subset
+    subset_size = 1  # Number of directories per subset
     checkpoint_freq = 1  # Save a checkpoint every epoch
     num_full_epochs = config.num_epochs
     preprocess = True  # Set to False to skip preprocessing the dataset
@@ -245,7 +279,6 @@ def main():
         print("No Battle Model checkpoint found, starting from scratch.")
 
     # List all replay directories
-    # if raw, get all replay dirs from raw_dir
     if is_raw:
         all_replay_dirs = [os.path.join(raw_dir, d) for d in os.listdir(
             raw_dir) if os.path.isdir(os.path.join(raw_dir, d))]
@@ -278,11 +311,8 @@ def main():
     os.makedirs(planning_cache_dir, exist_ok=True)
     os.makedirs(battle_cache_dir, exist_ok=True)
 
-    # Determine the starting epoch based on both models
-    start_epoch = max(start_epoch_planning, start_epoch_battle)
-
     # Handle multiple subsets
-    for full_epoch in range(start_epoch, num_full_epochs):
+    for full_epoch in range(max(start_epoch_planning, start_epoch_battle), num_full_epochs):
         print(f"\nStarting full epoch {full_epoch + 1}/{num_full_epochs}")
 
         # Shuffle directories at the start of each full epoch if desired
@@ -300,477 +330,184 @@ def main():
             # Create a separate progress bar for subsets
             subset_progress = tqdm(total=2, desc=f"Subset {subset_idx+1}/{len(subsets)}", position=1, leave=False)
 
-            # Define HDF5 paths for both Planning and Battle
-            planning_h5_path = os.path.join(planning_cache_dir, f'subset_{subset_idx}.h5')
-            battle_h5_path = os.path.join(battle_cache_dir, f'subset_{subset_idx}.h5')
+            # ----- Training Planning Model -----
+            planning_h5_files = [os.path.join(planning_cache_dir, f"{os.path.basename(d)}.h5") for d in subset_dirs]
+            planning_h5_files = [f for f in planning_h5_files if os.path.exists(f)]
 
-            if efficient_storage:
-                # Process Planning Data
-                if os.path.exists(planning_h5_path):
-                    print(f"Loading Planning dataset from HDF5 file: {planning_h5_path}")
-                    planning_dataset = PreloadedH5GameDataset(
-                        h5_path=planning_h5_path,
-                        device=device,
-                        batch_size=1000,  # Adjust based on your system's memory
-                        prefetch_batches=4,
-                        image_memory=image_memory
-                    )
-                else:
-                    print("HDF5 file for Planning not found. Processing and creating HDF5 file.")
-                    planning_dataset = GameDataset(
-                        replay_dirs=subset_dirs,
-                        image_memory=image_memory,
-                        preprocess=preprocess,
-                        load_into_memory=load_into_memory,
-                        raw_dir=raw_dir,
-                        is_raw=is_raw,
-                        load_data_into_gpu=False,
-                        device=device,
-                        data_type='planning'  # Specify data type to separate planning frames
-                    )
-                    # Save Planning data to HDF5
-                    print(f"Saving Planning processed data to HDF5 file: {planning_h5_path}")
-                    with h5py.File(planning_h5_path, 'w') as h5f_planning:
-                        num_samples_planning = len(planning_dataset)
-                        # Define chunk sizes based on new fields
-                        image_chunk = (1, 3, image_memory, 160, 240)  # One image per chunk
-                        input_chunk = (1, 16)  # One input per chunk
-                        player_health_chunk = (1,)
-                        enemy_health_chunk = (1,)
-                        player_grid_chunk = (1, 6, 3)
-                        enemy_grid_chunk = (1, 6, 3)
-                        inside_window_chunk = (1,)
-                        net_reward_chunk = (1,)
-
-                        # Create datasets with compression
-                        h5f_planning.create_dataset(
-                            'images',
-                            shape=(num_samples_planning, 3, image_memory, 160, 240),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=image_chunk
-                        )
-                        h5f_planning.create_dataset(
-                            'inputs',
-                            shape=(num_samples_planning, 16),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=input_chunk
-                        )
-                        h5f_planning.create_dataset(
-                            'player_healths',
-                            shape=(num_samples_planning,),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=player_health_chunk
-                        )
-                        h5f_planning.create_dataset(
-                            'enemy_healths',
-                            shape=(num_samples_planning,),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=enemy_health_chunk
-                        )
-                        h5f_planning.create_dataset(
-                            'player_grids',
-                            shape=(num_samples_planning, 6, 3),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=player_grid_chunk
-                        )
-                        h5f_planning.create_dataset(
-                            'enemy_grids',
-                            shape=(num_samples_planning, 6, 3),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=enemy_grid_chunk
-                        )
-                        h5f_planning.create_dataset(
-                            'inside_windows',
-                            shape=(num_samples_planning,),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=inside_window_chunk
-                        )
-                        h5f_planning.create_dataset(
-                            'net_rewards',
-                            shape=(num_samples_planning,),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=net_reward_chunk
-                        )
-
-                        for idx in tqdm(range(num_samples_planning), desc="Saving Planning to HDF5", position=2):
-                            sample = planning_dataset[idx]
-                            h5f_planning['images'][idx] = sample['image'].cpu().numpy()
-                            h5f_planning['inputs'][idx] = sample['input'].cpu().numpy()
-                            h5f_planning['player_healths'][idx] = sample['player_health'].item()
-                            h5f_planning['enemy_healths'][idx] = sample['enemy_health'].item()
-                            h5f_planning['player_grids'][idx] = sample['player_grid'].cpu().numpy()
-                            h5f_planning['enemy_grids'][idx] = sample['enemy_grid'].cpu().numpy()
-                            h5f_planning['inside_windows'][idx] = sample['inside_window'].item()
-                            h5f_planning['net_rewards'][idx] = sample['net_reward'].item()
-
-                        # Save min and max as attributes
-                        h5f_planning.attrs['net_reward_min'] = float(planning_dataset.net_reward_min)
-                        h5f_planning.attrs['net_reward_max'] = float(planning_dataset.net_reward_max)
-                    # Reload dataset from HDF5 using the preloaded dataset
-                    planning_dataset = PreloadedH5GameDataset(
-                        h5_path=planning_h5_path,
-                        device=device,
-                        batch_size=1000,
-                        prefetch_batches=4,
-                        image_memory=image_memory
-                    )
-
-                # Process Battle Data
-                if os.path.exists(battle_h5_path):
-                    print(f"Loading Battle dataset from HDF5 file: {battle_h5_path}")
-                    battle_dataset = PreloadedH5GameDataset(
-                        h5_path=battle_h5_path,
-                        device=device,
-                        batch_size=1000,  # Adjust based on your system's memory
-                        prefetch_batches=4,
-                        image_memory=image_memory
-                    )
-                else:
-                    print("HDF5 file for Battle not found. Processing and creating HDF5 file.")
-                    battle_dataset = GameDataset(
-                        replay_dirs=subset_dirs,
-                        image_memory=image_memory,
-                        preprocess=preprocess,
-                        load_into_memory=load_into_memory,
-                        raw_dir=raw_dir,
-                        is_raw=is_raw,
-                        load_data_into_gpu=False,
-                        device=device,
-                        data_type='battle'  # Specify data type to separate battle frames
-                    )
-                    # Save Battle data to HDF5
-                    print(f"Saving Battle processed data to HDF5 file: {battle_h5_path}")
-                    with h5py.File(battle_h5_path, 'w') as h5f_battle:
-                        num_samples_battle = len(battle_dataset)
-                        # Define chunk sizes based on new fields
-                        image_chunk = (1, 3, image_memory, 160, 240)  # One image per chunk
-                        input_chunk = (1, 16)  # One input per chunk
-                        player_health_chunk = (1,)
-                        enemy_health_chunk = (1,)
-                        player_grid_chunk = (1, 6, 3)
-                        enemy_grid_chunk = (1, 6, 3)
-                        inside_window_chunk = (1,)
-                        net_reward_chunk = (1,)
-
-                        # Create datasets with compression
-                        h5f_battle.create_dataset(
-                            'images',
-                            shape=(num_samples_battle, 3, image_memory, 160, 240),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=image_chunk
-                        )
-                        h5f_battle.create_dataset(
-                            'inputs',
-                            shape=(num_samples_battle, 16),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=input_chunk
-                        )
-                        h5f_battle.create_dataset(
-                            'player_healths',
-                            shape=(num_samples_battle,),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=player_health_chunk
-                        )
-                        h5f_battle.create_dataset(
-                            'enemy_healths',
-                            shape=(num_samples_battle,),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=enemy_health_chunk
-                        )
-                        h5f_battle.create_dataset(
-                            'player_grids',
-                            shape=(num_samples_battle, 6, 3),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=player_grid_chunk
-                        )
-                        h5f_battle.create_dataset(
-                            'enemy_grids',
-                            shape=(num_samples_battle, 6, 3),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=enemy_grid_chunk
-                        )
-                        h5f_battle.create_dataset(
-                            'inside_windows',
-                            shape=(num_samples_battle,),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=inside_window_chunk
-                        )
-                        h5f_battle.create_dataset(
-                            'net_rewards',
-                            shape=(num_samples_battle,),
-                            dtype=np.float32,
-                            compression='gzip',
-                            compression_opts=4,
-                            chunks=net_reward_chunk
-                        )
-
-                        for idx in tqdm(range(num_samples_battle), desc="Saving Battle to HDF5", position=2):
-                            sample = battle_dataset[idx]
-                            h5f_battle['images'][idx] = sample['image'].cpu().numpy()
-                            h5f_battle['inputs'][idx] = sample['input'].cpu().numpy()
-                            h5f_battle['player_healths'][idx] = sample['player_health'].item()
-                            h5f_battle['enemy_healths'][idx] = sample['enemy_health'].item()
-                            h5f_battle['player_grids'][idx] = sample['player_grid'].cpu().numpy()
-                            h5f_battle['enemy_grids'][idx] = sample['enemy_grid'].cpu().numpy()
-                            h5f_battle['inside_windows'][idx] = sample['inside_window'].item()
-                            h5f_battle['net_rewards'][idx] = sample['net_reward'].item()
-
-                        # Save min and max as attributes
-                        h5f_battle.attrs['net_reward_min'] = float(battle_dataset.net_reward_min)
-                        h5f_battle.attrs['net_reward_max'] = float(battle_dataset.net_reward_max)
-                    # Reload dataset from HDF5 using the preloaded dataset
-                    battle_dataset = PreloadedH5GameDataset(
-                        h5_path=battle_h5_path,
-                        device=device,
-                        batch_size=1000,
-                        prefetch_batches=4,
-                        image_memory=image_memory
-                    )
-
-            else:
-                # Non-efficient storage: handle planning and battle separately
-                planning_dataset = GameDataset(
-                    replay_dirs=subset_dirs,
-                    image_memory=image_memory,
-                    preprocess=preprocess,
-                    load_into_memory=load_into_memory,
-                    raw_dir=raw_dir,
-                    is_raw=is_raw,
-                    load_data_into_gpu=load_data_into_gpu,
-                    data_type='planning'
-                )
-                battle_dataset = GameDataset(
-                    replay_dirs=subset_dirs,
-                    image_memory=image_memory,
-                    preprocess=preprocess,
-                    load_into_memory=load_into_memory,
-                    raw_dir=raw_dir,
-                    is_raw=is_raw,
-                    load_data_into_gpu=load_data_into_gpu,
-                    data_type='battle'
-                )
-
-            # Check if planning_dataset has samples
-            if efficient_storage:
-                planning_len = len(planning_dataset)
-                battle_len = len(battle_dataset)
-            else:
-                planning_len = len(planning_dataset)
-                battle_len = len(battle_dataset)
-
-            if planning_len == 0:
-                print(f"Warning: Planning dataset for subset {subset_idx + 1} has no samples. Skipping Planning.")
+            if not planning_h5_files:
+                print(f"No Planning HDF5 files found for subset {subset_idx + 1}, skipping Planning training.")
                 subset_progress.update(1)
             else:
-                # Get net_reward_min and net_reward_max
-                planning_net_reward_min = planning_dataset.net_reward_min
-                planning_net_reward_max = planning_dataset.net_reward_max
+                # Combine multiple HDF5 files into one dataset
+                planning_datasets = [H5GameDataset(f, image_memory=image_memory) for f in planning_h5_files]
+                combined_planning_dataset = ConcatDataset(planning_datasets)
 
-                # Convert to torch tensors
-                planning_net_reward_min = torch.tensor(planning_net_reward_min, dtype=torch.float32).to(device)
-                planning_net_reward_max = torch.tensor(planning_net_reward_max, dtype=torch.float32).to(device)
+                # Get min and max net_rewards from all datasets
+                net_reward_mins = [ds.net_reward_min for ds in planning_datasets]
+                net_reward_maxs = [ds.net_reward_max for ds in planning_datasets]
+                planning_net_reward_min = min(net_reward_mins)
+                planning_net_reward_max = max(net_reward_maxs)
+
                 if planning_net_reward_max == planning_net_reward_min:
                     print("Warning: planning_net_reward_max == planning_net_reward_min, setting sample_weights to 1")
                     planning_net_reward_max = planning_net_reward_min + 1e-6
 
                 # Initialize DataLoader for Planning
-                if efficient_storage:
-                    planning_loader = DataLoader(
-                        planning_dataset,
-                        batch_size=batch_size,
-                        shuffle=True,
-                        num_workers=0,  # No workers since data is already on GPU
-                        pin_memory=False
-                    )
-                else:
-                    planning_loader = DataLoader(
-                        planning_dataset,
-                        batch_size=batch_size,
-                        shuffle=True,
-                        num_workers=16,  # Adjust based on your CPU cores
-                        pin_memory=True
-                    )
+                planning_loader = DataLoader(
+                    combined_planning_dataset,
+                    batch_size=batch_size,
+                    shuffle=True,
+                    num_workers=0,  # Adjust based on your CPU cores
+                    pin_memory=False
+                )
 
-                # Check if DataLoader has samples
-                if len(planning_loader) == 0:
-                    print(f"Warning: Planning DataLoader for subset {subset_idx + 1} has no samples. Skipping Planning.")
-                else:
-                    # Train Planning Model
-                    avg_epoch_loss_planning = train_model(
-                        planning_model,
-                        planning_loader,
-                        planning_optimizer,
-                        criterion,
-                        device,
-                        full_epoch,
-                        planning_net_reward_min,
-                        planning_net_reward_max,
-                        scaler,
-                        model_name="Planning_Model"
-                    )
-                    subset_progress.update(1)
+                # Train Planning Model
+                avg_epoch_loss_planning = train_model(
+                    planning_model,
+                    planning_loader,
+                    planning_optimizer,
+                    criterion,
+                    device,
+                    full_epoch,
+                    planning_net_reward_min,
+                    planning_net_reward_max,
+                    scaler,
+                    model_name="Planning_Model"
+                )
+                subset_progress.update(1)
 
-                # Clear memory
-                clear_memory()
+            # ----- Training Battle Model -----
+            battle_h5_files = [os.path.join(battle_cache_dir, f"{os.path.basename(d)}.h5") for d in subset_dirs]
+            battle_h5_files = [f for f in battle_h5_files if os.path.exists(f)]
 
-            if battle_len == 0:
-                print(f"Warning: Battle dataset for subset {subset_idx + 1} has no samples. Skipping Battle.")
+            if not battle_h5_files:
+                print(f"No Battle HDF5 files found for subset {subset_idx + 1}, skipping Battle training.")
                 subset_progress.update(1)
             else:
-                # Get net_reward_min and net_reward_max
-                battle_net_reward_min = battle_dataset.net_reward_min
-                battle_net_reward_max = battle_dataset.net_reward_max
+                # Combine multiple HDF5 files into one dataset
+                battle_datasets = [H5GameDataset(f, image_memory=image_memory) for f in battle_h5_files]
+                combined_battle_dataset = ConcatDataset(battle_datasets)
 
-                # Convert to torch tensors
-                battle_net_reward_min = torch.tensor(battle_net_reward_min, dtype=torch.float32).to(device)
-                battle_net_reward_max = torch.tensor(battle_net_reward_max, dtype=torch.float32).to(device)
+                # Get min and max net_rewards from all datasets
+                net_reward_mins = [ds.net_reward_min for ds in battle_datasets]
+                net_reward_maxs = [ds.net_reward_max for ds in battle_datasets]
+                battle_net_reward_min = min(net_reward_mins)
+                battle_net_reward_max = max(net_reward_maxs)
+
                 if battle_net_reward_max == battle_net_reward_min:
                     print("Warning: battle_net_reward_max == battle_net_reward_min, setting sample_weights to 1")
                     battle_net_reward_max = battle_net_reward_min + 1e-6
 
                 # Initialize DataLoader for Battle
-                if efficient_storage:
-                    battle_loader = DataLoader(
-                        battle_dataset,
-                        batch_size=batch_size,
-                        shuffle=True,
-                        num_workers=0,  # No workers since data is already on GPU
-                        pin_memory=False
-                    )
-                else:
-                    battle_loader = DataLoader(
-                        battle_dataset,
-                        batch_size=batch_size,
-                        shuffle=True,
-                        num_workers=16,  # Adjust based on your CPU cores
-                        pin_memory=True
-                    )
+                battle_loader = DataLoader(
+                    combined_battle_dataset,
+                    batch_size=batch_size,
+                    shuffle=True,
+                    num_workers=0,  # Adjust based on your CPU cores
+                    pin_memory=False
+                )
 
-                # Check if DataLoader has samples
-                if len(battle_loader) == 0:
-                    print(f"Warning: Battle DataLoader for subset {subset_idx + 1} has no samples. Skipping Battle.")
-                else:
-                    # Train Battle Model
-                    avg_epoch_loss_battle = train_model(
-                        battle_model,
-                        battle_loader,
-                        battle_optimizer,
-                        criterion,
-                        device,
-                        full_epoch,
-                        battle_net_reward_min,
-                        battle_net_reward_max,
-                        scaler,
-                        model_name="Battle_Model"
-                    )
-                    subset_progress.update(1)
-
-                # Clear memory
-                clear_memory()
+                # Train Battle Model
+                avg_epoch_loss_battle = train_model(
+                    battle_model,
+                    battle_loader,
+                    battle_optimizer,
+                    criterion,
+                    device,
+                    full_epoch,
+                    battle_net_reward_min,
+                    battle_net_reward_max,
+                    scaler,
+                    model_name="Battle_Model"
+                )
+                subset_progress.update(1)
 
             # Update the subset progress bar
             subset_progress.close()
 
-            # Checkpointing per subset or per epoch as desired
-            if (full_epoch + 1) % checkpoint_freq == 0:
-                # Save Planning Model checkpoint
-                save_at_planning = os.path.join(checkpoint_dir, 'planning')
-                os.makedirs(save_at_planning, exist_ok=True)
-                checkpoint_path_planning = os.path.join(
-                    save_at_planning, f"checkpoint_epoch_{full_epoch+1}.pt")
-                torch.save({
-                    'epoch': full_epoch + 1,
-                    'model_state_dict': planning_model.state_dict(),
-                    'optimizer_state_dict': planning_optimizer.state_dict(),
-                }, checkpoint_path_planning)
-                print(f"Saved Planning Model checkpoint: {checkpoint_path_planning}")
+        # Checkpointing per subset or per epoch as desired
+        if (full_epoch + 1) % checkpoint_freq == 0:
+            # Define where to save the Planning Model checkpoint
+            save_at_planning = os.path.join(checkpoint_dir, 'planning')
+            os.makedirs(save_at_planning, exist_ok=True)
 
-                # Optionally upload to wandb as an artifact
-                # artifact_planning = wandb.Artifact('planning-model-checkpoint', type='checkpoint')
-                # artifact_planning.add_file(checkpoint_path_planning)
-                # wandb.log_artifact(artifact_planning)
-                # print(f"Uploaded Planning Model checkpoint to wandb: {checkpoint_path_planning}")
+            # Full path including the image_memory subdirectory
+            planning_image_memory_dir = os.path.join(save_at_planning, str(image_memory))
+            os.makedirs(planning_image_memory_dir, exist_ok=True)  # Ensure the directory exists
 
-                # Remove old Planning checkpoints
-                existing_planning_checkpoints = sorted(
-                    glob.glob(os.path.join(save_at_planning, 'checkpoint_epoch_*.pt')),
-                    key=lambda x: int(x.split('_')[-1].split('.')[0])
-                )
-                if len(existing_planning_checkpoints) > max_checkpoints:
-                    oldest_planning_checkpoint = existing_planning_checkpoints[0]
-                    os.remove(oldest_planning_checkpoint)
-                    print(f"Removed old Planning Model checkpoint: {oldest_planning_checkpoint}")
+            checkpoint_path_planning = os.path.join(
+                planning_image_memory_dir, f"checkpoint_epoch_{full_epoch+1}.pt")
 
-                # Save Battle Model checkpoint
-                save_at_battle = os.path.join(checkpoint_dir, 'battle')
-                os.makedirs(save_at_battle, exist_ok=True)
-                checkpoint_path_battle = os.path.join(
-                    save_at_battle, f"checkpoint_epoch_{full_epoch+1}.pt")
-                torch.save({
-                    'epoch': full_epoch + 1,
-                    'model_state_dict': battle_model.state_dict(),
-                    'optimizer_state_dict': battle_optimizer.state_dict(),
-                }, checkpoint_path_battle)
-                print(f"Saved Battle Model checkpoint: {checkpoint_path_battle}")
+            # Save the Planning Model checkpoint
+            torch.save({
+                'epoch': full_epoch + 1,
+                'model_state_dict': planning_model.state_dict(),
+                'optimizer_state_dict': planning_optimizer.state_dict(),
+            }, checkpoint_path_planning)
+            print(f"Saved Planning Model checkpoint: {checkpoint_path_planning}")
 
-                # Optionally upload to wandb as an artifact
-                # artifact_battle = wandb.Artifact('battle-model-checkpoint', type='checkpoint')
-                # artifact_battle.add_file(checkpoint_path_battle)
-                # wandb.log_artifact(artifact_battle)
-                # print(f"Uploaded Battle Model checkpoint to wandb: {checkpoint_path_battle}")
+            # Optionally upload to wandb as an artifact
+            # artifact_planning = wandb.Artifact('planning-model-checkpoint', type='checkpoint')
+            # artifact_planning.add_file(checkpoint_path_planning)
+            # wandb.log_artifact(artifact_planning)
+            # print(f"Uploaded Planning Model checkpoint to wandb: {checkpoint_path_planning}")
 
-                # Remove old Battle checkpoints
-                existing_battle_checkpoints = sorted(
-                    glob.glob(os.path.join(save_at_battle, 'checkpoint_epoch_*.pt')),
-                    key=lambda x: int(x.split('_')[-1].split('.')[0])
-                )
-                if len(existing_battle_checkpoints) > max_checkpoints:
-                    oldest_battle_checkpoint = existing_battle_checkpoints[0]
-                    os.remove(oldest_battle_checkpoint)
-                    print(f"Removed old Battle Model checkpoint: {oldest_battle_checkpoint}")
+            # Remove old Planning checkpoints
+            existing_planning_checkpoints = sorted(
+                glob.glob(os.path.join(save_at_planning, 'checkpoint_epoch_*.pt')),
+                key=lambda x: int(x.split('_')[-1].split('.')[0])
+            )
+            if len(existing_planning_checkpoints) > max_checkpoints:
+                oldest_planning_checkpoint = existing_planning_checkpoints[0]
+                os.remove(oldest_planning_checkpoint)
+                print(f"Removed old Planning Model checkpoint: {oldest_planning_checkpoint}")
+
+            # Define where to save the Battle Model checkpoint
+            save_at_battle = os.path.join(checkpoint_dir, 'battle')
+            os.makedirs(save_at_battle, exist_ok=True)
+
+            # Full path including the image_memory subdirectory
+            battle_image_memory_dir = os.path.join(save_at_battle, str(image_memory))
+            os.makedirs(battle_image_memory_dir, exist_ok=True)  # Ensure the directory exists
+
+            checkpoint_path_battle = os.path.join(
+                battle_image_memory_dir, f"checkpoint_epoch_{full_epoch+1}.pt")
+
+            # Save the Battle Model checkpoint
+            torch.save({
+                'epoch': full_epoch + 1,
+                'model_state_dict': battle_model.state_dict(),
+                'optimizer_state_dict': battle_optimizer.state_dict(),
+            }, checkpoint_path_battle)
+            print(f"Saved Battle Model checkpoint: {checkpoint_path_battle}")
+
+
+            # Optionally upload to wandb as an artifact
+            # artifact_battle = wandb.Artifact('battle-model-checkpoint', type='checkpoint')
+            # artifact_battle.add_file(checkpoint_path_battle)
+            # wandb.log_artifact(artifact_battle)
+            # print(f"Uploaded Battle Model checkpoint to wandb: {checkpoint_path_battle}")
+
+            # Remove old Battle checkpoints
+            existing_battle_checkpoints = sorted(
+                glob.glob(os.path.join(save_at_battle, 'checkpoint_epoch_*.pt')),
+                key=lambda x: int(x.split('_')[-1].split('.')[0])
+            )
+            if len(existing_battle_checkpoints) > max_checkpoints:
+                oldest_battle_checkpoint = existing_battle_checkpoints[0]
+                os.remove(oldest_battle_checkpoint)
+                print(f"Removed old Battle Model checkpoint: {oldest_battle_checkpoint}")
 
             # Update the overall progress bar
             overall_progress.update(1)
 
             # Cleanup
-            if efficient_storage:
-                del planning_loader
-                del battle_loader
-            else:
-                del planning_dataset
-                del battle_dataset
-                del planning_loader
-                del battle_loader
+            del planning_loader
+            del battle_loader 
+            del planning_datasets
+            del battle_datasets
+            del combined_planning_dataset
+            del combined_battle_dataset
             clear_memory()
 
         # After each full epoch, re-scan for new directories in the training folder

@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0 )* 4.0;
+pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0 )* 2.0;
 
 // session.rs
-use crate::global::{add_punishment, add_reward, clear_punishments, clear_rewards, get_player_health_index, set_enemy_health, set_enemy_position, set_is_player_inside_window, set_local_input, set_player_health, set_player_health_index, set_player_position, set_winner, RewardPunishment};
+use crate::global::{add_punishment, add_reward, clear_punishments, clear_rewards, get_frame_count,set_frame_count, get_player_health_index, set_enemy_health, set_enemy_position, set_is_player_inside_window, set_local_input, set_player_health, set_player_health_index, set_player_position, set_winner, RewardPunishment};
 use crate::global::{REWARDS, PUNISHMENTS}; // Import the global variables
 
 enum AddressSize {
@@ -914,6 +914,7 @@ impl Session {
         }
 
         // for setting the player index
+        set_frame_count(0);
         
         thread.set_frame_callback({
             let vbuf = vbuf.clone();
@@ -927,6 +928,11 @@ impl Session {
                 vbuf.copy_from_slice(video_buffer);
                 video::fix_vbuf_alpha(&mut vbuf);
                 emu_tps_counter.lock().mark();
+
+                //get frame count
+                let currentFrame = get_frame_count();
+
+                set_frame_count(currentFrame + 1);
         
                 if !replay_is_complete && stepper_state.lock_inner().input_pairs_left() == 0 {
                     completion_token.complete();

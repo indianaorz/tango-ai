@@ -32,7 +32,11 @@ command_threshold = get_threshold()
 GAMMA = float(os.getenv("GAMMA", 0.00))  # Default gamma is 0.01 (1% chance of random action)
 
 from threading import Lock
-model_lock = Lock()
+
+# Initialize locks for thread safety
+planning_model_lock = Lock()
+battle_model_lock = Lock()
+
 
 
 
@@ -160,19 +164,44 @@ KEY_BIT_POSITIONS = {
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Function to load the AI model
-def load_model(checkpoint_path, image_memory=1):
-    global model
-    model = GameInputPredictor(image_memory=image_memory).to(device)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+def load_models(image_memory=1):
+    """
+    Loads both Planning and Battle models from their respective checkpoints.
+    """
+    global planning_model, battle_model
 
-    # Ensure 'model_state_dict' exists in the checkpoint
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
+    # Load Planning Model
+    planning_checkpoint_dir = os.path.join(get_root_dir(), 'checkpoints', 'planning')
+    planning_checkpoint_path = get_checkpoint_path(planning_checkpoint_dir, image_memory)
+    if planning_checkpoint_path:
+        planning_model = GameInputPredictor(image_memory=image_memory).to(device)
+        checkpoint_planning = torch.load(planning_checkpoint_path, map_location=device)
+        if 'model_state_dict' in checkpoint_planning:
+            planning_model.load_state_dict(checkpoint_planning['model_state_dict'])
+        else:
+            raise KeyError("Planning checkpoint does not contain 'model_state_dict'")
+        planning_model.eval()
+        print(f"Planning Model loaded from {planning_checkpoint_path}")
     else:
-        raise KeyError("Checkpoint does not contain 'model_state_dict'")
+        print("No Planning Model checkpoint found. Exiting.")
+        exit(1)
 
-    model.eval()
-    print(f"Model loaded from {checkpoint_path}")
+    # Load Battle Model
+    battle_checkpoint_dir = os.path.join(get_root_dir(), 'checkpoints', 'battle')
+    battle_checkpoint_path = get_checkpoint_path(battle_checkpoint_dir, image_memory)
+    if battle_checkpoint_path:
+        battle_model = GameInputPredictor(image_memory=image_memory).to(device)
+        checkpoint_battle = torch.load(battle_checkpoint_path, map_location=device)
+        if 'model_state_dict' in checkpoint_battle:
+            battle_model.load_state_dict(checkpoint_battle['model_state_dict'])
+        else:
+            raise KeyError("Battle checkpoint does not contain 'model_state_dict'")
+        battle_model.eval()
+        print(f"Battle Model loaded from {battle_checkpoint_path}")
+    else:
+        print("No Battle Model checkpoint found. Exiting.")
+        exit(1)
+
 
 
 # Transform to preprocess images before inference
@@ -185,9 +214,7 @@ transform = transforms.Compose([
 IMAGE_MEMORY = get_image_memory()  # Default to 1 if not set
 
 # Load the model checkpoint
-path = get_checkpoint_path(get_root_dir() + "/checkpoints", IMAGE_MEMORY)
-print(f"Loading model from path: {path}")
-load_model(path, IMAGE_MEMORY)
+load_models(IMAGE_MEMORY)
 
 # Initialize frame buffers and frame counters
 frame_buffers = {instance['port']: deque(maxlen=get_exponental_amount()**IMAGE_MEMORY) for instance in INSTANCES}
@@ -267,11 +294,13 @@ def normalize_health(player_health, enemy_health):
 
 
 # Function to perform inference with the AI model
+# Function to perform inference with the AI model
 def predict(frames, player_grid, enemy_grid, inside_window, player_health, enemy_health):
     """
     Predict the next action based on a sequence of frames and additional game state information.
+    Chooses between Planning and Battle models based on `inside_window`.
     """
-    global model_lock  # Ensure we're using the global lock
+    global planning_model, battle_model
 
     # Preprocess and stack frames
     preprocessed_frames = []
@@ -289,20 +318,23 @@ def predict(frames, player_grid, enemy_grid, inside_window, player_health, enemy
         return {'type': 'key_press', 'key': '0000000000000000'}
 
     predicted_input_str = None
+    model_type = "Battle_Model"  # Default model
 
+    # Select model based on inside_window
+    if inside_window.item() == 1.0:
+        selected_model = planning_model
+        selected_lock = planning_model_lock
+        model_type = "Planning_Model"
+    else:
+        selected_model = battle_model
+        selected_lock = battle_model_lock
+        model_type = "Battle_Model"
 
-
-    # Acquire the lock before performing model inference
-    with model_lock:
+    # Acquire the appropriate lock before performing model inference
+    with selected_lock:
         try:
             with torch.no_grad():
-                # log inputs for debug
-                # print(f"player_grid: {player_grid}")
-                # print(f"enemy_grid: {enemy_grid}")
-                # print(f"inside_window: {inside_window}")
-                # print(f"player_health: {player_health}")
-                # print(f"enemy_health: {enemy_health}")
-                outputs = model(
+                outputs = selected_model(
                     stacked_frames,
                     player_grid,       # Shape: (1, 6, 3)
                     enemy_grid,        # Shape: (1, 6, 3)
@@ -315,13 +347,10 @@ def predict(frames, player_grid, enemy_grid, inside_window, player_health, enemy
                 predicted_inputs = (probs >= command_threshold).astype(int)
                 predicted_input_str = ''.join(map(str, predicted_inputs))
         except Exception as e:
-            print(f"Error during inference: {e}")
+            print(f"Error during inference with {model_type}: {e}")
             return {'type': 'key_press', 'key': '0000000000000000'}  # Return no key press on failure
 
-    print(f"Model predicted binary command: {predicted_input_str}")
-
-    #output actual model output
-    # print(f"Model output: {probs}")
+    print(f"{model_type} predicted binary command: {predicted_input_str}")
 
     # Decide whether to take a random action based on GAMMA
     if random.random() < GAMMA:
@@ -330,6 +359,7 @@ def predict(frames, player_grid, enemy_grid, inside_window, player_health, enemy
         return {'type': 'key_press', 'key': random_command}
     else:
         return {'type': 'key_press', 'key': predicted_input_str}
+
 
 # Function to convert model output to a 16-bit binary string
 def model_output_to_binary(output):

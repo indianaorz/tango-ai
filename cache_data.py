@@ -6,8 +6,8 @@ import time
 import numpy as np
 from PIL import Image
 import torch
-from tqdm import tqdm  # For progress bars
-import argparse  # For command-line arguments
+from tqdm import tqdm
+import h5py  # Ensure HDF5 is imported
 from utils import get_root_dir, position_to_grid  # Ensure position_to_grid is imported
 
 # Paths
@@ -19,16 +19,15 @@ WINDOW_SIZE = 600  # Number of frames to look ahead for rewards/punishments
 
 def process_replay(replay_dir, planning_output_dir=PLANNING_CACHE_DIR, battle_output_dir=BATTLE_CACHE_DIR, rewards_only=True):
     replay_name = os.path.basename(replay_dir)
-    planning_cache_dir = os.path.join(planning_output_dir, replay_name)
-    battle_cache_dir = os.path.join(battle_output_dir, replay_name)
+    planning_h5_path = os.path.join(planning_output_dir, f'{replay_name}.h5')
+    battle_h5_path = os.path.join(battle_output_dir, f'{replay_name}.h5')
 
-    if os.path.exists(planning_cache_dir) and os.listdir(planning_cache_dir) and \
-       os.path.exists(battle_cache_dir) and os.listdir(battle_cache_dir):
-        print(f"Cache already exists for {replay_name}, skipping this replay.")
+    if os.path.exists(planning_h5_path) and os.path.exists(battle_h5_path):
+        print(f"HDF5 files already exist for {replay_name}, skipping this replay.")
         return
 
-    os.makedirs(planning_cache_dir, exist_ok=True)
-    os.makedirs(battle_cache_dir, exist_ok=True)
+    os.makedirs(planning_output_dir, exist_ok=True)
+    os.makedirs(battle_output_dir, exist_ok=True)
 
     # Collect all JSON files (exclude winner.json)
     json_files = sorted(glob.glob(os.path.join(replay_dir, '*.json')))
@@ -77,7 +76,7 @@ def process_replay(replay_dir, planning_output_dir=PLANNING_CACHE_DIR, battle_ou
             timestamp_str = os.path.splitext(os.path.basename(image_path_field))[0]
             timestamp = int(timestamp_str.split('_')[0])  # Adjust based on filename pattern
         except (ValueError, IndexError):
-            timestamp = int(time.time() * 1000)  # Use current time if extraction fails
+            timestamp = int(time.time() * 100)  # Use current time if extraction fails
 
         image_path = data.get('image_path')
         input_str = data.get('input')
@@ -140,9 +139,9 @@ def process_replay(replay_dir, planning_output_dir=PLANNING_CACHE_DIR, battle_ou
                     # Save the completed round before starting a new one
                     rounds.append(current_round)
                     current_round = {'planning': [], 'battle': []}
-                phase = 'planning'
-            current_round['planning'].append(frame)
-        else:
+            phase = 'planning'
+        current_round['planning'].append(frame)
+        if not frame['inside_window']:
             if phase == 'planning':
                 phase = 'battle'
             if phase == 'battle':
@@ -239,117 +238,336 @@ def process_replay(replay_dir, planning_output_dir=PLANNING_CACHE_DIR, battle_ou
         # Collect all battle frames
         all_battle_frames.extend(battle_frames)
 
-    # Save Planning Frames
-    for idx, frame in enumerate(tqdm(all_planning_frames, desc=f'Processing Planning Frames for {replay_name}')):
-        input_str = frame['input_str']
+    if not all_planning_frames and not all_battle_frames:
+        print(f"No valid frames to save for {replay_name}, skipping.")
+        return
 
-        if input_str is None:
-            print(f"Input string is None for frame at timestamp {frame['timestamp']}, skipping.")
-            continue  # Skip this frame
+    # ----- Save Planning Frames in Bulk -----
+    if all_planning_frames:
+        # Initialize empty lists to collect data
+        images = []
+        inputs = []
+        player_healths = []
+        enemy_healths = []
+        player_grids = []
+        enemy_grids = []
+        inside_windows = []
+        net_rewards = []
 
-        # Check for invalid input strings
-        if not isinstance(input_str, str) or len(input_str) != 16 or not set(input_str).issubset({'0', '1'}):
-            print(f"Invalid input string '{input_str}' at timestamp {frame['timestamp']}, skipping.")
-            continue
+        # Collect data with filtering before HDF5 allocation
+        for frame in tqdm(all_planning_frames, desc=f'Collecting Planning Frames for {replay_name}'):
+            input_str = frame['input_str']
 
-        # Load image and convert to tensor
-        try:
-            image = Image.open(frame['image_path']).convert('RGB')
-            image_np = np.array(image)
-            if image_np.shape != (160, 240, 3):
-                print(f"Unexpected image shape {image_np.shape} in {frame['image_path']}, expected (160, 240, 3). Skipping.")
-                continue  # Skip frames with unexpected image dimensions
-            image_tensor = torch.tensor(image_np, dtype=torch.float32).permute(2, 0, 1) / 255.0  # Shape: (3, 160, 240)
-        except Exception as e:
-            print(f"Failed to load image {frame['image_path']}: {e}")
-            continue  # Skip this frame
+            if input_str is None:
+                continue  # Skip this frame
 
-        # Convert input string to tensor
-        try:
-            input_tensor = torch.tensor([int(bit) for bit in input_str], dtype=torch.float32)
-        except ValueError:
-            print(f"Non-binary character found in input string '{input_str}' at frame {idx}, skipping.")
-            continue  # Skip frames with invalid input strings
+            # Skip planning frames with input '0000000000000000'
+            if input_str == '0000000000000000':
+                continue  # Skip frames with all-zero inputs
 
-        # Get assigned reward
-        net_reward = frame.get('assigned_reward', 0.0)
+            # Check for invalid input strings
+            if not isinstance(input_str, str) or len(input_str) != 16 or not set(input_str).issubset({'0', '1'}):
+                continue  # Skip invalid input strings
 
-        # Create sample dictionary with new inputs
-        sample = {
-            'image': image_tensor,
-            'input': input_tensor,
-            'net_reward': torch.tensor(net_reward, dtype=torch.float32),
-            'player_health': torch.tensor(frame['player_health'], dtype=torch.float32),
-            'enemy_health': torch.tensor(frame['enemy_health'], dtype=torch.float32),
-            'player_grid': torch.tensor(frame['player_grid'], dtype=torch.float32),  # Shape: (6, 3)
-            'enemy_grid': torch.tensor(frame['enemy_grid'], dtype=torch.float32),    # Shape: (6, 3)
-            'inside_window': torch.tensor(float(frame['inside_window']), dtype=torch.float32)  # Scalar
-        }
+            # Load image and convert to numpy array
+            try:
+                image = Image.open(frame['image_path']).convert('RGB')
+                if image.mode != 'RGB':
+                    image = image.convert('RGB')  # Ensures image is in RGB format
+                image_np = np.array(image)
+                if image_np.shape != (160, 240, 3):
+                    continue  # Skip frames with unexpected image dimensions
+                image_tensor = image_np.astype(np.float32) / 255.0  # Normalize
+            except Exception as e:
+                print(f"Error loading image {frame['image_path']}: {e}")
+                continue  # Skip frames with image loading issues
 
-        # Save sample to Planning cache
-        sample_path = os.path.join(planning_cache_dir, f'{idx:06d}.pt')
+            # Convert input string to binary array
+            try:
+                input_tensor = np.array([int(bit) for bit in input_str], dtype=np.float32)
+            except ValueError:
+                continue  # Skip frames with invalid input strings
 
-        try:
-            torch.save(sample, sample_path)
-        except Exception as e:
-            print(f"Failed to save tensor to {sample_path}: {e}")
-            continue  # Skip saving this frame due to error
+            # Get assigned reward
+            net_reward = frame.get('assigned_reward', 0.0)
 
-    # Process and save Battle Frames with Window-Based Rewards
-    for idx, frame in enumerate(tqdm(all_battle_frames, desc=f'Processing Battle Frames for {replay_name}')):
-        input_str = frame['input_str']
+            # Append data to lists
+            images.append(image_tensor.transpose(2, 0, 1))  # Shape: (3, 160, 240)
+            inputs.append(input_tensor)
+            player_healths.append(frame['player_health'])
+            enemy_healths.append(frame['enemy_health'])
+            player_grids.append(frame['player_grid'])
+            enemy_grids.append(frame['enemy_grid'])
+            inside_windows.append(float(frame['inside_window']))
+            net_rewards.append(net_reward)
 
-        if input_str is None:
-            print(f"Input string is None for frame at timestamp {frame['timestamp']}, skipping.")
-            continue  # Skip this frame
+        # After collecting and filtering, determine the number of valid samples
+        num_samples = len(images)
 
-        # Check for invalid input strings
-        if not isinstance(input_str, str) or len(input_str) != 16 or not set(input_str).issubset({'0', '1'}):
-            print(f"Invalid input string '{input_str}' at timestamp {frame['timestamp']}, skipping.")
-            continue
+        if num_samples == 0:
+            print(f"No valid planning frames to save for {replay_name}, skipping planning cache.")
+        else:
+            with h5py.File(planning_h5_path, 'w') as h5f:
+                # Define dynamic chunk sizes
+                chunk_images = get_chunk_size(100, num_samples, 3, 160, 240)
+                chunk_inputs = get_chunk_size(100, num_samples, 16)
+                chunk_player_healths = get_chunk_size(100, num_samples)
+                chunk_enemy_healths = get_chunk_size(100, num_samples)
+                chunk_player_grids = get_chunk_size(100, num_samples, 6, 3)
+                chunk_enemy_grids = get_chunk_size(100, num_samples, 6, 3)
+                chunk_inside_windows = get_chunk_size(100, num_samples)
+                chunk_net_rewards = get_chunk_size(100, num_samples)
 
-        # Load image and convert to tensor
-        try:
-            image = Image.open(frame['image_path']).convert('RGB')
-            image_np = np.array(image)
-            if image_np.shape != (160, 240, 3):
-                print(f"Unexpected image shape {image_np.shape} in {frame['image_path']}, expected (160, 240, 3). Skipping.")
-                continue  # Skip frames with unexpected image dimensions
-            image_tensor = torch.tensor(image_np, dtype=torch.float32).permute(2, 0, 1) / 255.0  # Shape: (3, 160, 240)
-        except Exception as e:
-            print(f"Failed to load image {frame['image_path']}: {e}")
-            continue  # Skip this frame
+                # Create datasets with dynamic chunk sizes
+                h5f.create_dataset(
+                    'images',
+                    shape=(num_samples, 3, 160, 240),
+                    dtype=np.float32,
+                    compression='gzip',
+                    compression_opts=4,
+                    chunks=chunk_images
+                )
+                h5f.create_dataset(
+                    'inputs',
+                    shape=(num_samples, 16),
+                    dtype=np.float32,
+                    compression='gzip',
+                    compression_opts=4,
+                    chunks=chunk_inputs
+                )
+                h5f.create_dataset(
+                    'player_healths',
+                    shape=(num_samples,),
+                    dtype=np.float32,
+                    compression='gzip',
+                    compression_opts=4,
+                    chunks=chunk_player_healths
+                )
+                h5f.create_dataset(
+                    'enemy_healths',
+                    shape=(num_samples,),
+                    dtype=np.float32,
+                    compression='gzip',
+                    compression_opts=4,
+                    chunks=chunk_enemy_healths
+                )
+                h5f.create_dataset(
+                    'player_grids',
+                    shape=(num_samples, 6, 3),
+                    dtype=np.float32,
+                    compression='gzip',
+                    compression_opts=4,
+                    chunks=chunk_player_grids
+                )
+                h5f.create_dataset(
+                    'enemy_grids',
+                    shape=(num_samples, 6, 3),
+                    dtype=np.float32,
+                    compression='gzip',
+                    compression_opts=4,
+                    chunks=chunk_enemy_grids
+                )
+                h5f.create_dataset(
+                    'inside_windows',
+                    shape=(num_samples,),
+                    dtype=np.float32,
+                    compression='gzip',
+                    compression_opts=4,
+                    chunks=chunk_inside_windows
+                )
+                h5f.create_dataset(
+                    'net_rewards',
+                    shape=(num_samples,),
+                    dtype=np.float32,
+                    compression='gzip',
+                    compression_opts=4,
+                    chunks=chunk_net_rewards
+                )
 
-        # Convert input string to tensor
-        try:
-            input_tensor = torch.tensor([int(bit) for bit in input_str], dtype=torch.float32)
-        except ValueError:
-            print(f"Non-binary character found in input string '{input_str}' at frame {idx}, skipping.")
-            continue  # Skip frames with invalid input strings
+                # Convert lists to numpy arrays
+                images = np.stack(images, axis=0)
+                inputs = np.stack(inputs, axis=0)
+                player_healths = np.array(player_healths, dtype=np.float32)
+                enemy_healths = np.array(enemy_healths, dtype=np.float32)
+                player_grids = np.stack(player_grids, axis=0)
+                enemy_grids = np.stack(enemy_grids, axis=0)
+                inside_windows = np.array(inside_windows, dtype=np.float32)
+                net_rewards = np.array(net_rewards, dtype=np.float32)
 
-        # Get assigned reward
-        net_reward = frame.get('assigned_reward', 0.0)
+                # Assign data to HDF5 datasets in bulk
+                h5f['images'][:] = images
+                h5f['inputs'][:] = inputs
+                h5f['player_healths'][:] = player_healths
+                h5f['enemy_healths'][:] = enemy_healths
+                h5f['player_grids'][:] = player_grids
+                h5f['enemy_grids'][:] = enemy_grids
+                h5f['inside_windows'][:] = inside_windows
+                h5f['net_rewards'][:] = net_rewards
 
-        # Create sample dictionary with new inputs
-        sample = {
-            'image': image_tensor,
-            'input': input_tensor,
-            'net_reward': torch.tensor(net_reward, dtype=torch.float32),
-            'player_health': torch.tensor(frame['player_health'], dtype=torch.float32),
-            'enemy_health': torch.tensor(frame['enemy_health'], dtype=torch.float32),
-            'player_grid': torch.tensor(frame['player_grid'], dtype=torch.float32),  # Shape: (6, 3)
-            'enemy_grid': torch.tensor(frame['enemy_grid'], dtype=torch.float32),    # Shape: (6, 3)
-            'inside_window': torch.tensor(float(frame['inside_window']), dtype=torch.float32)  # Scalar
-        }
+                # Store min and max as attributes
+                h5f.attrs['net_reward_min'] = float(net_rewards.min())
+                h5f.attrs['net_reward_max'] = float(net_rewards.max())
 
-        # Save sample to Battle cache
-        sample_path = os.path.join(battle_cache_dir, f'{idx:06d}.pt')
+                print(f"Saved {num_samples} planning frames to {planning_h5_path}")
 
-        try:
-            torch.save(sample, sample_path)
-        except Exception as e:
-            print(f"Failed to save tensor to {sample_path}: {e}")
-            continue  # Skip saving this frame due to error
+
+    # ----- Save Battle Frames in Bulk -----
+    if all_battle_frames:
+        with h5py.File(battle_h5_path, 'w') as h5f:
+            num_samples = len(all_battle_frames)
+            
+            # Define dynamic chunk sizes
+            chunk_images = get_chunk_size(100, num_samples, 3, 160, 240)
+            chunk_inputs = get_chunk_size(100, num_samples, 16)
+            chunk_player_healths = get_chunk_size(100, num_samples)
+            chunk_enemy_healths = get_chunk_size(100, num_samples)
+            chunk_player_grids = get_chunk_size(100, num_samples, 6, 3)
+            chunk_enemy_grids = get_chunk_size(100, num_samples, 6, 3)
+            chunk_inside_windows = get_chunk_size(100, num_samples)
+            chunk_net_rewards = get_chunk_size(100, num_samples)
+            
+            # Create datasets with dynamic chunk sizes
+            h5f.create_dataset(
+                'images',
+                shape=(num_samples, 3, 160, 240),
+                dtype=np.float32,
+                compression='gzip',
+                compression_opts=4,
+                chunks=chunk_images
+            )
+            h5f.create_dataset(
+                'inputs',
+                shape=(num_samples, 16),
+                dtype=np.float32,
+                compression='gzip',
+                compression_opts=4,
+                chunks=chunk_inputs
+            )
+            h5f.create_dataset(
+                'player_healths',
+                shape=(num_samples,),
+                dtype=np.float32,
+                compression='gzip',
+                compression_opts=4,
+                chunks=chunk_player_healths
+            )
+            h5f.create_dataset(
+                'enemy_healths',
+                shape=(num_samples,),
+                dtype=np.float32,
+                compression='gzip',
+                compression_opts=4,
+                chunks=chunk_enemy_healths
+            )
+            h5f.create_dataset(
+                'player_grids',
+                shape=(num_samples, 6, 3),
+                dtype=np.float32,
+                compression='gzip',
+                compression_opts=4,
+                chunks=chunk_player_grids
+            )
+            h5f.create_dataset(
+                'enemy_grids',
+                shape=(num_samples, 6, 3),
+                dtype=np.float32,
+                compression='gzip',
+                compression_opts=4,
+                chunks=chunk_enemy_grids
+            )
+            h5f.create_dataset(
+                'inside_windows',
+                shape=(num_samples,),
+                dtype=np.float32,
+                compression='gzip',
+                compression_opts=4,
+                chunks=chunk_inside_windows
+            )
+            h5f.create_dataset(
+                'net_rewards',
+                shape=(num_samples,),
+                dtype=np.float32,
+                compression='gzip',
+                compression_opts=4,
+                chunks=chunk_net_rewards
+            )
+
+            # Initialize empty lists to collect data
+            images = []
+            inputs = []
+            player_healths = []
+            enemy_healths = []
+            player_grids = []
+            enemy_grids = []
+            inside_windows = []
+            net_rewards = []
+
+            # Collect data
+            for frame in tqdm(all_battle_frames, desc=f'Collecting Battle Frames for {replay_name}'):
+                input_str = frame['input_str']
+
+                if input_str is None:
+                    continue  # Skip this frame
+
+                # Check for invalid input strings
+                if not isinstance(input_str, str) or len(input_str) != 16 or not set(input_str).issubset({'0', '1'}):
+                    continue  # Skip invalid input strings
+
+                # Load image and convert to numpy array
+                try:
+                    # In cache_data.py, within process_replay function
+                    image = Image.open(frame['image_path']).convert('RGB')
+                    if image.mode != 'RGB':
+                        image = image.convert('RGB')  # Redundant but ensures correctness
+                    image_np = np.array(image)
+                    if image_np.shape != (160, 240, 3):
+                        continue  # Skip frames with unexpected image dimensions
+                    image_tensor = image_np.astype(np.float32) / 255.0  # Normalize
+                except:
+                    continue  # Skip frames with image loading issues
+
+                # Convert input string to binary array
+                try:
+                    input_tensor = np.array([int(bit) for bit in input_str], dtype=np.float32)
+                except:
+                    continue  # Skip frames with invalid input strings
+
+                # Get assigned reward
+                net_reward = frame.get('assigned_reward', 0.0)
+
+                # Append data to lists
+                images.append(image_tensor.transpose(2, 0, 1))  # Shape: (3, 160, 240)
+                inputs.append(input_tensor)
+                player_healths.append(frame['player_health'])
+                enemy_healths.append(frame['enemy_health'])
+                player_grids.append(frame['player_grid'])
+                enemy_grids.append(frame['enemy_grid'])
+                inside_windows.append(float(frame['inside_window']))
+                net_rewards.append(net_reward)
+
+            # Convert lists to numpy arrays
+            images = np.stack(images, axis=0)
+            inputs = np.stack(inputs, axis=0)
+            player_healths = np.array(player_healths, dtype=np.float32)
+            enemy_healths = np.array(enemy_healths, dtype=np.float32)
+            player_grids = np.stack(player_grids, axis=0)
+            enemy_grids = np.stack(enemy_grids, axis=0)
+            inside_windows = np.array(inside_windows, dtype=np.float32)
+            net_rewards = np.array(net_rewards, dtype=np.float32)
+
+            # Assign data to HDF5 datasets in bulk
+            h5f['images'][:] = images
+            h5f['inputs'][:] = inputs
+            h5f['player_healths'][:] = player_healths
+            h5f['enemy_healths'][:] = enemy_healths
+            h5f['player_grids'][:] = player_grids
+            h5f['enemy_grids'][:] = enemy_grids
+            h5f['inside_windows'][:] = inside_windows
+            h5f['net_rewards'][:] = net_rewards
+
+            # Store min and max as attributes
+            h5f.attrs['net_reward_min'] = float(net_rewards.min())
+            h5f.attrs['net_reward_max'] = float(net_rewards.max())
 
 def process_all_replays():
     os.makedirs(PLANNING_CACHE_DIR, exist_ok=True)
@@ -362,6 +580,12 @@ def process_all_replays():
             process_replay(replay_dir)
         else:
             print(f"Found non-directory item {replay_dir}, skipping.")
+
+def get_chunk_size(default_chunk, num_samples, *dims):
+    """Return a tuple for chunk size where the first dimension is the min of default_chunk and num_samples."""
+    first_dim = min(default_chunk, num_samples)
+    return (first_dim,) + dims
+
 
 if __name__ == '__main__':
     process_all_replays()

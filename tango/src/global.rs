@@ -4,9 +4,9 @@ use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use egui::ColorImage;
-
+use serde::Serialize;
 // Assuming RewardPunishment is defined like this:
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone,Serialize)]
 pub struct RewardPunishment {
     pub damage: u16,
 }
@@ -48,8 +48,22 @@ lazy_static! {
 
     //player health index
     pub static ref PLAYER_HEALTH_INDEX: Arc<Mutex<u16>> = Arc::new(Mutex::new(2));
+
+    //frame count
+    pub static ref FRAME_COUNT: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
 }
 
+
+// Function to set the frame count
+pub fn set_frame_count(count: u16) {
+    let mut frame_count = FRAME_COUNT.lock();
+    *frame_count = count;
+}
+
+pub fn get_frame_count() -> u16 {
+    let frame_count = FRAME_COUNT.lock();
+    *frame_count
+}
 
 // Function to set the player health index
 pub fn set_player_health_index(index: u16) {

@@ -220,22 +220,23 @@ def save_image_from_base64(encoded_image, port, training_data_dir):
 
 # Function to save a game state as JSON
 def save_game_state(image_path, input_binary, player_health, enemy_health, player_position, enemy_position, inside_window, reward=None, punishment=None, training_data_dir=None):
-    game_state = {
-        "image_path": image_path,
-        "input": input_binary,
-        "player_health": player_health,
-        "enemy_health": enemy_health,
-        "player_position": player_position,
-        "enemy_position": enemy_position,
-        "inside_window": inside_window,
-        "reward": reward,
-        "punishment": punishment
-    }
-    filename = f"{int(time.time() * 1000)}.json"
-    file_path = os.path.join(training_data_dir, filename)
+    return
+    # game_state = {
+    #     "image_path": image_path,
+    #     "input": input_binary,
+    #     "player_health": player_health,
+    #     "enemy_health": enemy_health,
+    #     "player_position": player_position,
+    #     "enemy_position": enemy_position,
+    #     "inside_window": inside_window,
+    #     "reward": reward,
+    #     "punishment": punishment
+    # }
+    # filename = f"{int(time.time() * 1000)}.json"
+    # file_path = os.path.join(training_data_dir, filename)
 
-    with open(file_path, 'w') as f:
-        json.dump(game_state, f)
+    # with open(file_path, 'w') as f:
+    #     json.dump(game_state, f)
 
 # Function to send input command to a specific instance
 async def send_input_command(writer, command):
@@ -317,21 +318,21 @@ async def receive_messages(reader, port, training_data_dir):
                         print(f"Failed to parse screen_image details: {details}")
                         continue
 
-                    image_path = save_image_from_base64(encoded_image, port, training_data_dir)
+                    # image_path = save_image_from_base64(encoded_image, port, training_data_dir)
                     
-                    # Save game state with additional data
-                    save_game_state(
-                        image_path=image_path,
-                        input_binary=current_input,
-                        player_health=player_health,
-                        enemy_health=enemy_health,
-                        player_position=player_position,
-                        enemy_position=enemy_position,
-                        inside_window=inside_window,
-                        reward=current_reward,
-                        punishment=current_punishment,
-                        training_data_dir=training_data_dir
-                    )
+                    # # Save game state with additional data
+                    # save_game_state(
+                    #     image_path=image_path,
+                    #     input_binary=current_input,
+                    #     player_health=player_health,
+                    #     enemy_health=enemy_health,
+                    #     player_position=player_position,
+                    #     enemy_position=enemy_position,
+                    #     inside_window=inside_window,
+                    #     reward=current_reward,
+                    #     punishment=current_punishment,
+                    #     training_data_dir=training_data_dir
+                    # )
                     
                     # Reset rewards/punishments after saving
                     current_reward = None
@@ -404,7 +405,7 @@ async def handle_connection(instance, connection_timeout=10):
         receive_task = asyncio.create_task(receive_messages(reader, instance['port'], training_data_dir))
 
         # Set a delay to request images
-        image_request_interval = 1 / 60.0# / 4.0  # seconds
+        image_request_interval = 1 / 60.0  # seconds
 
         while not reader.at_eof():
             try:
@@ -445,9 +446,9 @@ async def handle_connection(instance, connection_timeout=10):
 # Main function to start instances and handle inputs
 def main():
     parser = argparse.ArgumentParser(description="Start Tango AppImage instances with a maximum number of replays.")
-    parser.add_argument('--max_replays', type=int, default=1,
+    parser.add_argument('--max_replays', type=int, default=None,
                         help='Maximum number of replays to process. If not set, all unprocessed replays will be processed.')
-    parser.add_argument('--batch_size', type=int, default=20,
+    parser.add_argument('--batch_size', type=int, default=40,
                         help='Number of instances to start per batch. Default is 20.')
     parser.add_argument('--start_port', type=int, default=12345,
                         help='Starting port number for instances. Default is 12345.')

@@ -3,6 +3,8 @@
 
 use std::io::Write;
 use std::sync::Arc;
+use global::get_frame_count;
+use tango_pvp::replay;
 use tokio::runtime::Runtime;
 use tokio::net::TcpListener;
 use tokio::io::AsyncReadExt;
@@ -177,6 +179,8 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
     let rom_path = args.rom;
     let save_path = args.save;
     let port = args.port;
+
+    let replay_path = args.replay_path.unwrap_or_default();
 
     // Create a separate runtime for asynchronous tasks
     let rt = Runtime::new()?;
@@ -536,6 +540,59 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
             std::process::exit(0);
         }
 
+        // Define the directory where training data will be saved
+        // only do if replay path is set
+        if !replay_path.is_empty() {
+            //split replay path on the last /
+            let filename_path = replay_path.split("/").last().unwrap();
+            //remove everything after .
+            let path = format!("/home/lee/TANGO/training_data/{}", filename_path.split(".").next().unwrap());
+            let training_data_dir = Path::new(&path);
+
+            // Retrieve the screen image
+            // only save the screen image once every 60 frames
+            let current_frame_count = get_frame_count();
+            if current_frame_count % 2 == 0 {
+                if let Some(image) = get_screen_image() {
+                    // Convert Color32 slice to raw bytes (RGBA)
+                    let rgba_bytes: Vec<u8> = image.pixels.iter().flat_map(|pixel| {
+                        vec![pixel.r(), pixel.g(), pixel.b(), pixel.a()]
+                    }).collect();
+
+                    // Encode image to PNG format
+                    let mut png_data = Vec::new();
+                    let encoder = PngEncoder::new(&mut png_data);
+                    encoder.write_image(
+                        &rgba_bytes,
+                        image.size[0] as u32,
+                        image.size[1] as u32,
+                        ColorType::Rgba8.into(),
+                    ).expect("Failed to encode image");
+
+                    // Save the game state locally
+                    let inputString = match get_local_input() {
+                        Some(input) => format!("{:016b}", input),
+                        None => "0000000000000000".to_string(), // or handle None case appropriately
+                    };
+                    println!("Local input: {:?}", inputString);
+                    if let Err(e) = save_game_state(
+                        &png_data,
+                        &inputString,
+                        get_player_health(),
+                        get_enemy_health(),
+                        get_player_position(),
+                        get_enemy_position(),
+                        get_is_player_inside_window(),
+                        get_rewards().last().cloned(),
+                        get_punishments().last().cloned(),
+                        training_data_dir,
+                    ) {
+                        println!("Failed to save game state: {:?}", e);
+                    }
+                }
+            }
+        }
+
         // Handling local inputs
         let local_inputs = get_local_input();
         if let Some(input) = local_inputs {
@@ -550,6 +607,8 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                 clear_local_input(); // Clear inputs after sending
             }
         }
+
+        //save data
 
         next_config.window_size = gfx_backend
             .window()
@@ -579,6 +638,20 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
 
     Ok(())
 }
+use serde::Serialize;
+
+#[derive(Serialize, Debug)]
+struct GameState {
+    image_path: String,
+    input: String,
+    player_health: u16,
+    enemy_health: u16,
+    player_position: Option<(u16, u16)>,
+    enemy_position: Option<(u16, u16)>,
+    inside_window: Option<bool>,
+    reward: u16,
+    punishment: u16,
+}
 
 // Add a function to map Python command keys to physical keys in the game
 fn map_key_to_physical_key(key: &str) -> Option<Key> {
@@ -593,6 +666,91 @@ fn map_key_to_physical_key(key: &str) -> Option<Key> {
         "s" => Some(Key::S),
         _ => None,
     }
+}
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use serde_json::to_string_pretty;
+use std::time::{SystemTime, UNIX_EPOCH};
+use anyhow::Result;
+use image::codecs::png::PngEncoder;
+use image::ColorType;
+use std::env;
+/// Saves the game state by writing the screenshot and the corresponding JSON data.
+///
+/// # Arguments
+///
+/// * `image_bytes` - A slice of bytes representing the PNG-encoded image.
+/// * `input_binary` - A string representing the input binary data.
+/// * `player_health` - The player's health value.
+/// * `enemy_health` - The enemy's health value.
+/// * `player_position` - The player's position as an optional tuple.
+/// * `enemy_position` - The enemy's position as an optional tuple.
+/// * `inside_window` - Whether the player is inside the window.
+/// * `reward` - An optional reward.
+/// * `punishment` - An optional punishment.
+/// * `training_data_dir` - The directory where the JSON file will be saved.
+///
+/// # Returns
+///
+/// * `Result<()>` - Ok if successful, Err otherwise.
+/// 
+fn save_game_state(
+    image_bytes: &[u8],
+    input_binary: &str,
+    player_health: u16,
+    enemy_health: u16,
+    player_position: Option<(u16, u16)>,
+    enemy_position: Option<(u16, u16)>,
+    inside_window: Option<bool>,
+    reward: Option<RewardPunishment>,
+    punishment: Option<RewardPunishment>,
+    training_data_dir: &Path,
+) -> Result<()> {
+    // Convert to absolute path
+    let absolute_path = env::current_dir()?.join(training_data_dir);
+    println!("Saving game state to directory: {:?}", absolute_path);
+
+    // Ensure the training_data_dir exists
+    fs::create_dir_all(&absolute_path)?;
+
+    // Create a timestamp for the filename
+    let start = SystemTime::now();
+    let since_the_epoch = start.duration_since(UNIX_EPOCH)?;
+    let timestamp = since_the_epoch.as_millis();
+
+    // Define the image and JSON filenames
+    let image_filename = format!("{}.png", timestamp);
+    let json_filename = format!("{}.json", timestamp);
+
+    let image_path = training_data_dir.join(&image_filename);
+    let json_path = training_data_dir.join(&json_filename);
+
+    // Save the image
+    fs::write(&image_path, image_bytes)?;
+
+    let reward = reward.map(|reward| reward.damage).unwrap_or(0);
+    let punishment = punishment.map(|punishment| punishment.damage).unwrap_or(0);
+    // Create the GameState instance
+    let game_state = GameState {
+        image_path: image_path.to_string_lossy().to_string(),
+        input: input_binary.to_string(),
+        player_health,
+        enemy_health,
+        player_position,
+        enemy_position,
+        inside_window,
+        reward,
+        punishment,
+    };
+
+    // Serialize the GameState to pretty JSON
+    let json_data = to_string_pretty(&game_state)?;
+
+    // Write the JSON data to the file
+    fs::write(&json_path, json_data)?;
+
+    Ok(())
 }
 
 // Function to map bits to specific keys
@@ -663,7 +821,6 @@ async fn setup_tcp_listener(
 
 use tokio::sync::mpsc;
 use serde::Deserialize;
-use serde::Serialize; // Add this line for serialization
 use tokio::io::{AsyncWriteExt}; // Add this for sending data back
 use parking_lot::Mutex; // Add this for thread safety
 
@@ -692,9 +849,7 @@ struct ScreenImageDetails {
     enemy_position: Option<(u16, u16)>,
     inside_window: Option<bool>,
 }
-use image::codecs::png::PngEncoder;
 use image::ImageEncoder;
-use image::ColorType; // Make sure to import ColorType from the image crate
 use egui::Color32;
 
 async fn handle_tcp_client(
