@@ -10,8 +10,13 @@ def get_image_memory():
     return 1
 
 def get_threshold():
-    return 0.01
+    return 0.1
 
+def get_threshold_plan():
+    return 0.3
+
+def inference_fps():
+    return 60
 
 default_checkpoint_path = get_root_dir() + '/checkpoints'
 #checkpoint path

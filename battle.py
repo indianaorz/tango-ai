@@ -14,7 +14,7 @@ import numpy as np  # Import numpy for type conversion if needed
 from train import GameInputPredictor  # Import the model class
 from utils import (
     get_checkpoint_path, get_image_memory, get_exponential_sample,
-    get_exponental_amount, get_threshold, get_root_dir, position_to_grid
+    get_exponental_amount, get_threshold, get_root_dir, position_to_grid, get_threshold_plan, inference_fps
 )
 import random
 from collections import deque  # Import deque for frame buffering
@@ -28,8 +28,9 @@ env_common["INIT_LINK_CODE"] = "valuesearch"
 env_common["AI_MODEL_PATH"] = "ai_model"
 
 command_threshold = get_threshold()
+plan_command_threshold = get_threshold_plan()
 
-GAMMA = float(os.getenv("GAMMA", 0.00))  # Default gamma is 0.01 (1% chance of random action)
+GAMMA = float(os.getenv("GAMMA", 0.0))  # Default gamma is 0.01 (1% chance of random action)
 
 from threading import Lock
 
@@ -37,6 +38,7 @@ from threading import Lock
 planning_model_lock = Lock()
 battle_model_lock = Lock()
 
+force_skip_chip_window = True
 
 
 
@@ -46,31 +48,31 @@ max_enemy_health = 1.0
 INSTANCES = []
 battle_count = 1
 # Define the server addresses and ports for each instance
-# INSTANCES = [
-#     {
-#         'address': '127.0.0.1',
-#         'port': 12344,
-#         'rom_path': 'bn6,0',
-#         'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
-#         'name': 'Instance 1',
-#         'init_link_code': 'areana1',
-#         # 'replay_path':'/home/lee/Documents/Tango/replays/20240917185150-gregarbattleset1-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
-#         # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
-#         'is_player': False  # Set to True if you don't want this instance to send inputs
-#     },
-#     {
-#         'address': '127.0.0.1',
-#         'port': 12345,
-#         'rom_path': 'bn6,0',
-#         'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
-#         'name': 'Instance 1',
-#         'init_link_code': 'areana1',
-#         # 'replay_path':'/home/lee/Documents/Tango/replays/20240917185150-gregarbattleset1-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
-#         # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
-#         'is_player': False  # Set to True if you don't want this instance to send inputs
-#     },
-#     # Additional instances can be added here
-# ]
+INSTANCES = [
+    {
+        'address': '127.0.0.1',
+        'port': 12344,
+        'rom_path': 'bn6,0',
+        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
+        'name': 'Instance 1',
+        'init_link_code': 'areana1',
+        # 'replay_path':'/home/lee/Documents/Tango/replays/20240917185150-gregarbattleset1-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
+        # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
+        'is_player': True  # Set to True if you don't want this instance to send inputs
+    },
+    {
+        'address': '127.0.0.1',
+        'port': 12345,
+        'rom_path': 'bn6,0',
+        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
+        'name': 'Instance 1',
+        'init_link_code': 'areana1',
+        # 'replay_path':'/home/lee/Documents/Tango/replays/20240917185150-gregarbattleset1-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
+        # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
+        'is_player': False  # Set to True if you don't want this instance to send inputs
+    },
+    # Additional instances can be added here
+]
 
 # Paths
 SAVES_DIR = '/home/lee/Documents/Tango/saves'
@@ -123,7 +125,7 @@ def generate_battles(num_matches):
 
     return battles
 
-generate_battles(battle_count)
+# generate_battles(battle_count)
 
 # Key mappings based on model output indices
 KEY_MAPPINGS = {
@@ -183,8 +185,9 @@ def load_models(image_memory=1):
         planning_model.eval()
         print(f"Planning Model loaded from {planning_checkpoint_path}")
     else:
-        print("No Planning Model checkpoint found. Exiting.")
-        exit(1)
+        print("No Planning Model checkpoint found.")
+        planning_model = None
+        # exit(1)
 
     # Load Battle Model
     battle_checkpoint_dir = os.path.join(get_root_dir(), 'checkpoints', 'battle')
@@ -199,8 +202,9 @@ def load_models(image_memory=1):
         battle_model.eval()
         print(f"Battle Model loaded from {battle_checkpoint_path}")
     else:
-        print("No Battle Model checkpoint found. Exiting.")
-        exit(1)
+        print("No Battle Model checkpoint found.")
+        # exit(1)
+        battle_model = None
 
 
 
@@ -273,6 +277,7 @@ def generate_random_action():
         bit_pos = KEY_BIT_POSITIONS[key]
         binary_command |= (1 << bit_pos)
 
+
     binary_string = int_to_binary_string(binary_command)
     print(f"Generated random binary command: {binary_string} from keys {selected_keys}")
     return binary_string
@@ -295,12 +300,18 @@ def normalize_health(player_health, enemy_health):
 
 # Function to perform inference with the AI model
 # Function to perform inference with the AI model
+previous_sent = False
+
 def predict(frames, player_grid, enemy_grid, inside_window, player_health, enemy_health):
     """
     Predict the next action based on a sequence of frames and additional game state information.
     Chooses between Planning and Battle models based on `inside_window`.
     """
     global planning_model, battle_model
+    global previous_sent  # Declare as global to modify the global variable
+
+
+    
 
     # Preprocess and stack frames
     preprocessed_frames = []
@@ -325,10 +336,28 @@ def predict(frames, player_grid, enemy_grid, inside_window, player_health, enemy
         selected_model = planning_model
         selected_lock = planning_model_lock
         model_type = "Planning_Model"
+        if(force_skip_chip_window and previous_sent == False):
+            #return hitting start and z at the same time
+            previous_sent = True
+            return {'type': 'key_press', 'key': '0000000000001000'}
+        if(previous_sent):
+            previous_sent = False
+            return {'type': 'key_press', 'key': '0000000000000001'}
     else:
         selected_model = battle_model
         selected_lock = battle_model_lock
         model_type = "Battle_Model"
+
+    #if there's no model, perform the random action
+    if planning_model is None or battle_model is None:
+        print(f"Gamma condition met (gamma={GAMMA}). Taking a random action.")
+        random_command = generate_random_action()
+        #if inside_window ignore inputs for A or S or Z
+        if inside_window.item() == 1.0:
+            while random_command[15 - KEY_BIT_POSITIONS['A']] == '1' or random_command[15 - KEY_BIT_POSITIONS['S']] == '1' or random_command[15 - KEY_BIT_POSITIONS['X']] == '1':
+                random_command = generate_random_action()
+        return {'type': 'key_press', 'key': random_command}
+
 
     # Acquire the appropriate lock before performing model inference
     with selected_lock:
@@ -344,6 +373,24 @@ def predict(frames, player_grid, enemy_grid, inside_window, player_health, enemy
                 )
                 probs = torch.sigmoid(outputs)
                 probs = probs.cpu().numpy()[0]
+                #get threshold based on model type
+                if model_type == "Planning_Model":
+                    command_threshold = plan_command_threshold
+                else:
+                    command_threshold = get_threshold()
+                #if we're the planning model, return 1 input which is the highest prob
+                # if model_type == "Planning_Model":
+                #     #find highest prob
+                #     max_prob = np.max(probs)
+                #     #get the index of the max prob
+                #     max_index = np.argmax(probs)
+                #     #convert the index to a binary string
+                #     #create a 0000000000000000 string, where index is from the right
+                #     predicted_input_str = '0' * 16
+                #     predicted_input_str = predicted_input_str[:15 - max_index] + '1' + predicted_input_str[15 - max_index + 1:]
+                #     #reverse string
+                #     predicted_input_str = predicted_input_str[::-1]
+                # else:
                 predicted_inputs = (probs >= command_threshold).astype(int)
                 predicted_input_str = ''.join(map(str, predicted_inputs))
         except Exception as e:
@@ -351,11 +398,20 @@ def predict(frames, player_grid, enemy_grid, inside_window, player_health, enemy
             return {'type': 'key_press', 'key': '0000000000000000'}  # Return no key press on failure
 
     print(f"{model_type} predicted binary command: {predicted_input_str}")
-
+    # #don't allow prediction for X from model
+    # if predicted_input_str[15 - KEY_BIT_POSITIONS['X']] == '1' and model_type == "Planning_Model":
+    #     print(f"X command predicted by {model_type}. Removing that bit.")
+    #     predicted_input_str = (
+    #         predicted_input_str[:15 - KEY_BIT_POSITIONS['X']] + '0' + predicted_input_str[15 - KEY_BIT_POSITIONS['X'] + 1:]
+    #     )
     # Decide whether to take a random action based on GAMMA
     if random.random() < GAMMA:
         print(f"Gamma condition met (gamma={GAMMA}). Taking a random action.")
         random_command = generate_random_action()
+        #if inside_window ignore inputs for A or S or Z
+        if inside_window.item() == 1.0:
+            while random_command[15 - KEY_BIT_POSITIONS['A']] == '1' or random_command[15 - KEY_BIT_POSITIONS['S']] == '1' or random_command[15 - KEY_BIT_POSITIONS['X']] == '1':
+                random_command = generate_random_action()
         return {'type': 'key_press', 'key': random_command}
     else:
         return {'type': 'key_press', 'key': predicted_input_str}
@@ -767,7 +823,7 @@ async def handle_connection(instance):
         receive_task = asyncio.create_task(receive_messages(reader, writer, instance['port'], training_data_dir))
 
         # Set inference interval for higher frequency (e.g., 60 times per second)
-        inference_interval = 1 / 60.0  # seconds
+        inference_interval = 1 / inference_fps()  # seconds
         # If the instance is doing a replay, adjust the interval
         if instance.get('replay_path'):
             inference_interval = inference_interval / 4.0

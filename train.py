@@ -172,10 +172,10 @@ def main():
         project="sigma_5_mem_1_sub",  # Replace with your wandb project name
         name="experiment_name",       # (Optional) Name for this run
         config={
-            "batch_size": 256,  # Increased batch size for better GPU utilization
+            "batch_size": 64,  # Increased batch size for better GPU utilization
             "learning_rate": 1e-4,
             "image_memory": get_image_memory(),
-            "num_epochs": 100,
+            "num_epochs": 10,
             "optimizer": "Adam",
             "loss_function": "BCEWithLogitsLoss",
             "load_data_into_gpu": False,  # Set to False to avoid moving data in Dataset
@@ -193,7 +193,7 @@ def main():
     batch_size = config.batch_size
     learning_rate = config.learning_rate
     max_checkpoints = 5
-    subset_size = 1  # Number of directories per subset
+    subset_size = 4  # Number of directories per subset
     checkpoint_freq = 1  # Save a checkpoint every epoch
     num_full_epochs = config.num_epochs
     preprocess = True  # Set to False to skip preprocessing the dataset
@@ -244,7 +244,7 @@ def main():
             raise KeyError("Planning checkpoint does not contain 'optimizer_state_dict'")
 
         if 'epoch' in checkpoint:
-            start_epoch_planning = checkpoint['epoch']
+            # start_epoch_planning = checkpoint['epoch']
             print(f"Resuming Planning Model from epoch {start_epoch_planning}")
         else:
             raise KeyError("Planning checkpoint does not contain 'epoch'")
@@ -271,7 +271,7 @@ def main():
             raise KeyError("Battle checkpoint does not contain 'optimizer_state_dict'")
 
         if 'epoch' in checkpoint:
-            start_epoch_battle = checkpoint['epoch']
+            #start_epoch_battle = checkpoint['epoch']
             print(f"Resuming Battle Model from epoch {start_epoch_battle}")
         else:
             raise KeyError("Battle checkpoint does not contain 'epoch'")
@@ -375,6 +375,12 @@ def main():
                     model_name="Planning_Model"
                 )
                 subset_progress.update(1)
+
+            #clear planning memory
+            del planning_loader
+            del planning_datasets
+            del combined_planning_dataset
+            clear_memory()
 
             # ----- Training Battle Model -----
             battle_h5_files = [os.path.join(battle_cache_dir, f"{os.path.basename(d)}.h5") for d in subset_dirs]
@@ -502,11 +508,8 @@ def main():
             overall_progress.update(1)
 
             # Cleanup
-            del planning_loader
             del battle_loader 
-            del planning_datasets
             del battle_datasets
-            del combined_planning_dataset
             del combined_battle_dataset
             clear_memory()
 

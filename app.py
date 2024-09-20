@@ -128,7 +128,7 @@ def frame_data(folder_name, frame_index):
     frames_ahead_reward = None
     frames_ahead_punishment = None
 
-    # Iterate through future frames to find the next reward and punishment
+    # Iterate through future frames to find the next non-zero reward and punishment
     for i in range(frame_index + 1, total_frames):
         next_frame_file = json_files[i]
         with open(next_frame_file, 'r') as f:
@@ -139,12 +139,12 @@ def frame_data(folder_name, frame_index):
                 continue  # Skip this frame due to invalid JSON
 
         # Find the next reward if not already found
-        if next_reward is None and next_data.get('reward') is not None:
+        if next_reward is None and next_data.get('reward') not in [None, 0]:
             next_reward = next_data['reward']
             frames_ahead_reward = i - frame_index
 
         # Find the next punishment if not already found
-        if next_punishment is None and next_data.get('punishment') is not None:
+        if next_punishment is None and next_data.get('punishment') not in [None, 0]:
             next_punishment = next_data['punishment']
             frames_ahead_punishment = i - frame_index
 
@@ -175,14 +175,18 @@ def frame_data(folder_name, frame_index):
         pt_net_reward = None
         input_tensor_list = None
 
-    # Prepare response data including new fields
+    # Prepare response data
     response_data = {
         'current_frame': frame_index,
         'total_frames': total_frames,
         'frames': frames_data,  # List of frames based on image_memory
         'input': current_data.get('input', ''),
-        'reward': current_data.get('reward', None),
-        'punishment': current_data.get('punishment', None),
+        'model_prediction': None,  # Placeholder, updated in frontend
+        # Conditionally include 'reward' if not zero
+        # 'punishment' if not zero
+        # Using dictionary unpacking to include fields only if they meet criteria
+        **({'reward': current_data['reward']} if current_data.get('reward') not in [None, 0] else {}),
+        **({'punishment': current_data['punishment']} if current_data.get('punishment') not in [None, 0] else {}),
         'next_reward': {
             'value': next_reward,
             'frames_ahead': frames_ahead_reward
@@ -199,6 +203,7 @@ def frame_data(folder_name, frame_index):
         'inside_window': current_data.get('inside_window', False),
         'pt_net_reward': pt_net_reward,  # Add net_reward from .pt file
         'pt_input_tensor': input_tensor_list,  # Add input tensor from .pt file
+        'future_net_reward': pt_net_reward  # Alias for clarity
     }
 
     return jsonify(response_data)

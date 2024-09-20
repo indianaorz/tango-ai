@@ -85,7 +85,7 @@
     </div>
     
     <div id="metadata">
-        <!-- New Data Points -->
+        <!-- Existing Data Points -->
         <p>Player Health: <span id="player-health">N/A</span></p>
         <p>Enemy Health: <span id="enemy-health">N/A</span></p>
         <p>Frame: <span id="frame-number"></span> / <span id="total-frames"></span></p>
@@ -102,6 +102,9 @@
         <p>Player Position: <span id="player-position">N/A</span></p>
         <p>Enemy Position: <span id="enemy-position">N/A</span></p>
         <p>Inside Window: <span id="inside-window">N/A</span></p>
+    
+        <!-- New Field for Future Net Reward -->
+        <p>Future Net Reward (600 frames ahead): <span id="future-net-reward">N/A</span></p>
     </div>
     
     <!-- Grid Container -->
@@ -225,118 +228,130 @@
         }
 
         function loadFrame(frameIndex) {
-            fetch(`/folder/${folderName}/frame/${frameIndex}`)
-                .then(response => response.json())
-                .then(data => {
-                    console.log("Loaded Frame Data:", data); // Debugging
-                    currentFrame = data.current_frame;
-                    totalFrames = data.total_frames;
+        fetch(`/folder/${folderName}/frame/${frameIndex}`)
+            .then(response => response.json())
+            .then(data => {
+                console.log("Loaded Frame Data:", data); // Debugging
+                currentFrame = data.current_frame;
+                totalFrames = data.total_frames;
 
-                    // Update frame data
-                    document.getElementById('frame-number').textContent = currentFrame + 1;
-                    document.getElementById('total-frames').textContent = totalFrames;
-                    
-                    // Convert binary strings to button names
-                    const inputButtons = data.input ? binaryToButtons(data.input) : [];
-                    const inputCacheButtons = data.pt_input_tensor ? binaryToButtons(data.pt_input_tensor.join('')) : [];
-                    const modelPredictionButtons = data.model_prediction ? binaryToButtons(data.model_prediction) : [];
+                // Update frame data
+                document.getElementById('frame-number').textContent = currentFrame + 1;
+                document.getElementById('total-frames').textContent = totalFrames;
+                
+                // Convert binary strings to button names
+                const inputButtons = data.input ? binaryToButtons(data.input) : [];
+                const inputCacheButtons = data.pt_input_tensor ? binaryToButtons(data.pt_input_tensor.join('')) : [];
+                const modelPredictionButtons = data.model_prediction ? binaryToButtons(data.model_prediction) : [];
 
-                    // Join button names with commas for display
-                    document.getElementById('input-data').textContent = inputButtons.length > 0 ? inputButtons.join(', ') : 'None';
-                    document.getElementById('input-data-cache').textContent = inputCacheButtons.length > 0 ? inputCacheButtons.join(', ') : 'None';
-                    document.getElementById('model-prediction').textContent = modelPredictionButtons.length > 0 ? modelPredictionButtons.join(', ') : 'None';
+                // Join button names with commas for display
+                document.getElementById('input-data').textContent = inputButtons.length > 0 ? inputButtons.join(', ') : 'None';
+                document.getElementById('input-data-cache').textContent = inputCacheButtons.length > 0 ? inputCacheButtons.join(', ') : 'None';
+                document.getElementById('model-prediction').textContent = modelPredictionButtons.length > 0 ? modelPredictionButtons.join(', ') : 'None';
 
-                    document.getElementById('reward-data').textContent = data.reward !== null ? data.reward : 'None';
-                    document.getElementById('punishment-data').textContent = data.punishment !== null ? data.punishment : 'None';
+                // Conditionally display reward and punishment
+                if (data.reward !== undefined) {
+                    document.getElementById('reward-data').textContent = data.reward;
+                } else {
+                    document.getElementById('reward-data').textContent = 'Ignored';
+                }
 
-                    // Update cache data
-                    document.getElementById('net-reward-cache').textContent = data.pt_net_reward !== null ? data.pt_net_reward : 'None';
-                    
-                    // Update next reward data
-                    if (data.next_reward) {
-                        document.getElementById('next-reward-data').textContent =
-                            'Reward ' + data.next_reward.value + ', ' + data.next_reward.frames_ahead + ' frames ahead';
-                    } else {
-                        document.getElementById('next-reward-data').textContent = 'None';
-                    }
+                if (data.punishment !== undefined) {
+                    document.getElementById('punishment-data').textContent = data.punishment;
+                } else {
+                    document.getElementById('punishment-data').textContent = 'Ignored';
+                }
 
-                    // Update next punishment data
-                    if (data.next_punishment) {
-                        document.getElementById('next-punishment-data').textContent =
-                            'Punishment ' + data.next_punishment.value + ', ' + data.next_punishment.frames_ahead + ' frames ahead';
-                    } else {
-                        document.getElementById('next-punishment-data').textContent = 'None';
-                    }
+                // Update cache data
+                document.getElementById('net-reward-cache').textContent = data.pt_net_reward !== null ? data.pt_net_reward : 'None';
+                
+                // Update next reward data
+                if (data.next_reward) {
+                    document.getElementById('next-reward-data').textContent =
+                        'Reward ' + data.next_reward.value + ', ' + data.next_reward.frames_ahead + ' frames ahead';
+                } else {
+                    document.getElementById('next-reward-data').textContent = 'None';
+                }
 
-                    // Update winner status
-                    const winnerText = data.winner === true ? "Yes" : data.winner === false ? "No" : "Undetermined";
-                    document.getElementById('winner-status').textContent = winnerText;
+                // Update next punishment data
+                if (data.next_punishment) {
+                    document.getElementById('next-punishment-data').textContent =
+                        'Punishment ' + data.next_punishment.value + ', ' + data.next_punishment.frames_ahead + ' frames ahead';
+                } else {
+                    document.getElementById('next-punishment-data').textContent = 'None';
+                }
 
-                    // **Update New Data Points**
-                    document.getElementById('player-health').textContent = data.player_health !== undefined ? data.player_health : 'N/A';
-                    document.getElementById('enemy-health').textContent = data.enemy_health !== undefined ? data.enemy_health : 'N/A';
-                    document.getElementById('player-position').textContent = data.player_position ? `(${data.player_position[0]}, ${data.player_position[1]})` : 'N/A';
-                    document.getElementById('enemy-position').textContent = data.enemy_position ? `(${data.enemy_position[0]}, ${data.enemy_position[1]})` : 'N/A';
-                    document.getElementById('inside-window').textContent = data.inside_window !== undefined ? data.inside_window : 'N/A';
+                // Update winner status
+                const winnerText = data.winner === true ? "Yes" : data.winner === false ? "No" : "Undetermined";
+                document.getElementById('winner-status').textContent = winnerText;
 
-                    // **Render the Grid Based on Positions**
-                    renderGrid(data.player_position, data.enemy_position);
+                // **Update New Data Points**
+                document.getElementById('player-health').textContent = data.player_health !== undefined ? data.player_health : 'N/A';
+                document.getElementById('enemy-health').textContent = data.enemy_health !== undefined ? data.enemy_health : 'N/A';
+                document.getElementById('player-position').textContent = data.player_position ? `(${data.player_position[0]}, ${data.player_position[1]})` : 'N/A';
+                document.getElementById('enemy-position').textContent = data.enemy_position ? `(${data.enemy_position[0]}, ${data.enemy_position[1]})` : 'N/A';
+                document.getElementById('inside-window').textContent = data.inside_window !== undefined ? data.inside_window : 'N/A';
 
-                    // Update images
-                    const frameGroup = document.getElementById('frame-group');
-                    frameGroup.innerHTML = ''; // Clear existing images
+                // **Render the Grid Based on Positions**
+                renderGrid(data.player_position, data.enemy_position);
 
-                    // Load the sequence of images based on imageMemory
-                    for (let i = 0; i < imageMemory; i++) {
-                        // Calculate the corresponding frame index for each image in the imageMemory
-                        const imgFrameIndex = frameIndex - (imageMemory - 1) + i;
+                // Update future_net_reward
+                document.getElementById('future-net-reward').textContent = data.future_net_reward !== null ? data.future_net_reward : 'N/A';
 
-                        // Ensure imgFrameIndex stays within valid bounds
-                        const adjustedIndex = Math.max(0, Math.min(imgFrameIndex, data.frames.length - 1));
+                // Update images
+                const frameGroup = document.getElementById('frame-group');
+                frameGroup.innerHTML = ''; // Clear existing images
 
-                        // Use adjustedIndex to access data.frames safely
-                        const imgSrc = `../training_data/${folderName}/${data.frames[adjustedIndex].image_path}`;
-                        console.log("Image Source:", imgSrc); // Debugging - check the image path
+                // Load the sequence of images based on imageMemory
+                for (let i = 0; i < imageMemory; i++) {
+                    // Calculate the corresponding frame index for each image in the imageMemory
+                    const imgFrameIndex = frameIndex - (imageMemory - 1) + i;
 
-                        // Create a container for each image and its frame index
-                        const imgContainer = document.createElement('div');
-                        imgContainer.className = 'image-container';
+                    // Ensure imgFrameIndex stays within valid bounds
+                    const adjustedIndex = Math.max(0, Math.min(imgFrameIndex, data.frames.length - 1));
 
-                        const img = document.createElement('img');
-                        img.src = imgSrc;
-                        img.alt = `Frame ${adjustedIndex + 1}`;
-                        img.className = 'carousel-image';
-                        imgContainer.appendChild(img);
+                    // Use adjustedIndex to access data.frames safely
+                    const imgSrc = `../training_data/${folderName}/${data.frames[adjustedIndex].image_path}`;
+                    console.log("Image Source:", imgSrc); // Debugging - check the image path
 
-                        const caption = document.createElement('div');
-                        caption.className = 'frame-index';
-                        caption.textContent = `Frame ${adjustedIndex + 1}`;
-                        imgContainer.appendChild(caption);
+                    // Create a container for each image and its frame index
+                    const imgContainer = document.createElement('div');
+                    imgContainer.className = 'image-container';
 
-                        frameGroup.appendChild(imgContainer);
-                    }
+                    const img = document.createElement('img');
+                    img.src = imgSrc;
+                    img.alt = `Frame ${adjustedIndex + 1}`;
+                    img.className = 'carousel-image';
+                    imgContainer.appendChild(img);
 
-                    // Update slider
-                    document.getElementById('frame-slider').value = currentFrame;
+                    const caption = document.createElement('div');
+                    caption.className = 'frame-index';
+                    caption.textContent = `Frame ${adjustedIndex + 1}`;
+                    imgContainer.appendChild(caption);
 
-                    // Clear model prediction until inference is run
-                    document.getElementById('model-prediction').textContent = 'None';
-                    
-                    // Set the slider max value if it's the first load
-                    if (totalFrames > 0 && document.getElementById('frame-slider').max == "0") {
-                        updateSliderMax(totalFrames);
-                    }
+                    frameGroup.appendChild(imgContainer);
+                }
 
-                    // Automatically run inference if auto-inference is enabled
-                    if (autoInference) {
-                        runInference(currentFrame);
-                    }
-                })
-                .catch(error => {
-                    console.error('Error loading frame data:', error);
-                });
-        }
+                // Update slider
+                document.getElementById('frame-slider').value = currentFrame;
 
+                // Clear model prediction until inference is run
+                document.getElementById('model-prediction').textContent = 'None';
+                
+                // Set the slider max value if it's the first load
+                if (totalFrames > 0 && document.getElementById('frame-slider').max == "0") {
+                    updateSliderMax(totalFrames);
+                }
+
+                // Automatically run inference if auto-inference is enabled
+                if (autoInference) {
+                    runInference(currentFrame);
+                }
+            })
+            .catch(error => {
+                console.error('Error loading frame data:', error);
+            });
+    }
         // Button event listeners
         document.getElementById('prev-button').addEventListener('click', function() {
             if (currentFrame > 0) {

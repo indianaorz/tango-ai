@@ -448,13 +448,12 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                     // Simulate keyboard input based on the command
                     match cmd.command_type.as_str() {
                         "key_press" => {
-                            // println!("Key press command: {}", cmd.key);
-
                             // Loop over each bit in the binary string and simulate key presses
                             for (i, bit) in cmd.key.chars().rev().enumerate() {
                                 if bit == '1' {
                                     if let Some(key) = map_bit_to_key(i) {
                                         // Simulate a key press event for the active bits
+                                        println!("Simulating key press for bit position: {}", i);
                                         handle_input_event(
                                             &mut input_state,
                                             &mut state,
@@ -490,38 +489,38 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
         let rewards = get_rewards(); // Use global function to get rewards
         let punishments = get_punishments(); // Use global function to get punishments
 
-        if !rewards.is_empty() {
-            // println!("Global rewards: {:?}", rewards);
-            if let Some(ref output_tx) = *output_tx.lock() {
-                for reward in rewards {
-                    let message = OutputMessage {
-                        event: "reward".to_string(),
-                        details: format!("damage: {}", reward.damage),
-                    };
-                    // println!("Sending message: {:?}", message);
-                    if let Err(e) = output_tx.send(message) {
-                        println!("Failed to send reward message: {}", e);
-                    }
-                }
-                clear_rewards(); // Clear global rewards after processing
-            }
-        }
+        // if !rewards.is_empty() {
+        //     // println!("Global rewards: {:?}", rewards);
+        //     if let Some(ref output_tx) = *output_tx.lock() {
+        //         for reward in rewards {
+        //             let message = OutputMessage {
+        //                 event: "reward".to_string(),
+        //                 details: format!("damage: {}", reward.damage),
+        //             };
+        //             // println!("Sending message: {:?}", message);
+        //             if let Err(e) = output_tx.send(message) {
+        //                 println!("Failed to send reward message: {}", e);
+        //             }
+        //         }
+        //         clear_rewards(); // Clear global rewards after processing
+        //     }
+        // }
 
-        if !punishments.is_empty() {
-            // println!("Global punishments: {:?}", punishments);
-            if let Some(ref output_tx) = *output_tx.lock() {
-                for punishment in punishments {
-                    let message = OutputMessage {
-                        event: "punishment".to_string(),
-                        details: format!("damage: {}", punishment.damage),
-                    };
-                    if let Err(e) = output_tx.send(message) {
-                        println!("Failed to send punishment message: {}", e);
-                    }
-                }
-                clear_punishments(); // Clear global punishments after processing
-            }
-        }
+        // if !punishments.is_empty() {
+        //     // println!("Global punishments: {:?}", punishments);
+        //     if let Some(ref output_tx) = *output_tx.lock() {
+        //         for punishment in punishments {
+        //             let message = OutputMessage {
+        //                 event: "punishment".to_string(),
+        //                 details: format!("damage: {}", punishment.damage),
+        //             };
+        //             if let Err(e) = output_tx.send(message) {
+        //                 println!("Failed to send punishment message: {}", e);
+        //             }
+        //         }
+        //         clear_punishments(); // Clear global punishments after processing
+        //     }
+        // }
 
 
         if let Some(player_won) = get_winner() {
@@ -589,6 +588,9 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                     ) {
                         println!("Failed to save game state: {:?}", e);
                     }
+                    //clear rewards and punishments
+                    clear_rewards();
+                    clear_punishments();
                 }
             }
         }
@@ -664,6 +666,7 @@ fn map_key_to_physical_key(key: &str) -> Option<Key> {
         "x" => Some(Key::X),
         "a" => Some(Key::A),
         "s" => Some(Key::S),
+        "return" => Some(Key::Return),
         _ => None,
     }
 }

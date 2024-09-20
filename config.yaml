@@ -1,0 +1,7 @@
+# config.yaml
+strategy:
+  name: default  # Options: default, dodge, damage
+  parameters:
+    reward_value: 1
+    punishment_value: -0.5
+    window_size: 300

@@ -5,7 +5,14 @@ use rand::SeedableRng;
 use std::sync::Arc;
 
 
+use std::io::Write;
 use std::collections::HashMap;
+
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+
+use std::fs::File;
+
 use std::sync::LazyLock;
 
 pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0 )* 2.0;
@@ -414,11 +421,18 @@ impl Session {
             
         
             // Shared storage for initial boolean states
-            static INITIAL_BOOLEAN_STATES: LazyLock<Mutex<HashMap<u32, u8>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+            static INITIAL_BOOLEAN_STATES: LazyLock<Mutex<HashMap<u32, u16>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
             // Shared storage for boolean addresses
             // let boolean_addresses = Arc::new(Mutex::new(Vec::new()));
             // let boolean_addresses_clone = Arc::clone(&boolean_addresses);
+
+            // Initialize the log file with thread-safe access
+            let log_file = Arc::new(Mutex::new(
+                File::create("/home/lee/log.txt").expect("Failed to create log file"),
+            ));
+            // Clone the Arc to pass into the closure
+            let log_file_clone = Arc::clone(&log_file);
 
             let window_state_addresses = vec![
                 (0x02035288, 0, 255),//success! 0=closed, 255 = open
@@ -428,6 +442,13 @@ impl Session {
             // Clone for use inside the callback
             let window_state_addresses = Arc::new(window_state_addresses);
 
+            // Initialize toggle state variables for Command 4
+            // let logging_enabled = Arc::new(AtomicBool::new(false));
+            // let command4_prev_state = Arc::new(AtomicBool::new(false));
+
+            // // Clone these for use inside the closure
+            // let logging_enabled_clone = Arc::clone(&logging_enabled);
+            // let command4_prev_state_clone = Arc::clone(&command4_prev_state);
             
             // Set the frame callback
             thread.set_frame_callback({
@@ -435,6 +456,7 @@ impl Session {
                 let joyflags = joyflags.clone();
                 let vbuf = vbuf.clone();
                 let emu_tps_counter = emu_tps_counter.clone();
+                let log_file = log_file_clone.clone(); // Clone the Arc for use inside the closure
                 // let boolean_addresses = boolean_addresses_clone.clone();
                 move |mut core, video_buffer, mut thread_handle| {
                     let mut vbuf = vbuf.lock();
@@ -461,6 +483,7 @@ impl Session {
                             };
                             set_is_player_inside_window(assumed_state == "Open");
                         }
+                        
 
                         //display 0x0203A9C4's value
                         //opponent's y position 261 517 773
@@ -485,7 +508,7 @@ impl Session {
                         set_enemy_position((enemy_x, enemy_y));
                         set_player_position((player_x, player_y));
 
-                    //     let joyflags_val = joyflags.load(std::sync::atomic::Ordering::Relaxed);
+                        let joyflags_val = joyflags.load(std::sync::atomic::Ordering::Relaxed);
                     //     // Command 1 (Set all values, triggered by 0x00000200)
                     //     if joyflags_val & 0x00000200 != 0 {
                     //         println!("Set Command - Populating boolean addresses");
@@ -502,7 +525,7 @@ impl Session {
 
                     //         // Store the initial values of those addresses in INITIAL_BOOLEAN_STATES
                     //         for &address in addresses.iter() {
-                    //             let current_value = core_ref.raw_read_8(address, -1);
+                    //             let current_value = core_ref.raw_read_16(address, -1);
                     //             initial_states.insert(address, current_value);
                     //             println!("Captured Address: 0x{:08X}, Initial Value: {}", address, current_value);
                     //         }
@@ -516,7 +539,7 @@ impl Session {
                     //         let mut addresses = boolean_addresses.lock();
                     //         let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
                     //         addresses.retain(|&address| {
-                    //             let current_value = core_ref.raw_read_8(address, -1);
+                    //             let current_value = core_ref.raw_read_16(address, -1);
                     //             if let Some(&initial_value) = initial_states.get(&address) {
                     //                 if current_value != initial_value {
                     //                     // Value has changed, prune it from the list
@@ -539,7 +562,7 @@ impl Session {
                     //         let mut addresses = boolean_addresses.lock();
                     //         let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
                     //         addresses.retain(|&address| {
-                    //             let current_value = core_ref.raw_read_8(address, -1);
+                    //             let current_value = core_ref.raw_read_16(address, -1);
                     //             if let Some(&initial_value) = initial_states.get(&address) {
                     //                 if current_value == initial_value {
                     //                     // Value has changed, prune it from the list
@@ -563,7 +586,7 @@ impl Session {
                     //     let initial_states = INITIAL_BOOLEAN_STATES.lock();
 
                     //     for &address in addresses.iter() {
-                    //         let current_value = core_ref.raw_read_8(address, -1);
+                    //         let current_value = core_ref.raw_read_16(address, -1);
                     //         if let Some(&initial_value) = initial_states.get(&address) {
                     //             // Only display if the current value has changed compared to the initial value
                     //             if current_value != initial_value {
@@ -577,23 +600,62 @@ impl Session {
                     // } 
                     // // Command 3 (Compare the current values, triggered by 0x00000008)
                     // if joyflags_val & 0x00000001 != 0 {
-                    //     println!("Compare Command - Checking current values");
+                    //    // Lock the boolean_addresses and log_file for safe access
+                    //     let addresses = boolean_addresses.lock();
+                    //     let mut file = log_file.lock();
+
+                    //     // Iterate over each address and write to the file
+                    //     for &address in addresses.iter() {
+                    //         if let Err(e) = writeln!(file, "0x{:08X}", address) {
+                    //             eprintln!("Failed to write address 0x{:08X} to log file: {}", address, e);
+                    //         }
+                    //     }
+
+                    //     // Optionally, flush the file to ensure data is written immediately
+                    //     if let Err(e) = file.flush() {
+                    //         eprintln!("Failed to flush log file: {}", e);
+                    //     }
+
+                    // }
+                    // // Handle Command 4 as a toggle
+                    // {
+                    //     // Check the current state of Command 4 bit (0x00000004)
+                    //     let command4_current = (joyflags_val & 0x00000004) != 0;
+                    //     let command4_prev = command4_prev_state.load(Ordering::Relaxed);
+
+                    //     // Detect rising edge: Command 4 bit was not set in the previous frame but is set now
+                    //     if command4_current && !command4_prev {
+                    //         // Toggle the logging_enabled state
+                    //         let new_state = !logging_enabled.load(Ordering::Relaxed);
+                    //         logging_enabled.store(new_state, Ordering::Relaxed);
+                    //         if new_state {
+                    //             println!("Command 4 Toggle: Logging ENABLED.");
+                    //         } else {
+                    //             println!("Command 4 Toggle: Logging DISABLED.");
+                    //         }
+                    //     }
+
+                    //     // Update the previous state for the next frame
+                    //     command4_prev_state.store(command4_current, Ordering::Relaxed);
+                    // }
+
+                    // // If logging is enabled, perform the logging
+                    // if logging_enabled.load(Ordering::Relaxed) {
+                    //     println!("Command 4 Action: Logging Remaining Boolean Addresses and Their Current Values.");
                     //     let addresses = boolean_addresses.lock();
                     //     let initial_states = INITIAL_BOOLEAN_STATES.lock();
 
                     //     for &address in addresses.iter() {
                     //         let current_value = core_ref.raw_read_8(address, -1);
                     //         if let Some(&initial_value) = initial_states.get(&address) {
-                    //             // Only display if the current value has changed compared to the initial value
-                    //             if current_value == initial_value {
-                    //                 println!(
-                    //                     "Compare Command - Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
-                    //                     address, initial_value, current_value
-                    //                 );
-                    //             }
+                    //             println!(
+                    //                 "Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
+                    //                 address, initial_value, current_value
+                    //             );
                     //         }
                     //     }
                     // }
+
 
                     }
                 }
