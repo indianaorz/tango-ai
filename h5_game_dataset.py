@@ -1,89 +1,165 @@
-import h5py
+# h5_game_dataset.py
 import torch
 from torch.utils.data import Dataset
+import h5py
+import numpy as np
 
 class H5GameDataset(Dataset):
-    def __init__(self, h5_path, image_memory=1, device='cuda'):
-        """
-        Initializes the dataset by loading all data into GPU memory.
-
-        Args:
-            h5_path (str): Path to the HDF5 file.
-            image_memory (int, optional): Number of image frames to include in a sequence. Defaults to 1.
-            device (str, optional): Device to load the tensors onto ('cuda' or 'cpu'). Defaults to 'cuda'.
-        """
-        super(H5GameDataset, self).__init__()
+    def __init__(self, h5_path, image_memory=1, config=None):
         self.h5_path = h5_path
-        self.device = device
         self.image_memory = image_memory
 
-        # Open the HDF5 file and load data
+        # Extract configuration for input features
+        input_features = config.get('input_features', {})
+        self.include_image = input_features.get('include_image', True)
+        self.include_position = input_features.get('include_position', True)
+        self.position_type = input_features.get('position_type', 'grid')
+        self.include_player_charge = input_features.get('include_player_charge', False)
+        self.include_enemy_charge = input_features.get('include_enemy_charge', False)
+        self.temporal_charge = input_features.get('temporal_charge', 0)
+        self.include_temporal_charge = self.temporal_charge > 0
+
+        # Open the HDF5 file and load selected data
         with h5py.File(self.h5_path, 'r') as h5_file:
-            # Convert datasets to PyTorch tensors and move to device
-            self.images = torch.from_numpy(h5_file['images'][:]).float().to(self.device)             # Shape: (N, 3, 160, 240)
-            self.inputs = torch.from_numpy(h5_file['inputs'][:]).float().to(self.device)             # Shape: (N, 16)
-            self.player_healths = torch.from_numpy(h5_file['player_healths'][:]).float().to(self.device)  # Shape: (N, 1)
-            self.enemy_healths = torch.from_numpy(h5_file['enemy_healths'][:]).float().to(self.device)    # Shape: (N, 1)
-            self.player_grids = torch.from_numpy(h5_file['player_grids'][:]).float().to(self.device)      # Shape: (N, 6, 3)
-            self.enemy_grids = torch.from_numpy(h5_file['enemy_grids'][:]).float().to(self.device)        # Shape: (N, 6, 3)
-            self.inside_windows = torch.from_numpy(h5_file['inside_windows'][:]).float().to(self.device)  # Shape: (N, 1)
-            self.net_rewards = torch.from_numpy(h5_file['net_rewards'][:]).float().to(self.device)        # Shape: (N,)
+            if self.include_image:
+                self.images = h5_file['images'][:].astype(np.float32)  # Shape: (num_samples, 3, 160, 240)
+                print(f"Loaded images with shape: {self.images.shape}")  # Debugging
+            if self.include_position:
+                self.positions = h5_file['positions'][:].astype(np.float32)  # Shape: (num_samples, 4) or (num_samples, 36)
+                print(f"Loaded positions with shape: {self.positions.shape}")  # Debugging
+            if self.include_player_charge:
+                self.player_charges = h5_file['player_charges'][:].astype(np.float32)  # Shape: (num_samples,)
+                print(f"Loaded player_charges with shape: {self.player_charges.shape}")  # Debugging
+            if self.include_enemy_charge:
+                self.enemy_charges = h5_file['enemy_charges'][:].astype(np.float32)  # Shape: (num_samples,)
+                print(f"Loaded enemy_charges with shape: {self.enemy_charges.shape}")  # Debugging
+            
+            # Always load net_rewards
+            self.net_rewards = h5_file['net_rewards'][:].astype(np.float32)  # Shape: (num_samples,)
+            print(f"Loaded net_rewards with shape: {self.net_rewards.shape}")  # Debugging
+            
+            # Load 'input' dataset
+            if 'input' in h5_file:
+                self.inputs = h5_file['input'][:].astype(np.float32)  # Shape: (num_samples, 16)
+                print(f"Loaded inputs with shape: {self.inputs.shape}")  # Debugging
+            else:
+                raise KeyError(f"'input' dataset not found in {h5_path}")
 
             # Read net_reward_min and net_reward_max from file attributes
             self.net_reward_min = h5_file.attrs['net_reward_min']
             self.net_reward_max = h5_file.attrs['net_reward_max']
+
+        # Calculate the total number of samples considering image memory and temporal_charge
+        feature_lengths = []
+        if self.include_image:
+            feature_lengths.append(len(self.images))
+        if self.include_position:
+            feature_lengths.append(len(self.positions))
+        if self.include_player_charge:
+            feature_lengths.append(len(self.player_charges))
+        if self.include_enemy_charge:
+            feature_lengths.append(len(self.enemy_charges))
+        feature_lengths.append(len(self.net_rewards))
+        feature_lengths.append(len(self.inputs))
         
-        # Calculate the total number of samples considering image memory
-        self.total_samples = len(self.images) - self.image_memory + 1  # Number of possible sequences
+        min_length = min(feature_lengths)
+        # total_samples = min_length - image_memory + 1
+        total_reduction = self.image_memory - 1
+        if self.include_temporal_charge:
+            total_reduction += self.temporal_charge -1
+        self.total_samples = min_length - total_reduction
+
+        # Move data to GPU if available
+        if torch.cuda.is_available():
+            if self.include_image:
+                self.images = torch.tensor(self.images).cuda()
+            if self.include_position:
+                self.positions = torch.tensor(self.positions).cuda()
+            if self.include_player_charge:
+                self.player_charges = torch.tensor(self.player_charges).cuda()
+            if self.include_enemy_charge:
+                self.enemy_charges = torch.tensor(self.enemy_charges).cuda()
+            self.net_rewards = torch.tensor(self.net_rewards).cuda()
+            self.inputs = torch.tensor(self.inputs).cuda()
+
+        if self.total_samples < 0:
+            print(f"Warning: Calculated total_samples={self.total_samples} for {h5_path} is negative. Setting to 0.")
+            self.total_samples = 0
+
+        print(f"Total samples in dataset: {self.total_samples}")  # Debugging
+
+        # Assertion to ensure __len__() is non-negative
+        assert self.total_samples >= 0, f"Dataset {h5_path} has negative total_samples={self.total_samples}"
 
     def __len__(self):
-        """Returns the total number of samples in the dataset."""
         return self.total_samples
 
     def __getitem__(self, idx):
-        """
-        Retrieves a single sample from the dataset.
-
-        Args:
-            idx (int): Index of the sample to retrieve.
-
-        Returns:
-            dict: A dictionary containing all relevant tensors for the sample.
-        """
         if idx < 0 or idx >= self.total_samples:
             raise IndexError(f"Index {idx} out of range for dataset of size {self.total_samples}")
         
-        # Extract a sequence of images based on image_memory
-        image_sequence = self.images[idx : idx + self.image_memory]  # Shape: (image_memory, 3, 160, 240)
+        sample = {}
+        base_idx = idx + self.image_memory -1 + (self.temporal_charge -1 if self.include_temporal_charge else 0)
         
-        if self.image_memory == 1:
-            # Return a single image without the image_memory dimension
-            image = image_sequence[0]  # Shape: (3, 160, 240)
-        else:
-            # Return a sequence of images
-            image = image_sequence  # Shape: (image_memory, 3, 160, 240)
-        
-        # Retrieve corresponding inputs and features for the last frame in the sequence
-        input_tensor = self.inputs[idx + self.image_memory - 1]             # Shape: (16,)
-        player_health = self.player_healths[idx + self.image_memory - 1]   # Shape: (1,)
-        enemy_health = self.enemy_healths[idx + self.image_memory - 1]     # Shape: (1,)
-        player_grid = self.player_grids[idx + self.image_memory - 1]       # Shape: (6, 3)
-        enemy_grid = self.enemy_grids[idx + self.image_memory - 1]         # Shape: (6, 3)
-        inside_window = self.inside_windows[idx + self.image_memory - 1]   # Shape: (1,)
-        net_reward = self.net_rewards[idx + self.image_memory - 1]         # Shape: ()
+        if self.include_image:
+            # Extract image sequence based on image_memory
+            image_sequence = self.images[base_idx - (self.image_memory -1) : base_idx +1]  # Shape: (image_memory, 3, 160, 240)
+            if self.image_memory == 1:
+                sample['image'] = image_sequence[0].unsqueeze(1)  # Shape: (3, 1, 160, 240)
+            else:
+                # Shape: (3, image_memory, 160, 240)
+                sample['image'] = image_sequence.permute(1, 0, 2, 3)  # Reorder to (channels, image_memory, height, width)
 
-        return {
-            'image': image,                     # (3, 160, 240) or (image_memory, 3, 160, 240)
-            'input': input_tensor,              # (16,)
-            'player_health': player_health,     # (1,)
-            'enemy_health': enemy_health,       # (1,)
-            'player_grid': player_grid,         # (6, 3)
-            'enemy_grid': enemy_grid,           # (6, 3)
-            'inside_window': inside_window,     # (1,)
-            'net_reward': net_reward            # ()
-        }
+            # print(f"Sample image shape: {sample['image'].shape}")  # Debugging
+
+            # Assertion to ensure image shape is correct
+            expected_image_shape = (3, self.image_memory, 160, 240) if self.image_memory > 1 else (3, 1, 160, 240)
+            assert sample['image'].shape == expected_image_shape, f"Unexpected image shape: {sample['image'].shape}, expected: {expected_image_shape}"
+        
+        if self.include_position:
+            position = self.positions[base_idx]  # Shape: (4,) or (36,)
+            sample['position'] = position
+            # print(f"Sample position shape: {sample['position'].shape}")  # Debugging
+            if self.position_type == 'float':
+                assert sample['position'].shape == torch.Size([4]), f"Unexpected position shape: {sample['position'].shape}"
+            elif self.position_type == 'grid':
+                assert sample['position'].shape == torch.Size([36]), f"Unexpected position shape: {sample['position'].shape}"
+        
+        if self.include_player_charge:
+            player_charge = self.player_charges[base_idx]  # Scalar
+            sample['player_charge'] = player_charge
+            # print(f"Sample player_charge shape: {sample['player_charge'].shape}")  # Debugging
+            assert sample['player_charge'].shape == torch.Size([]), f"Unexpected player_charge shape: {sample['player_charge'].shape}"
+        
+        if self.include_enemy_charge:
+            enemy_charge = self.enemy_charges[base_idx]  # Scalar
+            sample['enemy_charge'] = enemy_charge
+            # print(f"Sample enemy_charge shape: {sample['enemy_charge'].shape}")  # Debugging
+            assert sample['enemy_charge'].shape == torch.Size([]), f"Unexpected enemy_charge shape: {sample['enemy_charge'].shape}"
+        
+        if self.include_temporal_charge:
+            # Extract temporal charge sequences
+            player_charge_seq = self.player_charges[base_idx - (self.temporal_charge -1) : base_idx +1]  # Shape: (temporal_charge,)
+            enemy_charge_seq = self.enemy_charges[base_idx - (self.temporal_charge -1) : base_idx +1]  # Shape: (temporal_charge,)
+            sample['player_charge_temporal'] = player_charge_seq  # Shape: (temporal_charge,)
+            sample['enemy_charge_temporal'] = enemy_charge_seq    # Shape: (temporal_charge,)
+            # print(f"Sample temporal charge shapes: player={sample['player_charge_temporal'].shape}, enemy={sample['enemy_charge_temporal'].shape}")
+            assert sample['player_charge_temporal'].shape == torch.Size([self.temporal_charge]), f"Unexpected player_charge_temporal shape: {sample['player_charge_temporal'].shape}"
+            assert sample['enemy_charge_temporal'].shape == torch.Size([self.temporal_charge]), f"Unexpected enemy_charge_temporal shape: {sample['enemy_charge_temporal'].shape}"
+        
+        # Always include net_reward
+        net_reward = self.net_rewards[base_idx]  # Scalar
+        sample['net_reward'] = net_reward
+        # print(f"Sample net_reward shape: {sample['net_reward'].shape}")  # Debugging
+        assert sample['net_reward'].shape == torch.Size([]), f"Unexpected net_reward shape: {sample['net_reward'].shape}"
+        
+        # Always include input
+        input_tensor = self.inputs[base_idx]  # Shape: (16,)
+        sample['input'] = input_tensor
+        # print(f"Sample input shape: {sample['input'].shape}")  # Debugging
+        assert sample['input'].shape == torch.Size([16]), f"Unexpected input shape: {sample['input'].shape}"
+        
+        return sample
 
     def __del__(self):
-        """Ensures that the HDF5 file is closed when the dataset is deleted."""
-        if hasattr(self, 'h5_file'):
-            self.h5_file.close()
+        pass  # Handled by context manager

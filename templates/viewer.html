@@ -98,6 +98,8 @@
         <p>Next Reward: <span id="next-reward-data">None</span></p>
         <p>Next Punishment: <span id="next-punishment-data">None</span></p>
         <p>Winner: <span id="winner-status">Undetermined</span></p>
+        <p>Player Charge: <span id="player-charge">N/A</span></p>
+        <p>Enemy Charge: <span id="enemy-charge">N/A</span></p>
         
         <p>Player Position: <span id="player-position">N/A</span></p>
         <p>Enemy Position: <span id="enemy-position">N/A</span></p>
@@ -284,6 +286,10 @@
                 // Update winner status
                 const winnerText = data.winner === true ? "Yes" : data.winner === false ? "No" : "Undetermined";
                 document.getElementById('winner-status').textContent = winnerText;
+
+                // Update player and enemy charge
+                document.getElementById('player-charge').textContent = data.player_charge !== undefined ? data.player_charge : 'N/A';
+                document.getElementById('enemy-charge').textContent = data.enemy_charge !== undefined ? data.enemy_charge : 'N/A';
 
                 // **Update New Data Points**
                 document.getElementById('player-health').textContent = data.player_health !== undefined ? data.player_health : 'N/A';

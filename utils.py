@@ -1,7 +1,7 @@
 # utils.py
 import os
 import glob
-
+from datetime import datetime
 
 def get_root_dir():
     return '../TANGO'#'/home/lee/tango' #'../TANGO'#'/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO'
@@ -20,17 +20,38 @@ def inference_fps():
 
 default_checkpoint_path = get_root_dir() + '/checkpoints'
 #checkpoint path
-def get_checkpoint_path(checkpoint_dir = default_checkpoint_path, image_memory = 1):
+def get_checkpoint_dir(model_type='planning', image_memory=1):
     """
-    Returns the path to the latest checkpoint in the given directory.
+    Constructs the checkpoint directory path based on model type and image memory.
     """
-    #path should be checkpoints/10/
-    checkpoint_path =  os.path.join(checkpoint_dir, str(image_memory))
-    checkpoint_files = glob.glob(os.path.join(checkpoint_path, '*.pt'))
+    root_dir = get_root_dir()
+    checkpoint_dir = os.path.join(root_dir, 'checkpoints', model_type, str(image_memory))
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    return checkpoint_dir
+
+def get_latest_checkpoint(model_type='planning', image_memory=1):
+    """
+    Returns the path to the latest checkpoint for the specified model type and image memory.
+    If no checkpoint exists, returns None.
+    """
+    checkpoint_dir = get_checkpoint_dir(model_type, image_memory)
+    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, '*.pt'))
     if not checkpoint_files:
-        print(f"No checkpoint files found in {checkpoint_path}")
+        print(f"No checkpoint files found in {checkpoint_dir}")
         return None
-    return max(checkpoint_files, key=os.path.getctime)
+    latest_checkpoint = max(checkpoint_files, key=os.path.getctime)
+    return latest_checkpoint
+
+def get_new_checkpoint_path(model_type='planning', image_memory=1):
+    """
+    Generates a new checkpoint path with a timestamp to ensure uniqueness.
+    """
+    checkpoint_dir = get_checkpoint_dir(model_type, image_memory)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    checkpoint_filename = f'checkpoint_{timestamp}.pt'
+    checkpoint_path = os.path.join(checkpoint_dir, checkpoint_filename)
+    return checkpoint_path
+
 
 def get_exponental_amount():
     return 4

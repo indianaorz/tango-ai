@@ -85,6 +85,12 @@ class DefaultStrategy(RewardStrategy):
             for idx, frame in enumerate(battle):
                 frame['assigned_reward'] = cumulative_rewards[idx]
 
+            
+        # Assign a positive reward to frames where the player didn't get hit
+        for i, frame in enumerate(all_battle_frames):
+            if 'assigned_reward' not in frame:
+                all_battle_frames[i]['assigned_reward'] = 1.0
+
         return all_planning_frames, all_battle_frames
 
     def segment_into_rounds(self, planning_frames, battle_frames):
@@ -93,6 +99,29 @@ class DefaultStrategy(RewardStrategy):
         Currently returns a single round containing all frames.
         """
         return [{'planning': planning_frames, 'battle': battle_frames}]
+    
+
+#reward everything strategy
+class RewardEverythingStrategy(RewardStrategy):
+    def __init__(self, reward_value=1.0, punishment_value=-0.5, window_size=100):
+        self.reward_value = reward_value
+        self.punishment_value = punishment_value
+        self.window_size = window_size
+
+    def assign_rewards(self, planning_frames, battle_frames, max_player_health, max_enemy_health):
+        all_planning_frames = planning_frames
+        all_battle_frames = battle_frames
+
+        # Assign a flat reward to planning frames
+        for frame in all_planning_frames:
+            frame['assigned_reward'] = 0.0  # Or another logic as needed
+
+        # Assign a flat reward to battle frames
+        for frame in all_battle_frames:
+            frame['assigned_reward'] = 1.0  # Or another logic as needed
+
+
+        return all_planning_frames, all_battle_frames
 
 class DodgeStrategy(RewardStrategy):
     def __init__(self, punishment_value=-0.5, window_size=100):

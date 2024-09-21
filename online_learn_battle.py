@@ -1,4 +1,6 @@
-# battle.py
+# online_learn_battle.py
+import traceback
+
 import subprocess
 import os
 import time
@@ -9,18 +11,27 @@ from PIL import Image
 from io import BytesIO
 import torch
 import torchvision.transforms as transforms
+import numpy as np
+import torch.nn as nn
+import torch.optim as optim
+from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
-import numpy as np  # Import numpy for type conversion if needed
+import torch.nn.functional as F
+from collections import deque  # For frame buffering and data storage
+import yaml  # To load config
+import random
+from threading import Lock
+
 from train import GameInputPredictor  # Import the model class
 from utils import (
-    get_checkpoint_path, get_image_memory, get_exponential_sample,
-    get_exponental_amount, get_threshold, get_root_dir, position_to_grid, get_threshold_plan, inference_fps
+    get_image_memory, get_exponential_sample,
+    get_exponental_amount, get_threshold, get_root_dir, position_to_grid, get_threshold_plan, inference_fps,get_latest_checkpoint , get_checkpoint_dir
 )
-import random
-from collections import deque  # Import deque for frame buffering
-import yaml  # Import yaml to load config
 
-from threading import Lock
+# Import necessary modules at the top
+import torch.optim as optim
+import torch.nn.functional as F
+
 
 # Initialize locks for thread safety
 planning_model_lock = Lock()
@@ -37,8 +48,7 @@ GAMMA = float(os.getenv("GAMMA", 0.05))  # Default gamma is 0.05
 # Initialize maximum health values
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
-INSTANCES = []
-battle_count = 1
+
 # Define the server addresses and ports for each instance
 INSTANCES = [
     {
@@ -47,9 +57,7 @@ INSTANCES = [
         'rom_path': 'bn6,0',
         'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
         'name': 'Instance 1',
-        'init_link_code': 'areana1',
-        # 'replay_path':'/home/lee/Documents/Tango/replays/20240917185150-gregarbattleset1-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
-        # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
+        'init_link_code': 'arena1',
         'is_player': True  # Set to True if you don't want this instance to send inputs
     },
     {
@@ -58,10 +66,8 @@ INSTANCES = [
         'rom_path': 'bn6,0',
         'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
         'name': 'Instance 2',
-        'init_link_code': 'areana1',
-        # 'replay_path':'/home/lee/Documents/Tango/replays/20240917185150-gregarbattleset1-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
-        # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
-        'is_player': False  # Set to True if you don't want this instance to send inputs
+        'init_link_code': 'arena1',
+        'is_player': False  # Set to False if you want this instance to send inputs
     },
     # Additional instances can be added here
 ]
@@ -96,29 +102,6 @@ def create_instance(port, rom_path, init_link_code, is_player=False):
         'is_player': is_player
     }
 
-# Function to generate battles
-def generate_battles(num_matches):
-    battles = []
-    port_base = 12344  # Starting port number
-
-    for match in range(num_matches):
-        # Generate a unique init_link_code for this match
-        init_link_code = f"arena{match}"
-
-        # Randomly choose the ROM path for this match
-        rom_path = random.choice(['bn6,0', 'bn6,1'])
-
-        # Generate two instances for each match
-        instance1 = create_instance(port_base, rom_path, init_link_code)
-        instance2 = create_instance(port_base + 1, rom_path, init_link_code)
-        INSTANCES.append(instance1)
-        INSTANCES.append(instance2)
-        port_base += 2  # Increment the port numbers
-
-    return battles
-
-# generate_battles(battle_count)
-
 # Key mappings based on model output indices
 KEY_MAPPINGS = {
     0: 'A',        # 0000000100000000
@@ -128,7 +111,7 @@ KEY_MAPPINGS = {
     4: 'RIGHT',    # 0000000000010000
     5: 'X',        # 0000000000000010
     6: 'Z',        # 0000000000000001
-    7: 'S'         # 0000000000000000??
+    7: 'S',        # 0000000000000000??
 }
 
 RANDOM_MAPPINGS = {
@@ -152,10 +135,21 @@ KEY_BIT_POSITIONS = {
     'X': 1,
     'Z': 0,
     'S': 9,
-    'RETURN':3 #0000000000001000
+    'RETURN': 3  # 0000000000001000
 }
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Function to get the training directory based on the replay file name
+def get_training_data_dir(replay_path):
+    if replay_path:
+        replay_name = os.path.basename(replay_path).split('.')[0]  # Extract the file name without extension
+        training_data_dir = os.path.join("training_data", replay_name)
+    else:
+        # Generate a generic directory name based on the instance's port or name
+        training_data_dir = os.path.join("training_data", "generic_instance")
+    os.makedirs(training_data_dir, exist_ok=True)
+    return training_data_dir
 
 # Function to load the configuration from config.yaml
 def load_config():
@@ -168,47 +162,55 @@ def load_config():
 
 # Load configuration
 config = load_config()
-
 # Function to load the AI model
+
+# Function to load the AI models
 def load_models(image_memory=1):
     """
     Loads both Planning and Battle models from their respective checkpoints.
+    If checkpoints do not exist, initializes new models.
     Utilizes the configuration parameters.
     """
     global planning_model, battle_model
 
+    # Define the root directory
+    root_dir = get_root_dir()
+
     # Load Planning Model
-    planning_checkpoint_dir = os.path.join(get_root_dir(), 'checkpoints', 'planning')
-    planning_checkpoint_path = get_checkpoint_path(planning_checkpoint_dir, image_memory)
+    planning_checkpoint_path = get_latest_checkpoint(model_type='planning', image_memory=image_memory)
+
     if planning_checkpoint_path:
         planning_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
         checkpoint_planning = torch.load(planning_checkpoint_path, map_location=device)
         if 'model_state_dict' in checkpoint_planning:
             planning_model.load_state_dict(checkpoint_planning['model_state_dict'])
+            print(f"Planning Model loaded from {planning_checkpoint_path}")
         else:
             raise KeyError("Planning checkpoint does not contain 'model_state_dict'")
-        planning_model.eval()
-        print(f"Planning Model loaded from {planning_checkpoint_path}")
     else:
-        print("No Planning Model checkpoint found.")
-        planning_model = None
+        # Initialize new Planning Model
+        planning_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
+        print("No Planning Model checkpoint found. Initialized a new Planning Model.")
+
+    planning_model.eval()
 
     # Load Battle Model
-    battle_checkpoint_dir = os.path.join(get_root_dir(), 'checkpoints', 'battle')
-    battle_checkpoint_path = get_checkpoint_path(battle_checkpoint_dir, image_memory)
+    battle_checkpoint_path = get_latest_checkpoint(model_type='battle', image_memory=image_memory)
+
     if battle_checkpoint_path:
         battle_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
         checkpoint_battle = torch.load(battle_checkpoint_path, map_location=device)
         if 'model_state_dict' in checkpoint_battle:
             battle_model.load_state_dict(checkpoint_battle['model_state_dict'])
+            print(f"Battle Model loaded from {battle_checkpoint_path}")
         else:
             raise KeyError("Battle checkpoint does not contain 'model_state_dict'")
-        battle_model.eval()
-        print(f"Battle Model loaded from {battle_checkpoint_path}")
     else:
-        print("No Battle Model checkpoint found.")
-        battle_model = None
+        # Initialize new Battle Model
+        battle_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
+        print("No Battle Model checkpoint found. Initialized a new Battle Model.")
 
+    battle_model.eval()
 # Transform to preprocess images before inference
 transform = transforms.Compose([
     transforms.Resize((160, 240)),
@@ -222,6 +224,12 @@ TEMPORAL_CHARGE = config['input_features'].get('temporal_charge', 0)
 # Load the model checkpoint
 load_models(IMAGE_MEMORY)
 
+
+# Define optimizer and loss function
+optimizer = optim.Adam(battle_model.parameters(), lr=1e-4)
+criterion = nn.BCEWithLogitsLoss(reduction='none')
+scaler = GradScaler()
+
 # Initialize frame buffers and frame counters
 frame_buffers = {instance['port']: deque(maxlen=2**IMAGE_MEMORY) for instance in INSTANCES}
 frame_counters = {instance['port']: -1 for instance in INSTANCES}
@@ -234,41 +242,13 @@ else:
     player_charge_sliding_windows = {}
     enemy_charge_sliding_windows = {}
 
+# Initialize data buffers for online learning
+window_size = config['strategy']['parameters']['window_size']
+data_buffers = {instance['port']: deque(maxlen=window_size) for instance in INSTANCES}
+
 # Function to convert integer to a 16-bit binary string
 def int_to_binary_string(value):
     return format(value, '016b')
-
-# Function to map the model output to a key based on the highest activation value
-def model_output_to_key(output):
-    # Define key to bit position mapping
-    KEY_BIT_POSITIONS_LOCAL = {
-        'A': 8,
-        'DOWN': 7,
-        'UP': 6,
-        'LEFT': 5,
-        'RIGHT': 4,
-        'X': 1,
-        'Z': 0,
-        'S': 9,
-        'RETURN':3
-    }
-
-    # Define a dynamic threshold to determine which key activations are significant
-    threshold = 0.0001  # Adjust this value as needed based on model performance
-
-    # Collect keys that have activation values above the threshold
-    keys_above_threshold = []
-    for key, bit_pos in KEY_BIT_POSITIONS_LOCAL.items():
-        if bit_pos < len(output) and output[bit_pos] > threshold:
-            keys_above_threshold.append((key, output[bit_pos]))
-
-    # Sort keys by activation value in descending order and select the one with the highest activation
-    keys_above_threshold.sort(key=lambda x: x[1], reverse=True)
-    if not keys_above_threshold:
-        return 'NO_KEY'
-    selected_key, selected_activation = keys_above_threshold[0]
-
-    return selected_key
 
 # Function to generate a random action
 def generate_random_action():
@@ -283,7 +263,7 @@ def generate_random_action():
         binary_command |= (1 << bit_pos)
 
     binary_string = int_to_binary_string(binary_command)
-    print(f"Generated random binary command: {binary_string} from keys {selected_keys}")
+    # print(f"Generated random binary command: {binary_string} from keys {selected_keys}")
     return binary_string
 
 # Update max health if the current health exceeds it
@@ -399,10 +379,7 @@ def predict(frames, position_tensor, inside_window, player_health, enemy_health,
                         additional_inputs['enemy_charge'] = torch.tensor(
                             [current_enemy_charge], dtype=torch.float32, device=device
                         )  # Shape: (1,)
-
-
-
-
+                    
                 # Perform inference
                 outputs = selected_model(
                     stacked_frames,
@@ -423,11 +400,13 @@ def predict(frames, position_tensor, inside_window, player_health, enemy_health,
             print(f"Error during inference with {model_type}: {e}")
             return {'type': 'key_press', 'key': '0000000000000000'}  # Return no key press on failure
 
-    print(f"{model_type} predicted binary command: {predicted_input_str}")
-
+    # print(f"{model_type} predicted binary command: {predicted_input_str}")
+    #never allow sending the pause command when out of the window
+    if inside_window.item() == 0.0 and predicted_input_str[15 - KEY_BIT_POSITIONS['RETURN']] == '1':
+        predicted_input_str = '0000000000000000'
     # Decide whether to take a random action based on GAMMA
     if random.random() < GAMMA:
-        print(f"Gamma condition met (gamma={GAMMA}). Taking a random action.")
+        # print(f"Gamma condition met (gamma={GAMMA}). Taking a random action.")
         random_command = generate_random_action()
         # If inside_window ignore inputs for A, S, or X
         if inside_window.item() == 1.0:
@@ -438,157 +417,15 @@ def predict(frames, position_tensor, inside_window, player_health, enemy_health,
         return {'type': 'key_press', 'key': random_command}
     else:
         return {'type': 'key_press', 'key': predicted_input_str}
-
-
-# Function to save images received from the app and return the path and image
-def save_image_from_base64(encoded_image, port, training_data_dir):
-    try:
-        decoded_image = base64.b64decode(encoded_image)
-        image = Image.open(BytesIO(decoded_image)).convert("RGB")
-        filename = f"{port}_{int(time.time() * 1000)}.png"
-        image_path = os.path.join(training_data_dir, filename)
-        image.save(image_path)
-        # print(f"Saved image from port {port} to {image_path}")
-        return image_path, image
-    except Exception as e:
-        print(f"Failed to save image from port {port}: {e}")
-        return None
-
-# Function to save a game state as JSON with additional data
-def save_game_state(
-    image_path,
-    input_binary,
-    reward=None,
-    punishment=None,
-    training_data_dir=None,
-    player_health=None,
-    enemy_health=None,
-    player_position=None,
-    enemy_position=None,
-    inside_window=None
-):
-    game_state = {
-        "image_path": image_path,
-        "input": input_binary,
-        "reward": reward,
-        "punishment": punishment,
-        "player_health": player_health,
-        "enemy_health": enemy_health,
-        "player_position": player_position,
-        "enemy_position": enemy_position,
-        "inside_window": inside_window
-    }
-    filename = f"{int(time.time() * 1000)}.json"
-    file_path = os.path.join(training_data_dir, filename)
-
-    try:
-        with open(file_path, 'w') as f:
-            json.dump(game_state, f)
-        # print(f"Saved game state to {file_path}")
-    except Exception as e:
-        print(f"Failed to save game state to {file_path}: {e}")
-
-# Function to save the winner status in the replay folder
-def save_winner_status(training_data_dir, player_won):
-    winner_status = {
-        "is_winner": player_won
-    }
-    file_path = os.path.join(training_data_dir, "winner.json")
-    try:
-        with open(file_path, 'w') as f:
-            json.dump(winner_status, f)
-        print(f"Saved winner status to {file_path}")
-    except Exception as e:
-        print(f"Failed to save winner status to {file_path}: {e}")
-
-# Function to send input command to a specific instance
-async def send_input_command(writer, command, port=0):
-    try:
-        command_json = json.dumps(command)
-        writer.write(command_json.encode() + b'\n')
-        await writer.drain()
-        # print(f"Port {port}: Sent command: {command}")
-    except (ConnectionResetError, BrokenPipeError):
-        # Connection has been closed; handle gracefully
-        raise
-    except Exception as e:
-        print(f"Failed to send command on port {port}: {e}")
-        raise
-
-# Function to request the current screen image
-async def request_screen_image(writer):
-    try:
-        command = {'type': 'request_screen', 'key': ''}
-        await send_input_command(writer, command)
-    except Exception as e:
-        print(f"Failed to request screen image: {e}")
-        raise
-
-# Function to get the training directory based on the replay file name
-def get_training_data_dir(replay_path):
-    if replay_path:
-        replay_name = os.path.basename(replay_path).split('.')[0]  # Extract the file name without extension
-        training_data_dir = os.path.join("training_data", replay_name)
-    else:
-        # Generate a generic directory name based on the instance's port or name
-        training_data_dir = os.path.join("training_data", "generic_instance")
-    os.makedirs(training_data_dir, exist_ok=True)
-    return training_data_dir
-
-# Function to run the AppImage with specific ROM, SAVE paths, and PORT
-def run_instance(rom_path, save_path, port, replay_path, init_link_code):
-    env = env_common.copy()
-    env["ROM_PATH"] = rom_path
-    env["SAVE_PATH"] = save_path
-    env["INIT_LINK_CODE"] = init_link_code
-    env["PORT"] = str(port)
-    if replay_path:
-        env["REPLAY_PATH"] = replay_path
-
-    print(f"Running instance with ROM_PATH: {rom_path}, SAVE_PATH: {save_path}, PORT: {port}")
-    try:
-        subprocess.Popen([APP_PATH], env=env)
-    except Exception as e:
-        print(f"Failed to start instance on port {port}: {e}")
-
-# Function to start all instances
-def start_instances():
-    for instance in INSTANCES:
-        run_instance(
-            instance['rom_path'],
-            instance['save_path'],
-            instance['port'],
-            instance.get('replay_path', None),
-            instance['init_link_code']
-        )
-        time.sleep(0.5)  # Adjust sleep time based on app's boot time
-
-def compute_grid(position, grid_size=(6, 3)):
-    """
-    Computes a grid tensor based on the given position using utils.position_to_grid.
-
-    Args:
-        position (tuple or list): The (x, y) position of the player/enemy.
-        grid_size (tuple): The size of the grid (rows, cols).
-
-    Returns:
-        torch.Tensor: A tensor of shape (6, 3) representing the grid on the specified device.
-    """
-    if position and isinstance(position, (list, tuple)) and len(position) == 2:
-        x, y = position
-        grid_list = position_to_grid(x, y)  # Correctly pass x and y
-        grid_tensor = torch.tensor(grid_list, dtype=torch.float32, device=device)
-    else:
-        print(f"Invalid position format: {position}. Expected a tuple/list of (x, y).")
-        grid_tensor = torch.zeros(grid_size, dtype=torch.float32, device=device)
-    return grid_tensor  # Shape: (6, 3)
-
+max_reward = 1
+max_punishment = 1
 # Function to receive messages from the game and process them
 async def receive_messages(reader, writer, port, training_data_dir, config):
+    global max_reward, max_punishment
     buffer = ""
     current_input = None
-    current_reward = None
-    current_punishment = None
+    current_reward = 0
+    current_punishment = 0
     # Initialize additional fields
     current_player_health = None
     current_enemy_health = None
@@ -628,14 +465,13 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                     print(f"Port {port}: Failed to parse JSON message: {message}")
                     continue
 
-
                 event = parsed_message.get("event", "Unknown")
                 details = parsed_message.get("details", "No details provided")
 
                 if event == "local_input":
                     try:
                         current_input = int_to_binary_string(int(details))
-                        print(f"Port {port}: Updated current_input to {current_input}")
+                        # print(f"Port {port}: Updated current_input to {current_input}")
                     except ValueError:
                         print(f"Port {port}: Failed to parse local input: {details}")
 
@@ -643,7 +479,6 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                     # Parse the details JSON to extract additional data
                     try:
                         screen_data = json.loads(details)
-                        # print(f"details: {screen_data}")
                         encoded_image = screen_data.get("image", "")
                         current_player_health = float(screen_data.get("player_health", 0))
                         current_enemy_health = float(screen_data.get("enemy_health", 0))
@@ -652,21 +487,22 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         current_inside_window = float(screen_data.get("inside_window", 0))
                         current_player_charge = float(screen_data.get("player_charge", 0))  # Extract player_charge
                         current_enemy_charge = float(screen_data.get("enemy_charge", 0))  # Extract enemy_charge
-                        # print(f"charge: {current_player_charge}, {current_enemy_charge}")
-
-                        # Log
-                        # print(f"Port {port}: Received screen image with player health: {current_player_health}, enemy health: {current_enemy_health}, player position: {current_player_position}, enemy position: {current_enemy_position}, inside window: {current_inside_window}")
-                        
+                        current_reward += float(screen_data.get("reward", 0))  # Accumulate reward
+                        current_punishment += float(screen_data.get("punishment", 0))  # Accumulate punishment
+                        current_input = screen_data.get("current_input", None)  # Update current_input if available
+                        current_input = int_to_binary_string(current_input)
                     except json.JSONDecodeError:
                         print(f"Port {port}: Failed to parse screen_image details: {details}")
                         continue
+                    #input
+                    # print(f"Port {port}: Current input: {current_input}")
+                    #print rewards
+                    # print(f"Port {port}: Current reward: {current_reward}, Current punishment: {current_punishment}")
 
                     # Update sliding windows if temporal_charge is included
                     if TEMPORAL_CHARGE > 0:
                         player_charge_sliding_windows[port].append(current_player_charge)
-                        # print(f"Port {port}: Updated player_charge sliding window: {list(player_charge_sliding_windows[port])}")
                         enemy_charge_sliding_windows[port].append(current_enemy_charge)
-                        # print(f"Port {port}: Updated enemy_charge sliding window: {list(enemy_charge_sliding_windows[port])}")
                     
                     # Process position based on configuration
                     position_tensor = process_position(current_player_position, current_enemy_position, config)
@@ -680,9 +516,6 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                     player_health_tensor = torch.tensor([normalized_player_health], dtype=torch.float32, device=device).unsqueeze(0)  # Shape: (1, 1)
                     enemy_health_tensor = torch.tensor([normalized_enemy_health], dtype=torch.float32, device=device).unsqueeze(0)    # Shape: (1, 1)
 
-
-
-                    
                     # Save the image and retrieve it
                     save_result = save_image_from_base64(encoded_image, port, training_data_dir) if is_replay else (None, Image.open(BytesIO(base64.b64decode(encoded_image))))
                     if save_result is None:
@@ -697,15 +530,12 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                     # Increment the frame counter (0-based indexing)
                     frame_counters[port] += 1
                     current_frame_idx = frame_counters[port]
-                    # print(f"Port {port}: Received frame {current_frame_idx}")
 
                     # Add the new frame with its index to the buffer
                     frame_buffers[port].append((current_frame_idx, image))
-                    # print(f"Port {port}: Added frame {current_frame_idx} to buffer. Buffer size: {len(frame_buffers[port])}/{frame_buffers[port].maxlen}")
 
                     # Retrieve all frame indices currently in the buffer
                     available_indices = [frame_idx for frame_idx, _ in frame_buffers[port]]
-                    # print(f"Port {port}: Available indices in buffer: {available_indices}")
 
                     # Current index is the latest frame's index
                     current_idx = available_indices[-1]
@@ -714,10 +544,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                     if len(frame_buffers[port]) >= minimum_required_frames:
                         # Use get_exponential_sample to get the required frame indices
                         sampled_indices = get_exponential_sample(available_indices, current_idx, IMAGE_MEMORY)
-                        # print(f"Port {port}: Sampled indices for inference: {sampled_indices}")
 
                         if not sampled_indices:
-                            # print(f"Port {port}: No sampled indices returned. Skipping inference.")
                             continue
 
                         # Fetch the corresponding frames based on sampled indices
@@ -726,11 +554,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         for frame_idx, img in frame_buffers[port]:
                             if frame_idx in index_set:
                                 sampled_frames.append(img)
-                                # print(f"Port {port}: Selected frame {frame_idx} for inference.")
                                 if len(sampled_frames) == IMAGE_MEMORY:
                                     break
-
-                        # print(f"Port {port}: Number of sampled frames before padding: {len(sampled_frames)}")
 
                         # If not enough frames were sampled, pad with the earliest frame
                         if len(sampled_frames) < IMAGE_MEMORY:
@@ -738,12 +563,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 earliest_frame = sampled_frames[0]
                                 while len(sampled_frames) < IMAGE_MEMORY:
                                     sampled_frames.insert(0, earliest_frame)
-                                    # print(f"Port {port}: Padded sampled_frames with earliest frame to meet IMAGE_MEMORY.")
                             else:
-                                # print(f"Port {port}: No frames available to pad. Using no action.")
                                 sampled_frames = [None] * IMAGE_MEMORY  # Placeholder for no action
-
-                        # print(f"Port {port}: Number of sampled frames after padding: {len(sampled_frames)}")
 
                         # Validate sampled_frames before inference
                         if any(frame is None for frame in sampled_frames):
@@ -761,53 +582,105 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
 
                         # Only send commands if the instance is not a player
                         game_instance = next((inst for inst in INSTANCES if inst['port'] == port), None)
-                        if game_instance and not game_instance.get('is_player', False):
-                            command = predict(
-                                sampled_frames,
-                                position_tensor,       # Shape based on config
-                                inside_window_tensor,     # Shape: (1, 1)
-                                player_health_tensor,     # Shape: (1, 1)
-                                enemy_health_tensor,      # Shape: (1, 1)
-                                player_charge_seq,         # Tensor of shape (1, temporal_charge) or None
-                                enemy_charge_seq,           # Tensor of shape (1, temporal_charge) or None
-                                current_player_charge,      # Scalar value or None
-                                current_enemy_charge        # Scalar value or None
-                            )
-                            # Don't allow sending the RETURN command unless inside_window is true
-                            if (command['key'][15 - KEY_BIT_POSITIONS['RETURN']] == '1' and 
-                                current_inside_window == 0):
-                                # Replace the '1' with '0' at the correct bit position for 'RETURN'
-                                command['key'] = (
-                                    command['key'][:15 - KEY_BIT_POSITIONS['RETURN']] + '0' + 
-                                    command['key'][15 - KEY_BIT_POSITIONS['RETURN'] + 1:]
+                        if game_instance:# and not game_instance.get('is_player', False):
+                            # Prepare data point
+                            data_point = {
+                                'frames': sampled_frames,
+                                'position_tensor': position_tensor,
+                                'inside_window': inside_window_tensor,
+                                'player_health': player_health_tensor,
+                                'enemy_health': enemy_health_tensor,
+                                'player_charge_seq': player_charge_seq,
+                                'enemy_charge_seq': enemy_charge_seq,
+                                'current_player_charge': current_player_charge,
+                                'current_enemy_charge': current_enemy_charge,
+                                'action': None  # Will be updated after sending the command
+                            }
+                            if not game_instance.get('is_player', False):
+                                command = predict(
+                                    sampled_frames,
+                                    position_tensor,
+                                    inside_window_tensor,
+                                    player_health_tensor,
+                                    enemy_health_tensor,
+                                    player_charge_seq,
+                                    enemy_charge_seq,
+                                    current_player_charge,
+                                    current_enemy_charge
                                 )
-                                print(f"Port {port}: Return command attempted while not inside window. Ignoring.")
-                            # Else, print that RETURN was used
-                            elif command['key'][15 - KEY_BIT_POSITIONS['RETURN']] == '1':
-                                print(f"Port {port}: Return command used.")
-                            await send_input_command(writer, command, port)
-                            # print(f"Port {port}: Sent command: {command}")
+                                data_point['action'] = command['key']  # Store the action
+                                print(f"Port {port}: Sending command: {command['key']}")
+                                await send_input_command(writer, command, port)
+                            else:
+                                data_point['action'] = current_input  # Store the current input
+                                # print(f"Port {port}: Sending command: {current_input}")
+                            # print(command['key'])
+
+                            # Append data_point to buffer
+                            data_buffers[port].append(data_point)
+                            max_reward = max(max_reward, current_reward)
+                            max_punishment = max(max_punishment, current_punishment)
+                            # If we received a reward or punishment, perform online training
+                            # Assign reward to the current data_point
+                            if current_reward != 0 or current_punishment != 0:
+                                # Compute reward for the data_point
+                                reward_value = (current_reward / max_reward) - (current_punishment / max_punishment)
+                                data_point['reward'] = reward_value
+
+                                # Apply discounted rewards to past data points
+                                gamma = 0.99  # Discount factor
+                                for i, past_data_point in enumerate(reversed(data_buffers[port])):
+                                    discounted_reward = reward_value * (gamma ** i)
+                                    past_data_point['reward'] = discounted_reward
+
+                                # Train on the updated buffer
+                                await train_model_online(
+                                    port,
+                                    list(data_buffers[port]),
+                                    model_type="Battle_Model"
+                                )
+                                # Reset rewards
+                                current_reward = 0
+                                current_punishment = 0
+                            # else:
+                            #     # Assign a small positive reward for frames with no damage taken
+                            #     # data_point['reward'] = 0.1  # Adjust the value as appropriate
+
+                            #     # Append data_point to buffer
+                            #     data_buffers[port].append(data_point)
+
+                                
+                                                        # else:
+                            #     # Train on the current frame (data_point)
+                            #     await train_model_online(
+                            #         port,
+                            #         [data_point],  # Pass a list with only the current data_point
+                            #         1,
+                            #         model_type="Battle_Model"  # Assuming you're updating the Battle Model
+                            #     )
+                            
+                            # Reset rewards/punishments
+                            current_reward = 0
+                            current_punishment = 0
 
                         # Save the game state only if training_data_dir is set
-                        if training_data_dir and current_input is not None:
-                            input_binary = current_input
-                            save_game_state(
-                                image_path=image_path,
-                                input_binary=input_binary,
-                                reward=current_reward,
-                                punishment=current_punishment,
-                                training_data_dir=training_data_dir,
-                                player_health=current_player_health,
-                                enemy_health=current_enemy_health,
-                                player_position=current_player_position,
-                                enemy_position=current_enemy_position,
-                                inside_window=current_inside_window
-                            )
-                            print(f"Port {port}: Saved game state.")
+                        # if training_data_dir and current_input is not None:
+                        #     input_binary = current_input
+                            # save_game_state(
+                            #     image_path=image_path,
+                            #     input_binary=input_binary,
+                            #     reward=current_reward,
+                            #     punishment=current_punishment,
+                            #     training_data_dir=training_data_dir,
+                            #     player_health=current_player_health,
+                            #     enemy_health=current_enemy_health,
+                            #     player_position=current_player_position,
+                            #     enemy_position=current_enemy_position,
+                            #     inside_window=current_inside_window
+                            # )
+                            # print(f"Port {port}: Saved game state.")
 
-                        # Reset rewards/punishments and additional fields after processing
-                        current_reward = None
-                        current_punishment = None
+                        # Reset additional fields after processing
                         current_player_health = None
                         current_enemy_health = None
                         current_player_position = None
@@ -819,33 +692,229 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                     else:
                         print(f"Port {port}: Not enough frames for exponential sampling. Required: {minimum_required_frames}, Available: {len(frame_buffers[port])}")
 
-                elif event == "reward":
+                elif event == "reward" or event == "punishment":
                     try:
-                        current_reward = int(details.split(":")[1].strip())
-                        print(f"Port {port}: Received reward: {current_reward}")
-                    except (IndexError, ValueError):
-                        print(f"Port {port}: Failed to parse reward message: {details}")
+                        value = float(details.split(":")[1].strip())
+                        if event == "reward":
+                            current_reward += value
+                        else:
+                            current_punishment -= value  # Negative for punishment
+                        print(f"Port {port}: Received {event}: {value}")
 
-                elif event == "punishment":
-                    try:
-                        current_punishment = int(details.split(":")[1].strip())
-                        print(f"Port {port}: Received punishment: {current_punishment}")
                     except (IndexError, ValueError):
-                        print(f"Port {port}: Failed to parse punishment message: {details}")
+                        print(f"Port {port}: Failed to parse {event} message: {details}")
 
                 elif event == "winner":
                     player_won = details.lower() == "true"
                     print(f"Port {port}: Received winner message: Player won = {player_won}")
                     save_winner_status(training_data_dir, player_won)
 
-                # else:
-                #     print(f"Port {port}: Received unknown event: {event}, Details: {details}")
-
     except (ConnectionResetError, BrokenPipeError):
         print(f"Port {port}: Connection was reset by peer, closing receiver.")
     except Exception as e:
-        print(f"Port {port}: Failed to receive message: {e}")
+        print(f"Port {port}: Failed to receive message: {e}")    
+        print("Detailed error line:")
+        print(traceback.format_exc())
 
+async def train_model_online(port, data_buffer, model_type="Battle_Model"):
+    global battle_model, planning_model, optimizer, scaler
+
+    # Select the appropriate model and lock
+    if model_type == "Battle_Model":
+        selected_model = battle_model
+        selected_lock = battle_model_lock
+    else:
+        selected_model = planning_model
+        selected_lock = planning_model_lock
+
+    with selected_lock:
+        selected_model.train()  # Switch to train mode
+
+        batch_size = len(data_buffer)
+        if batch_size == 0:
+            print(f"Port {port}: No data to train on.")
+            return
+
+        # Prepare batches
+        frames_batch = []
+        position_batch = []
+        player_charge_seq_batch = []
+        enemy_charge_seq_batch = []
+        player_charge_batch = []
+        enemy_charge_batch = []
+        targets_batch = []
+        rewards_batch = []
+
+        for data_point in data_buffer:
+            # Process frames
+            preprocessed_frames = []
+            for img in data_point['frames']:
+                img = img.convert('RGB')
+                img = transform(img).unsqueeze(0).to(device)
+                preprocessed_frames.append(img)
+            stacked_frames = torch.stack(preprocessed_frames, dim=2).squeeze(0)
+            frames_batch.append(stacked_frames)
+
+            # Positions
+            if data_point['position_tensor'] is not None:
+                position_batch.append(data_point['position_tensor'].squeeze(0))
+
+            # Temporal charges
+            if data_point['player_charge_seq'] is not None:
+                player_charge_seq = data_point['player_charge_seq'].squeeze(0)
+                # Ensure the sequence is of length TEMPORAL_CHARGE by padding if necessary
+                if player_charge_seq.size(0) < TEMPORAL_CHARGE:
+                    padding = torch.zeros(TEMPORAL_CHARGE - player_charge_seq.size(0), device=device)
+                    player_charge_seq = torch.cat((padding, player_charge_seq))
+                player_charge_seq_batch.append(player_charge_seq)
+            else:
+                # If not present, pad with zeros
+                player_charge_seq_batch.append(torch.zeros(TEMPORAL_CHARGE, device=device))
+
+            if data_point['enemy_charge_seq'] is not None:
+                enemy_charge_seq = data_point['enemy_charge_seq'].squeeze(0)
+                # Ensure the sequence is of length TEMPORAL_CHARGE by padding if necessary
+                if enemy_charge_seq.size(0) < TEMPORAL_CHARGE:
+                    padding = torch.zeros(TEMPORAL_CHARGE - enemy_charge_seq.size(0), device=device)
+                    enemy_charge_seq = torch.cat((padding, enemy_charge_seq))
+                enemy_charge_seq_batch.append(enemy_charge_seq)
+            else:
+                # If not present, pad with zeros
+                enemy_charge_seq_batch.append(torch.zeros(TEMPORAL_CHARGE, device=device))
+
+            # Current charges
+            if data_point['current_player_charge'] is not None:
+                player_charge_batch.append(
+                    torch.tensor(data_point['current_player_charge'], dtype=torch.float32, device=device)
+                )
+            else:
+                player_charge_batch.append(torch.tensor(0.0, dtype=torch.float32, device=device))
+
+            if data_point['current_enemy_charge'] is not None:
+                enemy_charge_batch.append(
+                    torch.tensor(data_point['current_enemy_charge'], dtype=torch.float32, device=device)
+                )
+            else:
+                enemy_charge_batch.append(torch.tensor(0.0, dtype=torch.float32, device=device))
+
+            # Actions (targets)
+            action_binary = data_point['action']  # Binary string
+            action_tensor = torch.tensor([int(bit) for bit in action_binary], dtype=torch.float32, device=device)
+            targets_batch.append(action_tensor)
+
+            # Rewards
+            rewards_batch.append(data_point.get('reward', 0.0))
+
+        # Stack batches
+        frames_batch = torch.stack(frames_batch)  # Shape: (batch_size, 3, D, H, W)
+        if position_batch:
+            position_batch = torch.stack(position_batch)  # Shape: (batch_size, position_dim)
+        else:
+            position_batch = None
+
+        if player_charge_seq_batch:
+            player_charge_seq_batch = torch.stack(player_charge_seq_batch)  # Shape: (batch_size, TEMPORAL_CHARGE)
+        else:
+            player_charge_seq_batch = torch.zeros(batch_size, TEMPORAL_CHARGE, device=device)
+
+        if enemy_charge_seq_batch:
+            enemy_charge_seq_batch = torch.stack(enemy_charge_seq_batch)  # Shape: (batch_size, TEMPORAL_CHARGE)
+        else:
+            enemy_charge_seq_batch = torch.zeros(batch_size, TEMPORAL_CHARGE, device=device)
+
+        if player_charge_batch:
+            player_charge_batch = torch.stack(player_charge_batch)  # Shape: (batch_size,)
+        else:
+            player_charge_batch = torch.zeros(batch_size, device=device)
+
+        if enemy_charge_batch:
+            enemy_charge_batch = torch.stack(enemy_charge_batch)  # Shape: (batch_size,)
+        else:
+            enemy_charge_batch = torch.zeros(batch_size, device=device)
+
+        targets_batch = torch.stack(targets_batch)  # Shape: (batch_size, num_actions)
+
+        # Convert rewards to tensor
+        rewards_batch = torch.tensor(rewards_batch, dtype=torch.float32, device=device)  # Shape: (batch_size,)
+
+        # Move to device (already on device if created as such)
+
+        # Zero gradients
+        optimizer.zero_grad()
+
+        with torch.amp.autocast('cuda'):
+            # Forward pass
+            outputs = selected_model(
+                frames_batch,
+                position=position_batch,
+                player_charge=player_charge_batch,
+                enemy_charge=enemy_charge_batch,
+                player_charge_temporal=player_charge_seq_batch,
+                enemy_charge_temporal=enemy_charge_seq_batch
+            )  # Shape: (batch_size, num_actions)
+
+            # Compute log probabilities
+            log_probs = F.logsigmoid(outputs)  # Shape: (batch_size, num_actions)
+            probs = torch.sigmoid(outputs)     # Shape: (batch_size, num_actions)
+
+            # Calculate the log probabilities of the actions taken
+            action_log_probs = targets_batch * log_probs + (1 - targets_batch) * torch.log(1 - probs + 1e-10)
+            action_log_probs = action_log_probs.sum(dim=1)  # Shape: (batch_size,)
+
+            # Multiply by the negative reward to get the policy loss
+            policy_loss = -action_log_probs * rewards_batch  # Shape: (batch_size,)
+
+            # Optionally add entropy regularization
+            entropy = -(probs * log_probs).sum(dim=1)  # Shape: (batch_size,)
+            entropy_coefficient = 0.01
+            total_loss = policy_loss.mean() - entropy_coefficient * entropy.mean()
+
+        # Backward pass
+        scaler.scale(total_loss).backward()
+        torch.nn.utils.clip_grad_norm_(selected_model.parameters(), max_norm=1.0)
+        scaler.step(optimizer)
+        scaler.update()
+
+        # Only display loss if it's greater than 0.1
+        # if total_loss.item() > 0.1:
+        print(f"Port {port}: Reward {rewards_batch} Training completed. Loss: {total_loss.item()}")
+
+        selected_model.eval()  # Switch back to eval mode
+# Function to request the current screen image
+async def request_screen_image(writer):
+    try:
+        command = {'type': 'request_screen', 'key': ''}
+        await send_input_command(writer, command)
+    except Exception as e:
+        print(f"Failed to request screen image: {e}")
+        raise
+# Function to save the winner status in the replay folder
+def save_winner_status(training_data_dir, player_won):
+    winner_status = {
+        "is_winner": player_won
+    }
+    file_path = os.path.join(training_data_dir, "winner.json")
+    try:
+        with open(file_path, 'w') as f:
+            json.dump(winner_status, f)
+        print(f"Saved winner status to {file_path}")
+    except Exception as e:
+        print(f"Failed to save winner status to {file_path}: {e}")
+
+# Function to send input command to a specific instance
+async def send_input_command(writer, command, port=0):
+    try:
+        command_json = json.dumps(command)
+        writer.write(command_json.encode() + b'\n')
+        await writer.drain()
+        # print(f"Port {port}: Sent command: {command}")
+    except (ConnectionResetError, BrokenPipeError):
+        # Connection has been closed; handle gracefully
+        raise
+    except Exception as e:
+        print(f"Failed to send command on port {port}: {e}")
+        raise
+# Other functions remain the same (handle_connection, process_position, train_model_online, etc.)
 async def handle_connection(instance, config):
     writer = None
     try:
@@ -941,7 +1010,55 @@ def process_position(player_position, enemy_position, config):
 
     else:
         raise ValueError(f"Unknown position_type: {position_type}")
-    
+
+# Function to run the AppImage with specific ROM, SAVE paths, and PORT
+def run_instance(rom_path, save_path, port, replay_path, init_link_code):
+    env = env_common.copy()
+    env["ROM_PATH"] = rom_path
+    env["SAVE_PATH"] = save_path
+    env["INIT_LINK_CODE"] = init_link_code
+    env["PORT"] = str(port)
+    if replay_path:
+        env["REPLAY_PATH"] = replay_path
+
+    print(f"Running instance with ROM_PATH: {rom_path}, SAVE_PATH: {save_path}, PORT: {port}")
+    try:
+        subprocess.Popen([APP_PATH], env=env)
+    except Exception as e:
+        print(f"Failed to start instance on port {port}: {e}")
+
+# Function to start all instances
+def start_instances():
+    for instance in INSTANCES:
+        run_instance(
+            instance['rom_path'],
+            instance['save_path'],
+            instance['port'],
+            instance.get('replay_path', None),
+            instance['init_link_code']
+        )
+        time.sleep(0.5)  # Adjust sleep time based on app's boot time
+
+def compute_grid(position, grid_size=(6, 3)):
+    """
+    Computes a grid tensor based on the given position using utils.position_to_grid.
+
+    Args:
+        position (tuple or list): The (x, y) position of the player/enemy.
+        grid_size (tuple): The size of the grid (rows, cols).
+
+    Returns:
+        torch.Tensor: A tensor of shape (6, 3) representing the grid on the specified device.
+    """
+    if position and isinstance(position, (list, tuple)) and len(position) == 2:
+        x, y = position
+        grid_list = position_to_grid(x, y)  # Correctly pass x and y
+        grid_tensor = torch.tensor(grid_list, dtype=torch.float32, device=device)
+    else:
+        print(f"Invalid position format: {position}. Expected a tuple/list of (x, y).")
+        grid_tensor = torch.zeros(grid_size, dtype=torch.float32, device=device)
+    return grid_tensor  # Shape: (6, 3)
+
 # Main function to start instances and handle inputs
 async def main():
     start_instances()
@@ -953,6 +1070,33 @@ async def main():
     # Wait for all handle_connection tasks to complete
     await asyncio.gather(*tasks)
     print("All instances have completed. Exiting program.")
+
+    #save the models
+    save_models()
+
+def save_models():
+    """
+    Saves the Planning and Battle models to their respective checkpoint directories.
+    Utilizes unique checkpoint paths to prevent overwriting.
+    """
+    from utils import get_new_checkpoint_path  # Ensure we import after defining functions
+
+    # Save Planning Model
+    if 'planning_model' in globals() and planning_model is not None:
+        planning_checkpoint_path = get_new_checkpoint_path(model_type='planning', image_memory=IMAGE_MEMORY)
+        torch.save({'model_state_dict': planning_model.state_dict()}, planning_checkpoint_path)
+        print(f"Planning Model saved to {planning_checkpoint_path}")
+    else:
+        print("Planning Model is not loaded. Skipping save.")
+
+    # Save Battle Model
+    if 'battle_model' in globals() and battle_model is not None:
+        battle_checkpoint_path = get_new_checkpoint_path(model_type='battle', image_memory=IMAGE_MEMORY)
+        torch.save({'model_state_dict': battle_model.state_dict()}, battle_checkpoint_path)
+        print(f"Battle Model saved to {battle_checkpoint_path}")
+    else:
+        print("Battle Model is not loaded. Skipping save.")
+
 
 if __name__ == '__main__':
     try:

@@ -1,4 +1,5 @@
 # cache_data.py
+
 import os
 import json
 import glob
@@ -8,19 +9,18 @@ from PIL import Image
 import torch
 from tqdm import tqdm
 import h5py
-from utils import get_root_dir, position_to_grid  # Ensure these functions are defined in utils.py
+import yaml  # For configuration
+from utils import get_root_dir, position_to_grid, get_image_memory # Ensure these functions are defined in utils.py
+from strategies import DefaultStrategy, DodgeStrategy, DamageStrategy, AggressiveStrategy, RewardEverythingStrategy # Import strategies
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 import gc
-import yaml  # For configuration
-from strategies import DefaultStrategy, DodgeStrategy, DamageStrategy, AggressiveStrategy  # Import strategies
 
 # Paths
 TRAINING_DATA_DIR = os.path.join(get_root_dir(), 'training_data')
 TRAINING_CACHE_DIR = os.path.join(get_root_dir(), 'training_cache')
 PLANNING_CACHE_DIR = os.path.join(TRAINING_CACHE_DIR, 'planning')
 BATTLE_CACHE_DIR = os.path.join(TRAINING_CACHE_DIR, 'battle')
-WINDOW_SIZE = 100  # Number of frames to look ahead for rewards/punishments
 
 # Load configuration
 def load_config(config_path='config.yaml'):
@@ -37,21 +37,23 @@ def initialize_strategy(config):
     parameters = strategy_config.get('parameters', {})
 
     if strategy_name == 'default':
-        window_size = parameters.get('window_size', WINDOW_SIZE)
+        window_size = parameters.get('window_size', 100)
         return DefaultStrategy(window_size=window_size)
     elif strategy_name == 'dodge':
         punishment_value = parameters.get('punishment_value', -0.5)
-        window_size = parameters.get('window_size', WINDOW_SIZE)
+        window_size = parameters.get('window_size', 100)
         return DodgeStrategy(punishment_value=punishment_value, window_size=window_size)
     elif strategy_name == 'damage':
         reward_value = parameters.get('reward_value', 1.0)
-        window_size = parameters.get('window_size', WINDOW_SIZE)
+        window_size = parameters.get('window_size', 100)
         return DamageStrategy(reward_value=reward_value, window_size=window_size)
     elif strategy_name == 'aggressive':
         reward_value = parameters.get('reward_value', 1.0)
         punishment_value = parameters.get('punishment_value', -0.5)
-        window_size = parameters.get('window_size', WINDOW_SIZE)
+        window_size = parameters.get('window_size', 100)
         return AggressiveStrategy(reward_value=reward_value, punishment_value=punishment_value, window_size=window_size)
+    elif strategy_name == 'reward_everything':
+        return RewardEverythingStrategy()
     else:
         raise ValueError(f"Unknown strategy name: {strategy_name}")
 
@@ -61,8 +63,9 @@ def get_chunk_size(default_chunk, num_samples, *dims):
     first_dim = min(default_chunk, num_samples)
     return (first_dim,) + dims
 
-# Process a single replay directory with a given strategy
-def process_replay(replay_dir, strategy, planning_output_dir=PLANNING_CACHE_DIR, battle_output_dir=BATTLE_CACHE_DIR, rewards_only=False):
+# Process a single replay directory with a given strategy and configuration
+def process_replay(replay_dir, strategy, planning_output_dir=PLANNING_CACHE_DIR, 
+                  battle_output_dir=BATTLE_CACHE_DIR, rewards_only=False, config=None):
     # Collect garbage
     torch.cuda.empty_cache()
     gc.collect()
@@ -114,6 +117,20 @@ def process_replay(replay_dir, strategy, planning_output_dir=PLANNING_CACHE_DIR,
         print(f"Max player_health or enemy_health is zero in {replay_dir}, skipping.")
         return f"{replay_name}: Skipped (Zero Max Health)"
 
+    # Extract configuration for input features
+    input_features = config.get('input_features', {})
+    include_image = input_features.get('include_image', True)
+    include_position = input_features.get('include_position', True)
+    position_type = input_features.get('position_type', 'grid')
+    include_player_charge = input_features.get('include_player_charge', False)
+    include_enemy_charge = input_features.get('include_enemy_charge', False)
+
+    # Extract image_memory from config
+    image_memory = config.get('image_memory', 1)
+    if image_memory < 1:
+        print(f"Invalid image_memory={image_memory} in config, setting to 1.")
+        image_memory = 1
+
     # Second Pass: Process frames and segment into rounds
     frames = []
     for data in temp_frames:
@@ -129,9 +146,6 @@ def process_replay(replay_dir, strategy, planning_output_dir=PLANNING_CACHE_DIR,
         input_str = data.get('input')
         reward = data.get('reward') or 0
         punishment = data.get('punishment') or 0
-        # print(f"Reward: {reward}, Punishment: {punishment}")
-        # if rewards_only:
-        #     punishment = 0
         player_health = data.get('player_health', 0) / max_player_health
         enemy_health = data.get('enemy_health', 0) / max_enemy_health
         player_position = data.get('player_position', [0, 0])
@@ -151,22 +165,39 @@ def process_replay(replay_dir, strategy, planning_output_dir=PLANNING_CACHE_DIR,
             print(f"Image file {image_abs_path} does not exist, skipping this frame.")
             continue  # Skip frames with missing images
 
-        # Convert positions to grids
-        player_grid = position_to_grid(player_position[0], player_position[1])
-        enemy_grid = position_to_grid(enemy_position[0], enemy_position[1])
-
-        frames.append({
+        # Conditionally process features
+        processed_data = {
             'timestamp': timestamp,
-            'image_path': image_abs_path,
             'input_str': input_str,
             'reward': reward,
             'punishment': punishment,
             'player_health': player_health,
             'enemy_health': enemy_health,
-            'player_grid': player_grid,      # 6x3 grid
-            'enemy_grid': enemy_grid,        # 6x3 grid
-            'inside_window': inside_window   # Boolean
-        })
+            'inside_window': inside_window
+        }
+
+        if include_image:
+            processed_data['image_path'] = image_abs_path
+
+        if include_position:
+            if position_type == 'float':
+                processed_data['player_position'] = player_position  # [x, y]
+                processed_data['enemy_position'] = enemy_position
+            elif position_type == 'grid':
+                player_grid = position_to_grid(player_position[0], player_position[1])
+                enemy_grid = position_to_grid(enemy_position[0], enemy_position[1])
+                processed_data['player_grid'] = player_grid
+                processed_data['enemy_grid'] = enemy_grid
+            else:
+                raise ValueError(f"Unknown position_type: {position_type}")
+
+        if include_player_charge:
+            processed_data['player_charge'] = data.get('player_charge', 0)
+
+        if include_enemy_charge:
+            processed_data['enemy_charge'] = data.get('enemy_charge', 0)
+
+        frames.append(processed_data)
 
     if not frames:
         print(f"No valid frames found after processing in {replay_dir}, skipping this folder.")
@@ -241,69 +272,83 @@ def process_replay(replay_dir, strategy, planning_output_dir=PLANNING_CACHE_DIR,
         return f"{replay_name}: Skipped (Reward Assignment Error)"
 
     # ----- Save Planning Frames in Bulk -----
-    if all_planning_frames:
+    if (all_planning_frames and (include_image or include_position or include_player_charge or include_enemy_charge)):
         # Initialize empty lists to collect data
         images = []
-        inputs = []
-        player_healths = []
-        enemy_healths = []
-        player_grids = []
-        enemy_grids = []
-        inside_windows = []
+        positions = []
+        player_charges = []
+        enemy_charges = []
         net_rewards = []
 
         frames_to_remove = []
 
         # Collect data with filtering before HDF5 allocation
         for frame in all_planning_frames:
-            input_str = frame.get('input_str')
-            if input_str is None:
-                frames_to_remove.append(frame)
-                continue  # Skip this frame
-
-            # Skip planning frames with input '0000000000000000'
-            if input_str == '0000000000000000':
-                frames_to_remove.append(frame)
-                continue  # Skip frames with all-zero inputs
-
-            # Check for invalid input strings
-            if not isinstance(input_str, str) or len(input_str) != 16 or not set(input_str).issubset({'0', '1'}):
-                frames_to_remove.append(frame)
-                continue  # Skip invalid input strings
-
-            # Load image and convert to numpy array
-            try:
-                image = Image.open(frame['image_path']).convert('RGB')
-                if image.mode != 'RGB':
-                    image = image.convert('RGB')  # Ensures image is in RGB format
-                image_np = np.array(image)
-                if image_np.shape != (160, 240, 3):
+            # Process based on included features
+            if include_image:
+                input_str = frame.get('input_str')
+                if input_str is None:
                     frames_to_remove.append(frame)
-                    continue  # Skip frames with unexpected image dimensions
-                image_tensor = image_np.astype(np.float32) / 255.0  # Normalize
-            except Exception as e:
-                print(f"Error loading image {frame['image_path']}: {e}")
-                frames_to_remove.append(frame)
-                continue  # Skip frames with image loading issues
+                    continue  # Skip this frame
 
-            # Convert input string to binary array
-            try:
-                input_tensor = np.array([int(bit) for bit in input_str], dtype=np.float32)
-            except ValueError:
-                frames_to_remove.append(frame)
-                continue  # Skip frames with invalid input strings
+                # Skip planning frames with input '0000000000000000'
+                if input_str == '0000000000000000':
+                    frames_to_remove.append(frame)
+                    continue  # Skip frames with all-zero inputs
 
-            # Get assigned reward
+                # Check for invalid input strings
+                if not isinstance(input_str, str) or len(input_str) != 16 or not set(input_str).issubset({'0', '1'}):
+                    frames_to_remove.append(frame)
+                    continue  # Skip invalid input strings
+
+                # Load image and convert to numpy array
+                try:
+                    image = Image.open(frame['image_path']).convert('RGB')
+                    if image.mode != 'RGB':
+                        image = image.convert('RGB')  # Ensures image is in RGB format
+                    image_np = np.array(image)
+                    if image_np.shape != (160, 240, 3):
+                        frames_to_remove.append(frame)
+                        continue  # Skip frames with unexpected image dimensions
+                    image_tensor = image_np.astype(np.float32) / 255.0  # Normalize
+                except Exception as e:
+                    print(f"Error loading image {frame['image_path']}: {e}")
+                    frames_to_remove.append(frame)
+                    continue  # Skip frames with image loading issues
+
+                images.append(image_tensor.transpose(2, 0, 1))  # Shape: (3, 160, 240)
+
+            if include_position:
+                if position_type == 'float':
+                    player_position = frame.get('player_position', [0.0, 0.0])
+                    enemy_position = frame.get('enemy_position', [0.0, 0.0])
+                    # Normalize positions max is 240x 160y
+                    player_position[0] /= 240
+                    player_position[1] /= 160
+                    enemy_position[0] /= 240
+                    enemy_position[1] /= 160
+                    positions.append(player_position + enemy_position)  # Concatenate x and y
+                elif position_type == 'grid':
+                    player_grid = frame.get('player_grid', [[0]*3 for _ in range(6)])
+                    enemy_grid = frame.get('enemy_grid', [[0]*3 for _ in range(6)])
+                    flattened_player_grid = np.concatenate(player_grid).astype(np.float32)
+                    flattened_enemy_grid = np.concatenate(enemy_grid).astype(np.float32)
+                    positions.append(np.concatenate([flattened_player_grid, flattened_enemy_grid]))  # Shape: (36,)
+                else:
+                    raise ValueError(f"Unknown position_type: {position_type}")
+
+            if include_player_charge:
+                player_charge = frame.get('player_charge', 0)
+                player_charge /= 2 #max is 2 so normalize
+                player_charges.append(player_charge)
+
+            if include_enemy_charge:
+                enemy_charge = frame.get('enemy_charge', 0)
+                enemy_charge /= 2 #max is 2 so normalize
+                enemy_charges.append(enemy_charge)
+
+            # Collect net_rewards
             net_reward = frame.get('assigned_reward', 0.0)
-
-            # Append data to lists
-            images.append(image_tensor.transpose(2, 0, 1))  # Shape: (3, 160, 240)
-            inputs.append(input_tensor)
-            player_healths.append(frame['player_health'])
-            enemy_healths.append(frame['enemy_health'])
-            player_grids.append(frame['player_grid'])
-            enemy_grids.append(frame['enemy_grid'])
-            inside_windows.append(float(frame['inside_window']))
             net_rewards.append(net_reward)
 
         # Remove frames that failed filtering
@@ -311,314 +356,313 @@ def process_replay(replay_dir, strategy, planning_output_dir=PLANNING_CACHE_DIR,
             if frame in all_planning_frames:
                 all_planning_frames.remove(frame)
 
-        print(f"Number of planning frames: {len(images)}")
+        print(f"Number of planning frames: {len(images) if include_image else 0} "
+              f"{len(positions) if include_position else 0} "
+              f"{len(player_charges) if include_player_charge else 0} "
+              f"{len(enemy_charges) if include_enemy_charge else 0}")
         print(f"Number of removed planning frames: {len(frames_to_remove)}")
 
-        # After collecting and filtering, determine the number of valid samples
-        num_samples = len(images)
+        # Determine the number of valid samples
+        num_samples = max(
+            len(images) if include_image else 0,
+            len(positions) if include_position else 0,
+            len(player_charges) if include_player_charge else 0,
+            len(enemy_charges) if include_enemy_charge else 0,
+            len(net_rewards)
+        )
 
         if num_samples == 0:
             print(f"No valid planning frames to save for {replay_name}, skipping planning cache.")
         else:
             try:
                 with h5py.File(planning_h5_path, 'w') as h5f:
-                    # Define dynamic chunk sizes
-                    chunk_images = get_chunk_size(100, num_samples, 3, 160, 240)
-                    chunk_inputs = get_chunk_size(100, num_samples, 16)
-                    chunk_player_healths = get_chunk_size(100, num_samples)
-                    chunk_enemy_healths = get_chunk_size(100, num_samples)
-                    chunk_player_grids = get_chunk_size(100, num_samples, 6, 3)
-                    chunk_enemy_grids = get_chunk_size(100, num_samples, 6, 3)
-                    chunk_inside_windows = get_chunk_size(100, num_samples)
-                    chunk_net_rewards = get_chunk_size(100, num_samples)
+                    # Define dynamic chunk sizes and create datasets based on included features
+                    if include_image:
+                        h5f.create_dataset(
+                            'images',
+                            shape=(num_samples, 3, 160, 240),
+                            dtype=np.float32,
+                            compression='gzip',
+                            compression_opts=4,
+                            chunks=get_chunk_size(100, num_samples, 3, 160, 240)
+                        )
+                        images_np = np.stack(images, axis=0)
+                        h5f['images'][:] = images_np
 
-                    # Create datasets with dynamic chunk sizes
-                    h5f.create_dataset(
-                        'images',
-                        shape=(num_samples, 3, 160, 240),
-                        dtype=np.float32,
-                        compression='gzip',
-                        compression_opts=4,
-                        chunks=chunk_images
-                    )
-                    h5f.create_dataset(
-                        'inputs',
-                        shape=(num_samples, 16),
-                        dtype=np.float32,
-                        compression='gzip',
-                        compression_opts=4,
-                        chunks=chunk_inputs
-                    )
-                    h5f.create_dataset(
-                        'player_healths',
-                        shape=(num_samples,),
-                        dtype=np.float32,
-                        compression='gzip',
-                        compression_opts=4,
-                        chunks=chunk_player_healths
-                    )
-                    h5f.create_dataset(
-                        'enemy_healths',
-                        shape=(num_samples,),
-                        dtype=np.float32,
-                        compression='gzip',
-                        compression_opts=4,
-                        chunks=chunk_enemy_healths
-                    )
-                    h5f.create_dataset(
-                        'player_grids',
-                        shape=(num_samples, 6, 3),
-                        dtype=np.float32,
-                        compression='gzip',
-                        compression_opts=4,
-                        chunks=chunk_player_grids
-                    )
-                    h5f.create_dataset(
-                        'enemy_grids',
-                        shape=(num_samples, 6, 3),
-                        dtype=np.float32,
-                        compression='gzip',
-                        compression_opts=4,
-                        chunks=chunk_enemy_grids
-                    )
-                    h5f.create_dataset(
-                        'inside_windows',
-                        shape=(num_samples,),
-                        dtype=np.float32,
-                        compression='gzip',
-                        compression_opts=4,
-                        chunks=chunk_inside_windows
-                    )
+                    if include_position:
+                        if position_type == 'float':
+                            h5f.create_dataset(
+                                'positions',
+                                shape=(num_samples, 4),  # player_x, player_y, enemy_x, enemy_y
+                                dtype=np.float32,
+                                compression='gzip',
+                                compression_opts=4,
+                                chunks=get_chunk_size(100, num_samples, 4)
+                            )
+                            positions_np = np.array(positions, dtype=np.float32)
+                            h5f['positions'][:] = positions_np
+                        elif position_type == 'grid':
+                            h5f.create_dataset(
+                                'positions',
+                                shape=(num_samples, 36),  # 6x3 grids concatenated
+                                dtype=np.float32,
+                                compression='gzip',
+                                compression_opts=4,
+                                chunks=get_chunk_size(100, num_samples, 36)
+                            )
+                            positions_np = np.array(positions, dtype=np.float32)
+                            h5f['positions'][:] = positions_np
+
+                    if include_player_charge:
+                        h5f.create_dataset(
+                            'player_charges',
+                            shape=(num_samples,),
+                            dtype=np.float32,
+                            compression='gzip',
+                            compression_opts=4,
+                            chunks=get_chunk_size(100, num_samples)
+                        )
+                        player_charges_np = np.array(player_charges, dtype=np.float32)
+                        h5f['player_charges'][:] = player_charges_np
+
+                    if include_enemy_charge:
+                        h5f.create_dataset(
+                            'enemy_charges',
+                            shape=(num_samples,),
+                            dtype=np.float32,
+                            compression='gzip',
+                            compression_opts=4,
+                            chunks=get_chunk_size(100, num_samples)
+                        )
+                        enemy_charges_np = np.array(enemy_charges, dtype=np.float32)
+                        h5f['enemy_charges'][:] = enemy_charges_np
+
+                    # Always save net_rewards
                     h5f.create_dataset(
                         'net_rewards',
                         shape=(num_samples,),
                         dtype=np.float32,
                         compression='gzip',
                         compression_opts=4,
-                        chunks=chunk_net_rewards
+                        chunks=get_chunk_size(100, num_samples)
                     )
-
-                    # Convert lists to numpy arrays
-                    images_np = np.stack(images, axis=0)
-                    inputs_np = np.stack(inputs, axis=0)
-                    player_healths_np = np.array(player_healths, dtype=np.float32)
-                    enemy_healths_np = np.array(enemy_healths, dtype=np.float32)
-                    player_grids_np = np.stack(player_grids, axis=0)
-                    enemy_grids_np = np.stack(enemy_grids, axis=0)
-                    inside_windows_np = np.array(inside_windows, dtype=np.float32)
                     net_rewards_np = np.array(net_rewards, dtype=np.float32)
-
-                    # Assign data to HDF5 datasets in bulk
-                    h5f['images'][:] = images_np
-                    h5f['inputs'][:] = inputs_np
-                    h5f['player_healths'][:] = player_healths_np
-                    h5f['enemy_healths'][:] = enemy_healths_np
-                    h5f['player_grids'][:] = player_grids_np
-                    h5f['enemy_grids'][:] = enemy_grids_np
-                    h5f['inside_windows'][:] = inside_windows_np
                     h5f['net_rewards'][:] = net_rewards_np
 
-                    # Store min and max as attributes
-                    h5f.attrs['net_reward_min'] = float(net_rewards_np.min())
-                    h5f.attrs['net_reward_max'] = float(net_rewards_np.max())
+                    # Convert 'input_str' to binary arrays
+                    inputs = [[int(c) for c in frame['input_str']] for frame in all_planning_frames]
+                    h5f.create_dataset(
+                        'input',
+                        shape=(num_samples, 16),
+                        dtype=np.float32,
+                        compression='gzip',
+                        compression_opts=4,
+                        chunks=get_chunk_size(100, num_samples, 16)
+                    )
+                    input_np = np.array(inputs, dtype=np.float32)
+                    h5f['input'][:] = input_np
 
-                    print(f"Saved {num_samples} planning frames to {planning_h5_path}")
+                    # Store min and max as attributes
+                    h5f.attrs['net_reward_min'] = float(np.min(net_rewards_np))
+                    h5f.attrs['net_reward_max'] = float(np.max(net_rewards_np))
+
+                    print(f"Saved planning frames to {planning_h5_path}")
             except Exception as e:
                 print(f"Error saving planning frames for {replay_name}: {e}")
 
     # ----- Save Battle Frames in Bulk -----
-    if all_battle_frames:
+    if (all_battle_frames and (include_image or include_position or include_player_charge or include_enemy_charge)):
         # Initialize empty lists to collect data
         images = []
-        inputs = []
-        player_healths = []
-        enemy_healths = []
-        player_grids = []
-        enemy_grids = []
-        inside_windows = []
+        positions = []
+        player_charges = []
+        enemy_charges = []
         net_rewards = []
 
-        battle_frames_to_remove = []
+        frames_to_remove = []
 
         # Collect data
         for frame in all_battle_frames:
-            #print assigned_reward
-            # print(frame['assigned_reward'])
-            input_str = frame.get('input_str')
-            if input_str is None:
-                print(f"No 'input_str' found in frame with timestamp {frame['timestamp']}, skipping this frame.")
-                battle_frames_to_remove.append(frame)
-                continue  # Skip this frame
+            # Process based on included features
+            if include_image:
+                input_str = frame.get('input_str')
+                if input_str is None:
+                    print(f"No 'input_str' found in frame with timestamp {frame['timestamp']}, skipping this frame.")
+                    frames_to_remove.append(frame)
+                    continue  # Skip this frame
 
-            # Check for invalid input strings
-            if not isinstance(input_str, str) or len(input_str) != 16 or not set(input_str).issubset({'0', '1'}):
-                print(f"Invalid 'input_str' in frame with timestamp {frame['timestamp']}, skipping this frame.")
-                battle_frames_to_remove.append(frame)
-                continue  # Skip invalid input strings
+                # Check for invalid input strings
+                if not isinstance(input_str, str) or len(input_str) != 16 or not set(input_str).issubset({'0', '1'}):
+                    print(f"Invalid 'input_str' in frame with timestamp {frame['timestamp']}, skipping this frame.")
+                    frames_to_remove.append(frame)
+                    continue  # Skip invalid input strings
 
-            # Load image and convert to numpy array
-            try:
-                image = Image.open(frame['image_path']).convert('RGB')
-                if image.mode != 'RGB':
-                    image = image.convert('RGB')  # Ensures image is in RGB format
-                image_np = np.array(image)
-                if image_np.shape != (160, 240, 3):
-                    battle_frames_to_remove.append(frame)
-                    continue  # Skip frames with unexpected image dimensions
-                image_tensor = image_np.astype(np.float32) / 255.0  # Normalize
-            except Exception as e:
-                print(f"Error loading image {frame['image_path']}: {e}")
-                battle_frames_to_remove.append(frame)
-                continue  # Skip frames with image loading issues
+                # Load image and convert to numpy array
+                try:
+                    image = Image.open(frame['image_path']).convert('RGB')
+                    if image.mode != 'RGB':
+                        image = image.convert('RGB')  # Ensures image is in RGB format
+                    image_np = np.array(image)
+                    if image_np.shape != (160, 240, 3):
+                        frames_to_remove.append(frame)
+                        continue  # Skip frames with unexpected image dimensions
+                    image_tensor = image_np.astype(np.float32) / 255.0  # Normalize
+                except Exception as e:
+                    print(f"Error loading image {frame['image_path']}: {e}")
+                    frames_to_remove.append(frame)
+                    continue  # Skip frames with image loading issues
 
-            # Convert input string to binary array
-            try:
-                input_tensor = np.array([int(bit) for bit in input_str], dtype=np.float32)
-            except ValueError:
-                print(f"Invalid 'input_str' in frame with timestamp {frame['timestamp']}, skipping this frame.")
-                battle_frames_to_remove.append(frame)
-                continue  # Skip frames with invalid input strings
+                images.append(image_tensor.transpose(2, 0, 1))  # Shape: (3, 160, 240)
 
-            # Get assigned reward
+            if include_position:
+                if position_type == 'float':
+                    player_position = frame.get('player_position', [0.0, 0.0])
+                    enemy_position = frame.get('enemy_position', [0.0, 0.0])
+                    positions.append(player_position + enemy_position)  # Concatenate x and y
+                elif position_type == 'grid':
+                    player_grid = frame.get('player_grid', [[0]*3 for _ in range(6)])
+                    enemy_grid = frame.get('enemy_grid', [[0]*3 for _ in range(6)])
+                    flattened_player_grid = np.concatenate(player_grid).astype(np.float32)
+                    flattened_enemy_grid = np.concatenate(enemy_grid).astype(np.float32)
+                    positions.append(np.concatenate([flattened_player_grid, flattened_enemy_grid]))  # Shape: (36,)
+                else:
+                    raise ValueError(f"Unknown position_type: {position_type}")
+
+            if include_player_charge:
+                player_charge = frame.get('player_charge', 0)
+                player_charges.append(player_charge)
+
+            if include_enemy_charge:
+                enemy_charge = frame.get('enemy_charge', 0)
+                enemy_charges.append(enemy_charge)
+
+            # Collect net_rewards
             net_reward = frame.get('assigned_reward', 0.0)
-
-            # Skip if net_reward is zero
-            if net_reward == 0.0:
-                print(f"Net reward is zero in frame with timestamp {frame['timestamp']}, skipping this frame.")
-                battle_frames_to_remove.append(frame)
-                continue
-
-            # Append data to lists
-            images.append(image_tensor.transpose(2, 0, 1))  # Shape: (3, 160, 240)
-            inputs.append(input_tensor)
-            player_healths.append(frame['player_health'])
-            enemy_healths.append(frame['enemy_health'])
-            player_grids.append(frame['player_grid'])
-            enemy_grids.append(frame['enemy_grid'])
-            inside_windows.append(float(frame['inside_window']))
             net_rewards.append(net_reward)
 
         # Remove frames that failed filtering
-        for frame in battle_frames_to_remove:
+        for frame in frames_to_remove:
             if frame in all_battle_frames:
                 all_battle_frames.remove(frame)
 
-        print(f"Number of battle frames: {len(images)}")
-        print(f"Number of removed battle frames: {len(battle_frames_to_remove)}")
+        print(f"Number of battle frames: {len(images) if include_image else 0} "
+              f"{len(positions) if include_position else 0} "
+              f"{len(player_charges) if include_player_charge else 0} "
+              f"{len(enemy_charges) if include_enemy_charge else 0}")
+        print(f"Number of removed battle frames: {len(frames_to_remove)}")
 
-        # After collecting and filtering, determine the number of valid samples
-        num_samples = len(images)
+        # Determine the number of valid samples
+        num_samples = max(
+            len(images) if include_image else 0,
+            len(positions) if include_position else 0,
+            len(player_charges) if include_player_charge else 0,
+            len(enemy_charges) if include_enemy_charge else 0,
+            len(net_rewards)
+        )
 
         if num_samples == 0:
             print(f"No valid battle frames to save for {replay_name}, skipping battle cache.")
         else:
             try:
                 with h5py.File(battle_h5_path, 'w') as h5f:
-                    # Define dynamic chunk sizes
-                    chunk_images = get_chunk_size(100, num_samples, 3, 160, 240)
-                    chunk_inputs = get_chunk_size(100, num_samples, 16)
-                    chunk_player_healths = get_chunk_size(100, num_samples)
-                    chunk_enemy_healths = get_chunk_size(100, num_samples)
-                    chunk_player_grids = get_chunk_size(100, num_samples, 6, 3)
-                    chunk_enemy_grids = get_chunk_size(100, num_samples, 6, 3)
-                    chunk_inside_windows = get_chunk_size(100, num_samples)
-                    chunk_net_rewards = get_chunk_size(100, num_samples)
+                    # Define dynamic chunk sizes and create datasets based on included features
+                    if include_image:
+                        h5f.create_dataset(
+                            'images',
+                            shape=(num_samples, 3, 160, 240),
+                            dtype=np.float32,
+                            compression='gzip',
+                            compression_opts=4,
+                            chunks=get_chunk_size(100, num_samples, 3, 160, 240)
+                        )
+                        images_np = np.stack(images, axis=0)
+                        h5f['images'][:] = images_np
 
-                    # Create datasets with dynamic chunk sizes
-                    h5f.create_dataset(
-                        'images',
-                        shape=(num_samples, 3, 160, 240),
-                        dtype=np.float32,
-                        compression='gzip',
-                        compression_opts=4,
-                        chunks=chunk_images
-                    )
-                    h5f.create_dataset(
-                        'inputs',
-                        shape=(num_samples, 16),
-                        dtype=np.float32,
-                        compression='gzip',
-                        compression_opts=4,
-                        chunks=chunk_inputs
-                    )
-                    h5f.create_dataset(
-                        'player_healths',
-                        shape=(num_samples,),
-                        dtype=np.float32,
-                        compression='gzip',
-                        compression_opts=4,
-                        chunks=chunk_player_healths
-                    )
-                    h5f.create_dataset(
-                        'enemy_healths',
-                        shape=(num_samples,),
-                        dtype=np.float32,
-                        compression='gzip',
-                        compression_opts=4,
-                        chunks=chunk_enemy_healths
-                    )
-                    h5f.create_dataset(
-                        'player_grids',
-                        shape=(num_samples, 6, 3),
-                        dtype=np.float32,
-                        compression='gzip',
-                        compression_opts=4,
-                        chunks=chunk_player_grids
-                    )
-                    h5f.create_dataset(
-                        'enemy_grids',
-                        shape=(num_samples, 6, 3),
-                        dtype=np.float32,
-                        compression='gzip',
-                        compression_opts=4,
-                        chunks=chunk_enemy_grids
-                    )
-                    h5f.create_dataset(
-                        'inside_windows',
-                        shape=(num_samples,),
-                        dtype=np.float32,
-                        compression='gzip',
-                        compression_opts=4,
-                        chunks=chunk_inside_windows
-                    )
+                    if include_position:
+                        if position_type == 'float':
+                            h5f.create_dataset(
+                                'positions',
+                                shape=(num_samples, 4),  # player_x, player_y, enemy_x, enemy_y
+                                dtype=np.float32,
+                                compression='gzip',
+                                compression_opts=4,
+                                chunks=get_chunk_size(100, num_samples, 4)
+                            )
+                            positions_np = np.array(positions, dtype=np.float32)
+                            h5f['positions'][:] = positions_np
+                        elif position_type == 'grid':
+                            h5f.create_dataset(
+                                'positions',
+                                shape=(num_samples, 36),  # 6x3 grids concatenated
+                                dtype=np.float32,
+                                compression='gzip',
+                                compression_opts=4,
+                                chunks=get_chunk_size(100, num_samples, 36)
+                            )
+                            positions_np = np.array(positions, dtype=np.float32)
+                            h5f['positions'][:] = positions_np
+
+                    if include_player_charge:
+                        h5f.create_dataset(
+                            'player_charges',
+                            shape=(num_samples,),
+                            dtype=np.float32,
+                            compression='gzip',
+                            compression_opts=4,
+                            chunks=get_chunk_size(100, num_samples)
+                        )
+                        player_charges_np = np.array(player_charges, dtype=np.float32)
+                        h5f['player_charges'][:] = player_charges_np
+
+                    if include_enemy_charge:
+                        h5f.create_dataset(
+                            'enemy_charges',
+                            shape=(num_samples,),
+                            dtype=np.float32,
+                            compression='gzip',
+                            compression_opts=4,
+                            chunks=get_chunk_size(100, num_samples)
+                        )
+                        enemy_charges_np = np.array(enemy_charges, dtype=np.float32)
+                        h5f['enemy_charges'][:] = enemy_charges_np
+
+                    # Always save net_rewards
                     h5f.create_dataset(
                         'net_rewards',
                         shape=(num_samples,),
                         dtype=np.float32,
                         compression='gzip',
                         compression_opts=4,
-                        chunks=chunk_net_rewards
+                        chunks=get_chunk_size(100, num_samples)
                     )
-
-                    # Convert lists to numpy arrays
-                    images_np = np.stack(images, axis=0)
-                    inputs_np = np.stack(inputs, axis=0)
-                    player_healths_np = np.array(player_healths, dtype=np.float32)
-                    enemy_healths_np = np.array(enemy_healths, dtype=np.float32)
-                    player_grids_np = np.stack(player_grids, axis=0)
-                    enemy_grids_np = np.stack(enemy_grids, axis=0)
-                    inside_windows_np = np.array(inside_windows, dtype=np.float32)
                     net_rewards_np = np.array(net_rewards, dtype=np.float32)
-
-                    # Assign data to HDF5 datasets in bulk
-                    h5f['images'][:] = images_np
-                    h5f['inputs'][:] = inputs_np
-                    h5f['player_healths'][:] = player_healths_np
-                    h5f['enemy_healths'][:] = enemy_healths_np
-                    h5f['player_grids'][:] = player_grids_np
-                    h5f['enemy_grids'][:] = enemy_grids_np
-                    h5f['inside_windows'][:] = inside_windows_np
                     h5f['net_rewards'][:] = net_rewards_np
 
-                    # Store min and max as attributes
-                    h5f.attrs['net_reward_min'] = float(net_rewards_np.min())
-                    h5f.attrs['net_reward_max'] = float(net_rewards_np.max())
+                    # Convert 'input_str' to binary arrays
+                    inputs = [[int(c) for c in frame['input_str']] for frame in all_battle_frames]
+                    print(inputs)
+                    h5f.create_dataset(
+                        'input',
+                        shape=(num_samples, 16),
+                        dtype=np.float32,
+                        compression='gzip',
+                        compression_opts=4,
+                        chunks=get_chunk_size(100, num_samples, 16)
+                    )
+                    input_np = np.array(inputs, dtype=np.float32)
+                    h5f['input'][:] = input_np
 
-                    print(f"Saved {num_samples} battle frames to {battle_h5_path}")
+                    # Store min and max as attributes
+                    h5f.attrs['net_reward_min'] = float(np.min(net_rewards_np))
+                    h5f.attrs['net_reward_max'] = float(np.max(net_rewards_np))
+
+                    print(f"Saved battle frames to {battle_h5_path}")
             except Exception as e:
                 print(f"Error saving battle frames for {replay_name}: {e}")
 
-    return f"{replay_name}: Completed"
+    return_code = f"{replay_name}: Completed"
+
+    return return_code
 
 # Process all replays in parallel using ProcessPoolExecutor
 def process_all_replays_parallel(max_workers=4):
@@ -648,6 +692,12 @@ def process_all_replays_parallel(max_workers=4):
         print(f"Error initializing strategy: {e}")
         return
 
+    # Extract image_memory from config
+    image_memory = get_image_memory()
+    if image_memory < 1:
+        print(f"Invalid image_memory={image_memory} in config, setting to 1.")
+        image_memory = 1
+
     # Determine the number of workers
     if max_workers is None:
         max_workers = multiprocessing.cpu_count()
@@ -657,7 +707,7 @@ def process_all_replays_parallel(max_workers=4):
     # Use ProcessPoolExecutor for parallel processing
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         # Submit all replay directories to the executor
-        future_to_replay = {executor.submit(process_replay, replay_dir, strategy): replay_dir for replay_dir in replay_dirs}
+        future_to_replay = {executor.submit(process_replay, replay_dir, strategy, config=config): replay_dir for replay_dir in replay_dirs}
 
         # Use tqdm to display progress
         for future in tqdm(as_completed(future_to_replay), total=len(future_to_replay), desc='Processing all replays'):

@@ -18,7 +18,7 @@ use std::sync::LazyLock;
 pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0 )* 2.0;
 
 // session.rs
-use crate::global::{add_punishment, add_reward, clear_punishments, clear_rewards, get_frame_count,set_frame_count, get_player_health_index, set_enemy_health, set_enemy_position, set_is_player_inside_window, set_local_input, set_player_health, set_player_health_index, set_player_position, set_winner, RewardPunishment};
+use crate::global::{add_punishment, add_reward, clear_punishments, clear_rewards, get_frame_count,set_frame_count, get_player_health_index, set_enemy_health, set_enemy_position, set_is_player_inside_window, set_local_input, set_player_health, set_player_health_index, set_player_position, set_winner, set_player_charge, set_enemy_charge, RewardPunishment};
 use crate::global::{REWARDS, PUNISHMENTS}; // Import the global variables
 
 enum AddressSize {
@@ -421,11 +421,8 @@ impl Session {
             
         
             // Shared storage for initial boolean states
-            static INITIAL_BOOLEAN_STATES: LazyLock<Mutex<HashMap<u32, u16>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+            static INITIAL_BOOLEAN_STATES: LazyLock<Mutex<HashMap<u32, u8>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-            // Shared storage for boolean addresses
-            // let boolean_addresses = Arc::new(Mutex::new(Vec::new()));
-            // let boolean_addresses_clone = Arc::clone(&boolean_addresses);
 
             // Initialize the log file with thread-safe access
             let log_file = Arc::new(Mutex::new(
@@ -438,17 +435,20 @@ impl Session {
                 (0x02035288, 0, 255),//success! 0=closed, 255 = open
             ];
         
-        
+            
             // Clone for use inside the callback
             let window_state_addresses = Arc::new(window_state_addresses);
 
+            // Shared storage for boolean addresses
+            // let boolean_addresses = Arc::new(Mutex::new(Vec::new()));
+            // let boolean_addresses_clone = Arc::clone(&boolean_addresses);
             // Initialize toggle state variables for Command 4
-            // let logging_enabled = Arc::new(AtomicBool::new(false));
-            // let command4_prev_state = Arc::new(AtomicBool::new(false));
+            let logging_enabled = Arc::new(AtomicBool::new(false));
+            let command4_prev_state = Arc::new(AtomicBool::new(false));
 
             // // Clone these for use inside the closure
-            // let logging_enabled_clone = Arc::clone(&logging_enabled);
-            // let command4_prev_state_clone = Arc::clone(&command4_prev_state);
+            let logging_enabled_clone = Arc::clone(&logging_enabled);
+            let command4_prev_state_clone = Arc::clone(&command4_prev_state);
             
             // Set the frame callback
             thread.set_frame_callback({
@@ -464,7 +464,22 @@ impl Session {
                     video::fix_vbuf_alpha(&mut vbuf);
                     core.set_keys(joyflags.load(std::sync::atomic::Ordering::Relaxed));
                     emu_tps_counter.lock().mark();
+                    set_local_input(joyflags.load(std::sync::atomic::Ordering::Relaxed) as u16);
+                    //log charge state 0x020369BD
+                    //enemy charge state 02036A10
+                    //enemy charge state 02036A74
+                    //enemy charge state 02036A78
+                    //enemy charge state 02036A80
 
+                    //player charge state 02036948
+                    //player charge state 020369AC
+                    //player charge state 020369B0
+                    //player charge state 020369BB
+                    // println!("Enemy Charge state: {}", core.raw_read_8(0x02036A10, -1));
+                    // println!("Player Charge state: {}", core.raw_read_8(0x02036948, -1));
+                    //set enemy and player charge globally
+                    set_player_charge(core.raw_read_8(0x02036948, -1) as u16);
+                    set_enemy_charge(core.raw_read_8(0x02036A10, -1) as u16);
                     if completion_token.is_complete() {
                         thread_handle.pause();
                     } else {
@@ -509,7 +524,7 @@ impl Session {
                         set_player_position((player_x, player_y));
 
                         let joyflags_val = joyflags.load(std::sync::atomic::Ordering::Relaxed);
-                    //     // Command 1 (Set all values, triggered by 0x00000200)
+                        // Command 1 (Set all values, triggered by 0x00000200)
                     //     if joyflags_val & 0x00000200 != 0 {
                     //         println!("Set Command - Populating boolean addresses");
                     //         let mut addresses = boolean_addresses.lock();
@@ -525,7 +540,7 @@ impl Session {
 
                     //         // Store the initial values of those addresses in INITIAL_BOOLEAN_STATES
                     //         for &address in addresses.iter() {
-                    //             let current_value = core_ref.raw_read_16(address, -1);
+                    //             let current_value = core_ref.raw_read_8(address, -1);
                     //             initial_states.insert(address, current_value);
                     //             println!("Captured Address: 0x{:08X}, Initial Value: {}", address, current_value);
                     //         }
@@ -539,7 +554,7 @@ impl Session {
                     //         let mut addresses = boolean_addresses.lock();
                     //         let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
                     //         addresses.retain(|&address| {
-                    //             let current_value = core_ref.raw_read_16(address, -1);
+                    //             let current_value = core_ref.raw_read_8(address, -1);
                     //             if let Some(&initial_value) = initial_states.get(&address) {
                     //                 if current_value != initial_value {
                     //                     // Value has changed, prune it from the list
@@ -557,12 +572,12 @@ impl Session {
                     //     }
 
                     //     // Command 2 (Prune the list, triggered by 0x00000100)
-                    //     if joyflags_val & 0x00000002 != 0 {
+                    //     if joyflags_val & 0x00000001 != 0 {
                     //         println!("Prune Command - Pruning same boolean addresses");
                     //         let mut addresses = boolean_addresses.lock();
                     //         let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
                     //         addresses.retain(|&address| {
-                    //             let current_value = core_ref.raw_read_16(address, -1);
+                    //             let current_value = core_ref.raw_read_8(address, -1);
                     //             if let Some(&initial_value) = initial_states.get(&address) {
                     //                 if current_value == initial_value {
                     //                     // Value has changed, prune it from the list
@@ -586,7 +601,7 @@ impl Session {
                     //     let initial_states = INITIAL_BOOLEAN_STATES.lock();
 
                     //     for &address in addresses.iter() {
-                    //         let current_value = core_ref.raw_read_16(address, -1);
+                    //         let current_value = core_ref.raw_read_8(address, -1);
                     //         if let Some(&initial_value) = initial_states.get(&address) {
                     //             // Only display if the current value has changed compared to the initial value
                     //             if current_value != initial_value {
@@ -599,24 +614,24 @@ impl Session {
                     //     }
                     // } 
                     // // Command 3 (Compare the current values, triggered by 0x00000008)
-                    // if joyflags_val & 0x00000001 != 0 {
-                    //    // Lock the boolean_addresses and log_file for safe access
-                    //     let addresses = boolean_addresses.lock();
-                    //     let mut file = log_file.lock();
+                    // // if joyflags_val & 0x00000001 != 0 {
+                    // //    // Lock the boolean_addresses and log_file for safe access
+                    // //     let addresses = boolean_addresses.lock();
+                    // //     let mut file = log_file.lock();
 
-                    //     // Iterate over each address and write to the file
-                    //     for &address in addresses.iter() {
-                    //         if let Err(e) = writeln!(file, "0x{:08X}", address) {
-                    //             eprintln!("Failed to write address 0x{:08X} to log file: {}", address, e);
-                    //         }
-                    //     }
+                    // //     // Iterate over each address and write to the file
+                    // //     for &address in addresses.iter() {
+                    // //         if let Err(e) = writeln!(file, "0x{:08X}", address) {
+                    // //             eprintln!("Failed to write address 0x{:08X} to log file: {}", address, e);
+                    // //         }
+                    // //     }
 
-                    //     // Optionally, flush the file to ensure data is written immediately
-                    //     if let Err(e) = file.flush() {
-                    //         eprintln!("Failed to flush log file: {}", e);
-                    //     }
+                    // //     // Optionally, flush the file to ensure data is written immediately
+                    // //     if let Err(e) = file.flush() {
+                    // //         eprintln!("Failed to flush log file: {}", e);
+                    // //     }
 
-                    // }
+                    // // }
                     // // Handle Command 4 as a toggle
                     // {
                     //     // Check the current state of Command 4 bit (0x00000004)
@@ -950,6 +965,8 @@ impl Session {
                 LAST_OPPONENT_HEALTH = current_opponent_health;
                 set_player_health(current_player_health);
                 set_enemy_health(current_opponent_health);
+                set_player_charge(core.raw_read_8(0x02036948, -1) as u16);
+                set_enemy_charge(core.raw_read_8(0x02036A10, -1) as u16);
             }
         }
         

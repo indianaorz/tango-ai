@@ -12,20 +12,18 @@ import random
 from torch.cuda.amp import GradScaler, autocast
 import gc  # Import garbage collector
 import wandb  # Import wandb for experiment tracking
+import yaml  # For configuration
 
 from utils import (
     get_exponential_sample,
     get_image_memory,
-    get_checkpoint_path,
+    get_latest_checkpoint,
     get_exponental_amount,
     get_root_dir
 )  # Import the helper functions
-from cache_data import process_replay  # May not be needed anymore if preprocessing is separate
-
+from cache_data import process_replay, load_config, initialize_strategy  # Import updated cache_data functions
 from h5_game_dataset import H5GameDataset
-from game_dataset import GameDataset
 from game_input_predictor import GameInputPredictor
-from preloaded_h5_game_dataset import PreloadedH5GameDataset
 
 # Define constants
 TEMP_DIR = os.path.join(get_root_dir(), 'temp')
@@ -42,82 +40,81 @@ def clear_memory():
 
 # Define a separate train_model function that can handle multiple models
 def train_model(model, train_loader, optimizer, criterion, device,
-               epoch, net_reward_min, net_reward_max, scaler, model_name):
-    """
-    Trains the given model for one epoch.
-
-    Parameters:
-    - model: The neural network model to train.
-    - train_loader: DataLoader providing the training data.
-    - optimizer: Optimizer for updating model weights.
-    - criterion: Loss function.
-    - device: Device to run the training on (CPU or GPU).
-    - epoch: Current epoch number.
-    - net_reward_min: Minimum net reward in the dataset.
-    - net_reward_max: Maximum net reward in the dataset.
-    - scaler: GradScaler for mixed precision.
-    - model_name: Identifier for the model (e.g., "Planning_Model").
-    """
+               epoch, net_reward_min, net_reward_max, scaler, model_name, config):
     model.train()
     epoch_loss = 0.0
     num_batches = len(train_loader)
 
-    # Create the progress bar for the epoch
     epoch_progress = tqdm(train_loader,
                           desc=f"Epoch {epoch+1} [{model_name}]",
                           leave=False, position=2, ncols=100)
 
     for batch_idx, batch in enumerate(epoch_progress):
-        # Extract fields from the batch dictionary
-        images = batch['image']  # Shape: (batch_size, image_memory, 3, 160, 240)
+        # Extract features based on config
+        include_image = config['input_features'].get('include_image', True)
+        include_position = config['input_features'].get('include_position', True)
+        position_type = config['input_features'].get('position_type', 'grid')
+        include_player_charge = config['input_features'].get('include_player_charge', False)
+        include_enemy_charge = config['input_features'].get('include_enemy_charge', False)
+        include_temporal_charge = config['input_features'].get('temporal_charge', 0) > 0
+        temporal_charge = config['input_features'].get('temporal_charge', 0)
 
-        # Handle image_memory
-        if image_memory > 1:
-            # Assuming images are sequences: (batch_size, image_memory, 3, 160, 240)
-            if images.dim() != 5:
-                raise ValueError(f"Expected 5D tensor for image_memory={image_memory}, but got {images.dim()}D tensor.")
-            # Permute to [batch_size, 3, image_memory, 160, 240]
-            images = images.permute(0, 2, 1, 3, 4)
-        else:
-            # For image_memory=1, add a singleton dimension
-            if images.dim() != 4:
-                raise ValueError(f"Expected 4D tensor for image_memory=1, but got {images.dim()}D tensor.")
-            images = images.unsqueeze(2)  # New shape: (batch_size, 3, 1, 160, 240)
+        images = batch.get('image', None)
+        position = batch.get('position', None)
+        player_charge = batch.get('player_charge', None)
+        enemy_charge = batch.get('enemy_charge', None)
+        player_charge_temporal = batch.get('player_charge_temporal', None) if include_temporal_charge else None
+        enemy_charge_temporal = batch.get('enemy_charge_temporal', None) if include_temporal_charge else None
 
-        # Move images to device
-        images = images.to(device, non_blocking=False)  # Utilize non_blocking transfers with pin_memory
+        # Move data to device
+        if include_image and images is not None:
+            images = images.to(device, non_blocking=True)
+            # print(f"Batch images moved to device with shape: {images.shape}")  # Debugging
+        if include_position and position is not None:
+            position = position.to(device, non_blocking=True)
+            # print(f"Batch positions moved to device with shape: {position.shape}")  # Debugging
+        if include_player_charge and player_charge is not None:
+            player_charge = player_charge.to(device, non_blocking=True)
+            # print(f"Batch player_charge moved to device with shape: {player_charge.shape}")  # Debugging
+        if include_enemy_charge and enemy_charge is not None:
+            enemy_charge = enemy_charge.to(device, non_blocking=True)
+            # print(f"Batch enemy_charge moved to device with shape: {enemy_charge.shape}")  # Debugging
+        if include_temporal_charge and player_charge_temporal is not None:
+            player_charge_temporal = player_charge_temporal.to(device, non_blocking=True)
+        if include_temporal_charge and enemy_charge_temporal is not None:
+            enemy_charge_temporal = enemy_charge_temporal.to(device, non_blocking=True)
 
-        # Move other tensors to device
-        inputs = batch['input'].to(device, non_blocking=False)                    # Shape: (batch_size, 16)
-        player_health = batch['player_health'].unsqueeze(1).to(device, non_blocking=False)    # Shape: (batch_size, 1)
-        enemy_health = batch['enemy_health'].unsqueeze(1).to(device, non_blocking=False)      # Shape: (batch_size, 1)
-        player_grid = batch['player_grid'].to(device, non_blocking=False)          # Shape: (batch_size, 6, 3)
-        enemy_grid = batch['enemy_grid'].to(device, non_blocking=False)            # Shape: (batch_size, 6, 3)
-        inside_window = batch['inside_window'].unsqueeze(1).to(device, non_blocking=False)  # Shape: (batch_size, 1)
-        net_rewards = batch['net_reward'].to(device, non_blocking=False)            # Shape: (batch_size,)
+        # Get net_rewards
+        net_rewards = batch['net_reward']  # Shape: (batch_size,)
 
-        # Normalize net_rewards to [0, 1] instead of [-1, 1]
+        # Remove clamping to allow negative weights
         net_rewards_normalized = (net_rewards - net_reward_min) / (net_reward_max - net_reward_min + 1e-6)
-        net_rewards_normalized = torch.clamp(net_rewards_normalized, min=0.0, max=1.0)
+        # Now net_rewards_normalized can be in the range [-1, 1]
+        # Shift net_rewards_normalized to be in [0, 2]
+        net_rewards_shifted = net_rewards_normalized + 1.0  # Now in [0, 2]
 
         optimizer.zero_grad()
 
         with autocast():
-            # Forward pass with additional inputs
-            outputs = model(images, player_grid, enemy_grid, inside_window, player_health, enemy_health)  # Shape: (batch_size, 16)
+            # Forward pass
+            outputs = model(images, position=position, 
+                            player_charge=player_charge, enemy_charge=enemy_charge,
+                            player_charge_temporal=player_charge_temporal,
+                            enemy_charge_temporal=enemy_charge_temporal)  # Shape: (batch_size, 16)
+
+            # Targets (input bitstrings)
+            targets = batch['input'].to(device, non_blocking=True)  # Shape: (batch_size, 16)
 
             # Compute loss per sample
-            loss = criterion(outputs, inputs)  # BCEWithLogitsLoss with reduction='none'
+            loss = criterion(outputs, targets)  # Shape: (batch_size, num_classes)
             loss_per_sample = loss.mean(dim=1)  # Shape: (batch_size,)
 
-            # Use normalized net_rewards as sample_weights
-            sample_weights = net_rewards_normalized  # Ensure weights are in [0, 1]
-
-            # Multiply loss per sample by sample weights
-            weighted_loss = loss_per_sample * sample_weights  # Shape: (batch_size,)
+            # Weighted loss
+            weighted_loss = loss_per_sample * net_rewards_shifted
+            loss = weighted_loss.mean()
 
             # Compute mean loss over batch
-            loss = weighted_loss.mean()
+            # loss = weighted_loss.mean()  # This line is duplicated, remove one
 
         scaler.scale(loss).backward()
 
@@ -127,7 +124,7 @@ def train_model(model, train_loader, optimizer, criterion, device,
         scaler.update()
 
         epoch_loss += loss.item()
-        avg_loss = epoch_loss / (batch_idx + 1)
+        avg_loss = epoch_loss / (batch_idx + 1) + 1e-6
 
         # Update the progress bar with the current and average loss
         epoch_progress.set_postfix({
@@ -141,8 +138,8 @@ def train_model(model, train_loader, optimizer, criterion, device,
             f'Train/{model_name}/Avg_Batch_Loss': avg_loss,
             'Train/Epoch': epoch + 1,
             'Train/Batch': batch_idx + 1,
-            f'Train/{model_name}/Sample_Weights_Mean': sample_weights.mean().item(),
-            f'Train/{model_name}/Sample_Weights_Std': sample_weights.std().item(),
+            f'Train/{model_name}/Sample_Weights_Mean': net_rewards_normalized.mean().item(),
+            f'Train/{model_name}/Sample_Weights_Std': net_rewards_normalized.std().item(),
         })
 
         # Clear variables at the end of the loop to free memory
@@ -160,6 +157,7 @@ def train_model(model, train_loader, optimizer, criterion, device,
     })
 
     return avg_epoch_loss
+    return avg_epoch_loss
 
 # Define cache directories
 TRAINING_CACHE_DIR = os.path.join(get_root_dir(), 'training_cache')
@@ -172,10 +170,10 @@ def main():
         project="sigma_5_mem_1_sub",  # Replace with your wandb project name
         name="experiment_name",       # (Optional) Name for this run
         config={
-            "batch_size": 64,  # Increased batch size for better GPU utilization
-            "learning_rate": 1e-4,
+            "batch_size": 256,  # Increased batch size for better GPU utilization
+            "learning_rate": 1e-5,
             "image_memory": get_image_memory(),
-            "num_epochs": 10,
+            "num_epochs": 100,
             "optimizer": "Adam",
             "loss_function": "BCEWithLogitsLoss",
             "load_data_into_gpu": False,  # Set to False to avoid moving data in Dataset
@@ -193,7 +191,7 @@ def main():
     batch_size = config.batch_size
     learning_rate = config.learning_rate
     max_checkpoints = 5
-    subset_size = 4  # Number of directories per subset
+    subset_size = 20  # Number of directories per subset
     checkpoint_freq = 1  # Save a checkpoint every epoch
     num_full_epochs = config.num_epochs
     preprocess = True  # Set to False to skip preprocessing the dataset
@@ -209,9 +207,13 @@ def main():
         print("Warning: 'load_data_into_gpu' is set to True but no CUDA device is available. Data will remain on CPU.")
         load_data_into_gpu = False
 
+    # Load configuration for input features
+    user_config = load_config()
+
     # Initialize two models: Planning and Battle
-    planning_model = GameInputPredictor(image_memory=image_memory).to(device)
-    battle_model = GameInputPredictor(image_memory=image_memory).to(device)
+    print("image_memory:", image_memory)
+    planning_model = GameInputPredictor(image_memory=image_memory, config=user_config).to(device)
+    battle_model = GameInputPredictor(image_memory=image_memory, config=user_config).to(device)
 
     # Define separate criteria for both models
     criterion = nn.BCEWithLogitsLoss(reduction='none')
@@ -225,7 +227,7 @@ def main():
     wandb.watch(battle_model, log="all", log_freq=100)
 
     # Check for existing checkpoints for Planning Model
-    latest_planning_checkpoint = get_checkpoint_path(os.path.join(checkpoint_dir, 'planning'), image_memory)
+    latest_planning_checkpoint = get_latest_checkpoint(os.path.join(checkpoint_dir, 'planning'), image_memory)
     start_epoch_planning = 0
     if latest_planning_checkpoint:
         print(f"Loading Planning Model checkpoint: {latest_planning_checkpoint}")
@@ -244,7 +246,7 @@ def main():
             raise KeyError("Planning checkpoint does not contain 'optimizer_state_dict'")
 
         if 'epoch' in checkpoint:
-            # start_epoch_planning = checkpoint['epoch']
+            start_epoch_planning = checkpoint['epoch']
             print(f"Resuming Planning Model from epoch {start_epoch_planning}")
         else:
             raise KeyError("Planning checkpoint does not contain 'epoch'")
@@ -252,7 +254,7 @@ def main():
         print("No Planning Model checkpoint found, starting from scratch.")
 
     # Check for existing checkpoints for Battle Model
-    latest_battle_checkpoint = get_checkpoint_path(os.path.join(checkpoint_dir, 'battle'), image_memory)
+    latest_battle_checkpoint = get_latest_checkpoint(os.path.join(checkpoint_dir, 'battle'), image_memory)
     start_epoch_battle = 0
     if latest_battle_checkpoint:
         print(f"Loading Battle Model checkpoint: {latest_battle_checkpoint}")
@@ -271,7 +273,7 @@ def main():
             raise KeyError("Battle checkpoint does not contain 'optimizer_state_dict'")
 
         if 'epoch' in checkpoint:
-            #start_epoch_battle = checkpoint['epoch']
+            start_epoch_battle = checkpoint['epoch']
             print(f"Resuming Battle Model from epoch {start_epoch_battle}")
         else:
             raise KeyError("Battle checkpoint does not contain 'epoch'")
@@ -310,7 +312,8 @@ def main():
     battle_cache_dir = os.path.join(TRAINING_CACHE_DIR, 'battle')
     os.makedirs(planning_cache_dir, exist_ok=True)
     os.makedirs(battle_cache_dir, exist_ok=True)
-
+    loaded_single = False
+    is_single_subset = subsets_per_full_epoch == 1
     # Handle multiple subsets
     for full_epoch in range(max(start_epoch_planning, start_epoch_battle), num_full_epochs):
         print(f"\nStarting full epoch {full_epoch + 1}/{num_full_epochs}")
@@ -330,57 +333,58 @@ def main():
             # Create a separate progress bar for subsets
             subset_progress = tqdm(total=2, desc=f"Subset {subset_idx+1}/{len(subsets)}", position=1, leave=False)
 
-            # ----- Training Planning Model -----
-            planning_h5_files = [os.path.join(planning_cache_dir, f"{os.path.basename(d)}.h5") for d in subset_dirs]
-            planning_h5_files = [f for f in planning_h5_files if os.path.exists(f)]
+            # # ----- Training Planning Model -----
+            # planning_h5_files = [os.path.join(planning_cache_dir, f"{os.path.basename(d)}.h5") for d in subset_dirs]
+            # planning_h5_files = [f for f in planning_h5_files if os.path.exists(f)]
 
-            if not planning_h5_files:
-                print(f"No Planning HDF5 files found for subset {subset_idx + 1}, skipping Planning training.")
-                subset_progress.update(1)
-            else:
-                # Combine multiple HDF5 files into one dataset
-                planning_datasets = [H5GameDataset(f, image_memory=image_memory) for f in planning_h5_files]
-                combined_planning_dataset = ConcatDataset(planning_datasets)
+            # if not planning_h5_files:
+            #     print(f"No Planning HDF5 files found for subset {subset_idx + 1}, skipping Planning training.")
+            #     subset_progress.update(1)
+            # else:
+            #     # Combine multiple HDF5 files into one dataset
+            #     planning_datasets = [H5GameDataset(f, image_memory=image_memory, config=user_config) for f in planning_h5_files]
+            #     combined_planning_dataset = ConcatDataset(planning_datasets)
 
-                # Get min and max net_rewards from all datasets
-                net_reward_mins = [ds.net_reward_min for ds in planning_datasets]
-                net_reward_maxs = [ds.net_reward_max for ds in planning_datasets]
-                planning_net_reward_min = min(net_reward_mins)
-                planning_net_reward_max = max(net_reward_maxs)
+            #     # Get min and max net_rewards from all datasets
+            #     net_reward_mins = [ds.net_reward_min for ds in planning_datasets]
+            #     net_reward_maxs = [ds.net_reward_max for ds in planning_datasets]
+            #     planning_net_reward_min = min(net_reward_mins)
+            #     planning_net_reward_max = max(net_reward_maxs)
 
-                if planning_net_reward_max == planning_net_reward_min:
-                    print("Warning: planning_net_reward_max == planning_net_reward_min, setting sample_weights to 1")
-                    planning_net_reward_max = planning_net_reward_min + 1e-6
+            #     if planning_net_reward_max == planning_net_reward_min:
+            #         print("Warning: planning_net_reward_max == planning_net_reward_min, setting sample_weights to 1")
+            #         planning_net_reward_max = planning_net_reward_min + 1e-6
 
-                # Initialize DataLoader for Planning
-                planning_loader = DataLoader(
-                    combined_planning_dataset,
-                    batch_size=batch_size,
-                    shuffle=True,
-                    num_workers=0,  # Adjust based on your CPU cores
-                    pin_memory=False
-                )
+            #     # Initialize DataLoader for Planning
+            #     planning_loader = DataLoader(
+            #         combined_planning_dataset,
+            #         batch_size=batch_size,
+            #         shuffle=True,
+            #         num_workers=4 if efficient_storage else 0,  # Adjust based on your CPU cores
+            #         pin_memory=efficient_storage and device.type == 'cuda'
+            #     )
 
-                # Train Planning Model
-                avg_epoch_loss_planning = train_model(
-                    planning_model,
-                    planning_loader,
-                    planning_optimizer,
-                    criterion,
-                    device,
-                    full_epoch,
-                    planning_net_reward_min,
-                    planning_net_reward_max,
-                    scaler,
-                    model_name="Planning_Model"
-                )
-                subset_progress.update(1)
+            #     # Train Planning Model
+            #     avg_epoch_loss_planning = train_model(
+            #         planning_model,
+            #         planning_loader,
+            #         planning_optimizer,
+            #         criterion,
+            #         device,
+            #         full_epoch,
+            #         planning_net_reward_min,
+            #         planning_net_reward_max,
+            #         scaler,
+            #         model_name="Planning_Model",
+            #         config=user_config
+            #     )
+            #     subset_progress.update(1)
 
-            #clear planning memory
-            del planning_loader
-            del planning_datasets
-            del combined_planning_dataset
-            clear_memory()
+            #     # Clear planning memory
+            #     del planning_loader
+            #     del planning_datasets
+            #     del combined_planning_dataset
+            #     clear_memory()
 
             # ----- Training Battle Model -----
             battle_h5_files = [os.path.join(battle_cache_dir, f"{os.path.basename(d)}.h5") for d in subset_dirs]
@@ -390,28 +394,32 @@ def main():
                 print(f"No Battle HDF5 files found for subset {subset_idx + 1}, skipping Battle training.")
                 subset_progress.update(1)
             else:
-                # Combine multiple HDF5 files into one dataset
-                battle_datasets = [H5GameDataset(f, image_memory=image_memory) for f in battle_h5_files]
-                combined_battle_dataset = ConcatDataset(battle_datasets)
-
-                # Get min and max net_rewards from all datasets
-                net_reward_mins = [ds.net_reward_min for ds in battle_datasets]
-                net_reward_maxs = [ds.net_reward_max for ds in battle_datasets]
-                battle_net_reward_min = min(net_reward_mins)
-                battle_net_reward_max = max(net_reward_maxs)
-
-                if battle_net_reward_max == battle_net_reward_min:
-                    print("Warning: battle_net_reward_max == battle_net_reward_min, setting sample_weights to 1")
-                    battle_net_reward_max = battle_net_reward_min + 1e-6
 
                 # Initialize DataLoader for Battle
-                battle_loader = DataLoader(
-                    combined_battle_dataset,
-                    batch_size=batch_size,
-                    shuffle=True,
-                    num_workers=0,  # Adjust based on your CPU cores
-                    pin_memory=False
-                )
+                if is_single_subset and not loaded_single or not is_single_subset:
+                    loaded_single = True
+
+                    # Combine multiple HDF5 files into one dataset
+                    battle_datasets = [H5GameDataset(f, image_memory=image_memory, config=user_config) for f in battle_h5_files]
+                    combined_battle_dataset = ConcatDataset(battle_datasets)
+
+                    # Get min and max net_rewards from all datasets
+                    net_reward_mins = [ds.net_reward_min for ds in battle_datasets]
+                    net_reward_maxs = [ds.net_reward_max for ds in battle_datasets]
+                    battle_net_reward_min = min(net_reward_mins)
+                    battle_net_reward_max = max(net_reward_maxs)
+
+                    if battle_net_reward_max == battle_net_reward_min:
+                        print("Warning: battle_net_reward_max == battle_net_reward_min, setting sample_weights to 1")
+                        battle_net_reward_max = battle_net_reward_min + 1e-6
+
+                    battle_loader = DataLoader(
+                        combined_battle_dataset,
+                        batch_size=batch_size,
+                        shuffle=False,
+                        num_workers=4 if efficient_storage else 0,  # Adjust based on your CPU cores
+                        pin_memory=efficient_storage and device.type == 'cuda'
+                    )
 
                 # Train Battle Model
                 avg_epoch_loss_battle = train_model(
@@ -424,14 +432,22 @@ def main():
                     battle_net_reward_min,
                     battle_net_reward_max,
                     scaler,
-                    model_name="Battle_Model"
+                    model_name="Battle_Model",
+                    config=user_config
                 )
                 subset_progress.update(1)
+
+                # Clear battle memory
+                if not is_single_subset:
+                    del battle_loader 
+                    del battle_datasets
+                    del combined_battle_dataset
+                    clear_memory()
 
             # Update the subset progress bar
             subset_progress.close()
 
-        # Checkpointing per subset or per epoch as desired
+        # Checkpointing per epoch
         if (full_epoch + 1) % checkpoint_freq == 0:
             # Define where to save the Planning Model checkpoint
             save_at_planning = os.path.join(checkpoint_dir, 'planning')
@@ -487,7 +503,6 @@ def main():
             }, checkpoint_path_battle)
             print(f"Saved Battle Model checkpoint: {checkpoint_path_battle}")
 
-
             # Optionally upload to wandb as an artifact
             # artifact_battle = wandb.Artifact('battle-model-checkpoint', type='checkpoint')
             # artifact_battle.add_file(checkpoint_path_battle)
@@ -508,9 +523,6 @@ def main():
             overall_progress.update(1)
 
             # Cleanup
-            del battle_loader 
-            del battle_datasets
-            del combined_battle_dataset
             clear_memory()
 
         # After each full epoch, re-scan for new directories in the training folder

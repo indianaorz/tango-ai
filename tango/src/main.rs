@@ -3,7 +3,7 @@
 
 use std::io::Write;
 use std::sync::Arc;
-use global::get_frame_count;
+use global::{get_frame_count, get_player_charge};
 use tango_pvp::replay;
 use tokio::runtime::Runtime;
 use tokio::net::TcpListener;
@@ -45,7 +45,7 @@ use keyboard::Key;
 
 mod global; // Include the global module
 
-use crate::global::{get_punishments,get_rewards,add_reward, add_punishment, clear_rewards, clear_punishments, get_screen_image, get_local_input, clear_local_input, get_winner,get_player_health,get_player_position,get_enemy_health,get_enemy_position, get_is_player_inside_window, SCREEN_IMAGE, RewardPunishment};
+use crate::global::{get_punishments,get_rewards,add_reward, add_punishment, clear_rewards, clear_punishments, get_enemy_charge, get_screen_image, get_local_input, clear_local_input, get_winner,get_player_health,get_player_position,get_enemy_health,get_enemy_position, get_is_player_inside_window, SCREEN_IMAGE, RewardPunishment};
 use crate::global::{REWARDS, PUNISHMENTS}; // Import the global variables
 
 use base64::{encode}; // Add base64 for encoding images as strings
@@ -453,7 +453,7 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                                 if bit == '1' {
                                     if let Some(key) = map_bit_to_key(i) {
                                         // Simulate a key press event for the active bits
-                                        println!("Simulating key press for bit position: {}", i);
+                                        // println!("Simulating key press for bit position: {}", i);
                                         handle_input_event(
                                             &mut input_state,
                                             &mut state,
@@ -462,7 +462,7 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                                             &mut next_config,
                                         );
                                     } else {
-                                        println!("Unrecognized key for bit position: {}", i);
+                                        // println!("Unrecognized key for bit position: {}", i);
                                     }
                                 }
                             }
@@ -584,6 +584,8 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                         get_is_player_inside_window(),
                         get_rewards().last().cloned(),
                         get_punishments().last().cloned(),
+                        get_player_charge(),
+                        get_enemy_charge(),
                         training_data_dir,
                     ) {
                         println!("Failed to save game state: {:?}", e);
@@ -653,6 +655,8 @@ struct GameState {
     inside_window: Option<bool>,
     reward: u16,
     punishment: u16,
+    player_charge: u16,
+    enemy_charge: u16,
 }
 
 // Add a function to map Python command keys to physical keys in the game
@@ -708,6 +712,8 @@ fn save_game_state(
     inside_window: Option<bool>,
     reward: Option<RewardPunishment>,
     punishment: Option<RewardPunishment>,
+    player_charge: u16,
+    enemy_charge: u16,
     training_data_dir: &Path,
 ) -> Result<()> {
     // Convert to absolute path
@@ -745,6 +751,8 @@ fn save_game_state(
         inside_window,
         reward,
         punishment,
+        player_charge,
+        enemy_charge,
     };
 
     // Serialize the GameState to pretty JSON
@@ -851,6 +859,11 @@ struct ScreenImageDetails {
     player_position: Option<(u16, u16)>,
     enemy_position: Option<(u16, u16)>,
     inside_window: Option<bool>,
+    player_charge: u16,
+    enemy_charge: u16,
+    reward: u16,
+    punishment: u16,
+    current_input: u16,
 }
 use image::ImageEncoder;
 use egui::Color32;
@@ -914,7 +927,12 @@ async fn handle_tcp_client(
                                                     enemy_health,
                                                     player_position,
                                                     enemy_position,
-                                                    inside_window
+                                                    inside_window,
+                                                    player_charge: get_player_charge(),
+                                                    enemy_charge: get_enemy_charge(),
+                                                    reward: get_rewards().last().map(|reward| reward.damage).unwrap_or(0),
+                                                    punishment: get_punishments().last().map(|punishment| punishment.damage).unwrap_or(0),
+                                                    current_input: get_local_input().unwrap_or(0),
                                                 };
 
                                                 // Serialize ScreenImageDetails to JSON
@@ -992,5 +1010,10 @@ async fn send_message_to_python(
     let message_json = serde_json::to_string(message)?;
     socket.write_all(message_json.as_bytes()).await?;
     socket.write_all(b"\n").await?;
+
+    //clear rewards
+    clear_rewards();
+    clear_punishments();
+    
     Ok(())
 }

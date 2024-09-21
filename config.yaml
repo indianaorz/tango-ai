@@ -1,7 +1,15 @@
-# config.yaml
+#config.yaml
 strategy:
-  name: default  # Options: default, dodge, damage
+  name: dodge  # Options: default, dodge, damage, aggressive
   parameters:
     reward_value: 1
     punishment_value: -0.5
-    window_size: 300
+    window_size: 30
+
+input_features:
+  include_image: true
+  include_position: true  # Options: true or false
+  position_type: "float"  # Options: "float" or "grid"
+  include_player_charge: true
+  include_enemy_charge: true
+  temporal_charge: 20 #amount of previous frames for the charge state

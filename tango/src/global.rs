@@ -51,8 +51,36 @@ lazy_static! {
 
     //frame count
     pub static ref FRAME_COUNT: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    //player charge
+    pub static ref PLAYER_CHARGE: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    //enemy charge
+    pub static ref ENEMY_CHARGE: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
 }
 
+
+// Function to set the player charge
+pub fn set_player_charge(charge: u16) {
+    let mut player_charge = PLAYER_CHARGE.lock();
+    *player_charge = charge;
+}
+
+pub fn get_player_charge() -> u16 {
+    let player_charge = PLAYER_CHARGE.lock();
+    *player_charge
+}
+
+// Function to set the enemy charge
+pub fn set_enemy_charge(charge: u16) {
+    let mut enemy_charge = ENEMY_CHARGE.lock();
+    *enemy_charge = charge;
+}
+
+pub fn get_enemy_charge() -> u16 {
+    let enemy_charge = ENEMY_CHARGE.lock();
+    *enemy_charge
+}
 
 // Function to set the frame count
 pub fn set_frame_count(count: u16) {

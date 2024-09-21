@@ -182,6 +182,8 @@ def frame_data(folder_name, frame_index):
         'frames': frames_data,  # List of frames based on image_memory
         'input': current_data.get('input', ''),
         'model_prediction': None,  # Placeholder, updated in frontend
+        'player_charge': current_data.get('player_charge', 0),
+        'enemy_charge': current_data.get('enemy_charge', 0),
         # Conditionally include 'reward' if not zero
         # 'punishment' if not zero
         # Using dictionary unpacking to include fields only if they meet criteria
