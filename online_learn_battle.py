@@ -440,7 +440,8 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
                     data_point['reward'] = normalized_damage  # Assign positive reward
                 # Train the Planning Model with the collected data points
                 if planning_data_buffers[port]:
-                    asyncio.create_task(train_model_online(
+                    asyncio.create_task(asyncio.to_thread(
+                        train_model_online,
                         port,
                         planning_data_buffers[port],
                         model_type="Planning_Model"
@@ -587,7 +588,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
             print(f"Error during inference with {model_type}: {e}")
             return {'type': 'key_press', 'key': '0000000000000000'}  # Return no key press on failure
 
-    # print(f"{predicted_input_str} from {model_type}")
+    print(f"{predicted_input_str} from {model_type}")
     #never allow sending the pause command when out of the window
     if inside_window.item() == 0.0 and predicted_input_str[15 - KEY_BIT_POSITIONS['RETURN']] == '1':
         predicted_input_str = '0000000000000000'
@@ -608,6 +609,9 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
     else:
         #no pausing 0000000000001000 while not inside window
         return {'type': 'key_press', 'key': predicted_input_str}
+    
+
+
 max_reward = 1
 max_punishment = 1
 # Function to receive messages from the game and process them
@@ -805,6 +809,9 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                     current_player_charge,
                                     current_enemy_charge
                                 )
+                                #final check to make sure the action doesn't contain the pause button while outside the window
+                                if current_inside_window == 0 and command['key'][15 - KEY_BIT_POSITIONS['RETURN']] == '1': 
+                                    command['key'][15 - KEY_BIT_POSITIONS['RETURN']] = '0'
                                 data_point['action'] = command['key']  # Store the action
                                 # print(f"Port {port}: Sending command: {command['key']}")
                                 await send_input_command(writer, command, port)
@@ -815,8 +822,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
 
                             # Append data_point to buffer
                             data_buffers[port].append(data_point)
-                            max_reward = max(max_reward, current_reward)
-                            max_punishment = max(max_punishment, current_punishment)
+                            max_reward = 200#max(max_reward, current_reward)
+                            max_punishment = 200#max(max_punishment, current_punishment)
                             # If we received a reward or punishment, perform online training
                             # Assign reward to the current data_point
                             if current_reward != 0 or current_punishment != 0:
@@ -832,11 +839,17 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                     past_data_point['reward'] = discounted_reward
 
                                 # Train on the updated buffer
-                                await train_model_online(
+                                # await train_model_online(
+                                #     port,
+                                #     list(data_buffers[port]),
+                                #     model_type="Battle_Model"
+                                # )
+                                asyncio.create_task(asyncio.to_thread(
+                                    train_model_online,
                                     port,
                                     list(data_buffers[port]),
                                     model_type="Battle_Model"
-                                )
+                                ))
                                 # Reset rewards
                                 current_reward = 0
                                 current_punishment = 0
@@ -853,16 +866,17 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 # print(f"Port {port}: Assigning reward: {0.1}")
                                 # Train on the current frame (data_point)
                                 if current_player_charge != 0:
-                                    data_point['reward'] = 0.1
+                                    data_point['reward'] = 0.001
                                 # else:
                                 #     data_point['reward'] = 0.001
 
-                                await train_model_online(
+                                asyncio.create_task(asyncio.to_thread(
+                                    train_model_online,
                                     port,
                                     [data_point],  # Pass a list with only the current data_point
-                                    model_type="Battle_Model",  # Assuming you're updating the Battle Model
+                                    model_type="Battle_Model",
                                     log=False
-                                )
+                                ))
                             
                             #if not moving, give a small punishment
                             # elif current_input == '0000000000000000':
