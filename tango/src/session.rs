@@ -178,6 +178,12 @@ impl Session {
                     const TIME_DESCRIPTION: &[time::format_description::FormatItem<'_>] = time::macros::format_description!(
                         "[year padding:zero][month padding:zero repr:numerical][day padding:zero][hour padding:zero][minute padding:zero][second padding:zero]"
                     );
+                    //if round number is 2, then close the app
+                    if round_number == 2 {
+                        //close the program
+                        // Exit the application after sending the winner message
+                        std::process::exit(0);
+                    }
                     let replay_filename = replays_path.join(format!(
                         "{}.tangoreplay",
                         format!(
@@ -292,6 +298,8 @@ impl Session {
                             log::info!("match thread ending: {:?}", r);
                         }
                         _ = inner_match.cancelled() => {
+                            //exit application
+                            std::process::exit(0);
                         }
                     }
                     log::info!("match thread ended");
@@ -482,6 +490,8 @@ impl Session {
                     set_enemy_charge(core.raw_read_8(0x02036A10, -1) as u16);
                     if completion_token.is_complete() {
                         thread_handle.pause();
+                        //close application
+                        std::process::exit(0);
                     } else {
                         display_health_state(&mut core, is_offerer);
                         let core_ref = &mut core;

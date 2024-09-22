@@ -4,7 +4,7 @@ strategy:
   parameters:
     reward_value: 1
     punishment_value: -0.5
-    window_size: 30
+    window_size: 100
 
 input_features:
   include_image: true

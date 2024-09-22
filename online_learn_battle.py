@@ -43,34 +43,36 @@ APP_PATH = "./dist/tango-x86_64-linux.AppImage"
 env_common = os.environ.copy()
 env_common["INIT_LINK_CODE"] = "valuesearch"
 env_common["AI_MODEL_PATH"] = "ai_model"
-GAMMA = float(os.getenv("GAMMA", 0.05))  # Default gamma is 0.05
+GAMMA = float(os.getenv("GAMMA", 0.1))  # Default gamma is 0.05
 
 # Initialize maximum health values
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
+battle_count = 4
+INSTANCES = []
 # Define the server addresses and ports for each instance
-INSTANCES = [
-    {
-        'address': '127.0.0.1',
-        'port': 12344,
-        'rom_path': 'bn6,0',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
-        'name': 'Instance 1',
-        'init_link_code': 'arena1',
-        'is_player': True  # Set to True if you don't want this instance to send inputs
-    },
-    {
-        'address': '127.0.0.1',
-        'port': 12345,
-        'rom_path': 'bn6,0',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
-        'name': 'Instance 2',
-        'init_link_code': 'arena1',
-        'is_player': False  # Set to False if you want this instance to send inputs
-    },
-    # Additional instances can be added here
-]
+# INSTANCES = [
+#     {
+#         'address': '127.0.0.1',
+#         'port': 12344,
+#         'rom_path': 'bn6,0',
+#         'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
+#         'name': 'Instance 1',
+#         'init_link_code': 'arena1',
+#         'is_player': False  # Set to True if you don't want this instance to send inputs
+#     },
+#     {
+#         'address': '127.0.0.1',
+#         'port': 12345,
+#         'rom_path': 'bn6,0',
+#         'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
+#         'name': 'Instance 2',
+#         'init_link_code': 'arena1',
+#         'is_player': False  # Set to False if you want this instance to send inputs
+#     },
+#     # Additional instances can be added here
+# ]
 
 # Paths
 SAVES_DIR = '/home/lee/Documents/Tango/saves'
@@ -101,6 +103,29 @@ def create_instance(port, rom_path, init_link_code, is_player=False):
         'init_link_code': init_link_code,
         'is_player': is_player
     }
+
+# Function to generate battles
+def generate_battles(num_matches):
+    battles = []
+    port_base = 12344  # Starting port number
+
+    for match in range(num_matches):
+        # Generate a unique init_link_code for this match
+        init_link_code = f"arena{match}"
+
+        # Randomly choose the ROM path for this match
+        rom_path = random.choice(['bn6,0', 'bn6,1'])
+
+        # Generate two instances for each match
+        instance1 = create_instance(port_base, rom_path, init_link_code)
+        instance2 = create_instance(port_base + 1, rom_path, init_link_code)
+        INSTANCES.append(instance1)
+        INSTANCES.append(instance2)
+        port_base += 2  # Increment the port numbers
+
+    return battles
+
+generate_battles(battle_count)
 
 # Key mappings based on model output indices
 KEY_MAPPINGS = {
@@ -650,14 +675,15 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             #     data_buffers[port].append(data_point)
 
                                 
-                                                        # else:
-                            #     # Train on the current frame (data_point)
-                            #     await train_model_online(
-                            #         port,
-                            #         [data_point],  # Pass a list with only the current data_point
-                            #         1,
-                            #         model_type="Battle_Model"  # Assuming you're updating the Battle Model
-                            #     )
+                            else:
+                                # Train on the current frame (data_point)
+                                data_point['reward'] = 0.01 
+                                await train_model_online(
+                                    port,
+                                    [data_point],  # Pass a list with only the current data_point
+                                    model_type="Battle_Model",  # Assuming you're updating the Battle Model
+                                    log=False
+                                )
                             
                             # Reset rewards/punishments
                             current_reward = 0
@@ -716,7 +742,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
         print("Detailed error line:")
         print(traceback.format_exc())
 
-async def train_model_online(port, data_buffer, model_type="Battle_Model"):
+async def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
     global battle_model, planning_model, optimizer, scaler
 
     # Select the appropriate model and lock
@@ -877,7 +903,8 @@ async def train_model_online(port, data_buffer, model_type="Battle_Model"):
 
         # Only display loss if it's greater than 0.1
         # if total_loss.item() > 0.1:
-        print(f"Port {port}: Reward {rewards_batch} Training completed. Loss: {total_loss.item()}")
+        if log:
+            print(f"Port {port}: Reward {rewards_batch} Training completed. Loss: {total_loss.item()}")
 
         selected_model.eval()  # Switch back to eval mode
 # Function to request the current screen image
