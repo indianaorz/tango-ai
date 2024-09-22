@@ -54,7 +54,7 @@ def get_new_checkpoint_path(model_type='planning', image_memory=1):
 
 
 def get_exponental_amount():
-    return 4
+    return 2
 
 # utils.py
 

@@ -303,6 +303,7 @@ impl Session {
                         }
                     }
                     log::info!("match thread ended");
+                    std::process::exit(0);
                     *match_.lock().await = None;
                 });
             }
@@ -470,9 +471,11 @@ impl Session {
                     let mut vbuf = vbuf.lock();
                     vbuf.copy_from_slice(video_buffer);
                     video::fix_vbuf_alpha(&mut vbuf);
-                    core.set_keys(joyflags.load(std::sync::atomic::Ordering::Relaxed));
+                    //joyflags.load(std::sync::atomic::Ordering::Relaxed)
+                    let joyflags_val = joyflags.load(std::sync::atomic::Ordering::Relaxed);
+                    core.set_keys(joyflags_val);
+                    set_local_input(joyflags_val as u16);
                     emu_tps_counter.lock().mark();
-                    set_local_input(joyflags.load(std::sync::atomic::Ordering::Relaxed) as u16);
                     //log charge state 0x020369BD
                     //enemy charge state 02036A10
                     //enemy charge state 02036A74
@@ -533,7 +536,7 @@ impl Session {
                         set_enemy_position((enemy_x, enemy_y));
                         set_player_position((player_x, player_y));
 
-                        let joyflags_val = joyflags.load(std::sync::atomic::Ordering::Relaxed);
+                        // let joyflags_val = joyflags.load(std::sync::atomic::Ordering::Relaxed);
                         // Command 1 (Set all values, triggered by 0x00000200)
                     //     if joyflags_val & 0x00000200 != 0 {
                     //         println!("Set Command - Populating boolean addresses");

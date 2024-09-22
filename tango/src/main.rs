@@ -608,7 +608,7 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                 if let Err(e) = output_tx.send(input_message) {
                     println!("Failed to send local inputs: {}", e);
                 }
-                clear_local_input(); // Clear inputs after sending
+                // clear_local_input(); // Clear inputs after sending
             }
         }
 
@@ -934,6 +934,9 @@ async fn handle_tcp_client(
                                                     punishment: get_punishments().last().map(|punishment| punishment.damage).unwrap_or(0),
                                                     current_input: get_local_input().unwrap_or(0),
                                                 };
+                                                clear_local_input();
+                                                clear_rewards();
+                                                clear_punishments();
 
                                                 // Serialize ScreenImageDetails to JSON
                                                 let details_json = serde_json::to_string(&screen_details)
@@ -1012,8 +1015,8 @@ async fn send_message_to_python(
     socket.write_all(b"\n").await?;
 
     //clear rewards
-    clear_rewards();
-    clear_punishments();
+    // clear_rewards();
+    // clear_punishments();
     
     Ok(())
 }

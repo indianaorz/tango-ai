@@ -21,16 +21,16 @@ class GameInputPredictor(nn.Module):
         if self.include_image:
             self.conv_layers = nn.Sequential(
                 nn.Conv3d(3, 32, kernel_size=(3, 5, 5), stride=(1, 2, 2), padding=(1, 2, 2)),
-                nn.BatchNorm3d(32),
+                nn.InstanceNorm3d(32, affine=True),
                 nn.ReLU(),
                 nn.Conv3d(32, 64, kernel_size=(3, 5, 5), stride=(1, 2, 2), padding=(1, 2, 2)),
-                nn.BatchNorm3d(64),
+                nn.InstanceNorm3d(64, affine=True),
                 nn.ReLU(),
                 nn.Conv3d(64, 128, kernel_size=(3, 5, 5), stride=(1, 2, 2), padding=(1, 2, 2)),
-                nn.BatchNorm3d(128),
+                nn.InstanceNorm3d(128, affine=True),
                 nn.ReLU(),
                 nn.Conv3d(128, 256, kernel_size=(3, 3, 3), stride=(1, 2, 2), padding=(1, 1, 1)),
-                nn.BatchNorm3d(256),
+                nn.InstanceNorm3d(256, affine=True),
                 nn.ReLU(),
             )
             self._to_linear = None

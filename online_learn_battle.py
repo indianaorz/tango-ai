@@ -43,36 +43,37 @@ APP_PATH = "./dist/tango-x86_64-linux.AppImage"
 env_common = os.environ.copy()
 env_common["INIT_LINK_CODE"] = "valuesearch"
 env_common["AI_MODEL_PATH"] = "ai_model"
-GAMMA = float(os.getenv("GAMMA", 0.1))  # Default gamma is 0.05
+GAMMA = float(os.getenv("GAMMA", 0.05))  # Default gamma is 0.05
+learning_rate = 5e-5
 
 # Initialize maximum health values
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
-battle_count = 4
+battle_count = 0
 INSTANCES = []
 # Define the server addresses and ports for each instance
-# INSTANCES = [
-#     {
-#         'address': '127.0.0.1',
-#         'port': 12344,
-#         'rom_path': 'bn6,0',
-#         'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
-#         'name': 'Instance 1',
-#         'init_link_code': 'arena1',
-#         'is_player': False  # Set to True if you don't want this instance to send inputs
-#     },
-#     {
-#         'address': '127.0.0.1',
-#         'port': 12345,
-#         'rom_path': 'bn6,0',
-#         'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
-#         'name': 'Instance 2',
-#         'init_link_code': 'arena1',
-#         'is_player': False  # Set to False if you want this instance to send inputs
-#     },
-#     # Additional instances can be added here
-# ]
+INSTANCES = [
+    {
+        'address': '127.0.0.1',
+        'port': 12344,
+        'rom_path': 'bn6,0',
+        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
+        'name': 'Instance 1',
+        'init_link_code': 'arena1',
+        'is_player': True  # Set to True if you don't want this instance to send inputs
+    },
+    {
+        'address': '127.0.0.1',
+        'port': 12345,
+        'rom_path': 'bn6,0',
+        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
+        'name': 'Instance 2',
+        'init_link_code': 'arena1',
+        'is_player': False  # Set to False if you want this instance to send inputs
+    },
+    # Additional instances can be added here
+]
 
 # Paths
 SAVES_DIR = '/home/lee/Documents/Tango/saves'
@@ -107,21 +108,23 @@ def create_instance(port, rom_path, init_link_code, is_player=False):
 # Function to generate battles
 def generate_battles(num_matches):
     battles = []
-    port_base = 12344  # Starting port number
+    if num_matches  != 0:
+        INSTANCES.clear()
+        port_base = 12344  # Starting port number
 
-    for match in range(num_matches):
-        # Generate a unique init_link_code for this match
-        init_link_code = f"arena{match}"
+        for match in range(num_matches):
+            # Generate a unique init_link_code for this match
+            init_link_code = f"arena{match}"
 
-        # Randomly choose the ROM path for this match
-        rom_path = random.choice(['bn6,0', 'bn6,1'])
+            # Randomly choose the ROM path for this match
+            rom_path = random.choice(['bn6,0', 'bn6,1'])
 
-        # Generate two instances for each match
-        instance1 = create_instance(port_base, rom_path, init_link_code)
-        instance2 = create_instance(port_base + 1, rom_path, init_link_code)
-        INSTANCES.append(instance1)
-        INSTANCES.append(instance2)
-        port_base += 2  # Increment the port numbers
+            # Generate two instances for each match
+            instance1 = create_instance(port_base, rom_path, init_link_code)
+            instance2 = create_instance(port_base + 1, rom_path, init_link_code)
+            INSTANCES.append(instance1)
+            INSTANCES.append(instance2)
+            port_base += 2  # Increment the port numbers
 
     return battles
 
@@ -251,7 +254,7 @@ load_models(IMAGE_MEMORY)
 
 
 # Define optimizer and loss function
-optimizer = optim.Adam(battle_model.parameters(), lr=1e-4)
+optimizer = optim.Adam(battle_model.parameters(), lr=learning_rate)
 criterion = nn.BCEWithLogitsLoss(reduction='none')
 scaler = GradScaler()
 
@@ -346,6 +349,14 @@ def predict(frames, position_tensor, inside_window, player_health, enemy_health,
 
     predicted_input_str = None
     model_type = "Battle_Model"  # Default model
+
+     # Check additional inputs
+    if position_tensor is not None:
+        assert not torch.isnan(position_tensor).any(), "Position tensor contains NaN"
+    if player_charge_seq is not None:
+        assert not torch.isnan(player_charge_seq).any(), "Player charge sequence contains NaN"
+    if enemy_charge_seq is not None:
+        assert not torch.isnan(enemy_charge_seq).any(), "Enemy charge sequence contains NaN"
 
     # Select model based on inside_window
     if inside_window.item() == 1.0:
@@ -515,7 +526,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         current_reward += float(screen_data.get("reward", 0))  # Accumulate reward
                         current_punishment += float(screen_data.get("punishment", 0))  # Accumulate punishment
                         current_input = screen_data.get("current_input", None)  # Update current_input if available
-                        current_input = int_to_binary_string(current_input)
+                        if current_input is not None:
+                            current_input = int_to_binary_string(current_input)
                     except json.JSONDecodeError:
                         print(f"Port {port}: Failed to parse screen_image details: {details}")
                         continue
@@ -650,6 +662,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             if current_reward != 0 or current_punishment != 0:
                                 # Compute reward for the data_point
                                 reward_value = (current_reward / max_reward) - (current_punishment / max_punishment)
+                                print(f"Port {port}: Assigning reward: {reward_value}")
                                 data_point['reward'] = reward_value
 
                                 # Apply discounted rewards to past data points
@@ -863,50 +876,103 @@ async def train_model_online(port, data_buffer, model_type="Battle_Model", log=T
         # Convert rewards to tensor
         rewards_batch = torch.tensor(rewards_batch, dtype=torch.float32, device=device)  # Shape: (batch_size,)
 
-        # Move to device (already on device if created as such)
-
-        # Zero gradients
+         # Zero gradients
         optimizer.zero_grad()
 
-        with torch.amp.autocast('cuda'):
-            # Forward pass
-            outputs = selected_model(
-                frames_batch,
-                position=position_batch,
-                player_charge=player_charge_batch,
-                enemy_charge=enemy_charge_batch,
-                player_charge_temporal=player_charge_seq_batch,
-                enemy_charge_temporal=enemy_charge_seq_batch
-            )  # Shape: (batch_size, num_actions)
+        assert not torch.isnan(frames_batch).any(), "frames_batch contains NaN"
+        assert not torch.isinf(frames_batch).any(), "frames_batch contains Inf"
 
-            # Compute log probabilities
-            log_probs = F.logsigmoid(outputs)  # Shape: (batch_size, num_actions)
-            probs = torch.sigmoid(outputs)     # Shape: (batch_size, num_actions)
+        if position_batch is not None:
+            assert not torch.isnan(position_batch).any(), "position_batch contains NaN"
+            assert not torch.isinf(position_batch).any(), "position_batch contains Inf"
 
-            # Calculate the log probabilities of the actions taken
-            action_log_probs = targets_batch * log_probs + (1 - targets_batch) * torch.log(1 - probs + 1e-10)
-            action_log_probs = action_log_probs.sum(dim=1)  # Shape: (batch_size,)
+        assert not torch.isnan(player_charge_batch).any(), "player_charge_batch contains NaN"
+        assert not torch.isinf(player_charge_batch).any(), "player_charge_batch contains Inf"
 
-            # Multiply by the negative reward to get the policy loss
-            policy_loss = -action_log_probs * rewards_batch  # Shape: (batch_size,)
+        assert not torch.isnan(enemy_charge_batch).any(), "enemy_charge_batch contains NaN"
+        assert not torch.isinf(enemy_charge_batch).any(), "enemy_charge_batch contains Inf"
 
-            # Optionally add entropy regularization
-            entropy = -(probs * log_probs).sum(dim=1)  # Shape: (batch_size,)
-            entropy_coefficient = 0.01
-            total_loss = policy_loss.mean() - entropy_coefficient * entropy.mean()
+        assert not torch.isnan(player_charge_seq_batch).any(), "player_charge_seq_batch contains NaN"
+        assert not torch.isinf(player_charge_seq_batch).any(), "player_charge_seq_batch contains Inf"
+
+        assert not torch.isnan(enemy_charge_seq_batch).any(), "enemy_charge_seq_batch contains NaN"
+        assert not torch.isinf(enemy_charge_seq_batch).any(), "enemy_charge_seq_batch contains Inf"
+
+
+        # Forward pass
+        outputs = selected_model(
+            frames_batch,
+            position=position_batch,
+            player_charge=player_charge_batch,
+            enemy_charge=enemy_charge_batch,
+            player_charge_temporal=player_charge_seq_batch,
+            enemy_charge_temporal=enemy_charge_seq_batch
+        )  # Shape: (batch_size, num_actions)
+
+        # Compute the negative log probabilities
+        negative_log_probs = F.binary_cross_entropy_with_logits(
+            outputs, targets_batch, reduction='none'
+        )  # Shape: (batch_size, num_actions)
+
+       # Compute log probabilities directly
+        log_probs = -F.softplus(-outputs) * targets_batch - F.softplus(outputs) * (1 - targets_batch)  # Shape: (batch_size, num_actions)
+
+        # Sum over the action dimensions
+        action_log_probs = log_probs.sum(dim=1)  # Shape: (batch_size,)
+
+        # Compute the policy loss with the correct sign
+        policy_loss = - (action_log_probs * rewards_batch).mean()
+
+
+        # Compute probabilities safely
+        probs = torch.sigmoid(outputs)
+        epsilon = 1e-6  # Increase epsilon for better stability
+        probs = torch.clamp(probs, epsilon, 1 - epsilon)
+
+        # Compute entropy
+        entropy = -(probs * torch.log(probs) + (1 - probs) * torch.log(1 - probs)).sum(dim=1)
+
+        entropy_coefficient = 0.01
+        total_loss = policy_loss - entropy_coefficient * entropy.mean()
 
         # Backward pass
-        scaler.scale(total_loss).backward()
-        torch.nn.utils.clip_grad_norm_(selected_model.parameters(), max_norm=1.0)
-        scaler.step(optimizer)
-        scaler.update()
+        total_loss.backward()
 
-        # Only display loss if it's greater than 0.1
-        # if total_loss.item() > 0.1:
+        # After computing outputs
+        assert not torch.isnan(outputs).any(), "Outputs contain NaN"
+        assert not torch.isinf(outputs).any(), "Outputs contain Inf"
+
+        # After computing log_probs
+        assert not torch.isnan(log_probs).any(), "log_probs contain NaN"
+        assert not torch.isinf(log_probs).any(), "log_probs contain Inf"
+
+        # After computing action_log_probs
+        assert not torch.isnan(action_log_probs).any(), "action_log_probs contain NaN"
+        assert not torch.isinf(action_log_probs).any(), "action_log_probs contain Inf"
+
+        # After computing policy_loss
+        assert not torch.isnan(policy_loss).any(), "policy_loss contains NaN"
+        assert not torch.isinf(policy_loss).any(), "policy_loss contain Inf"
+
+        # After computing entropy
+        assert not torch.isnan(entropy).any(), "entropy contains NaN"
+        assert not torch.isinf(entropy).any(), "entropy contains Inf"
+
+        # After computing total_loss
+        assert not torch.isnan(total_loss).any(), "total_loss contains NaN"
+        assert not torch.isinf(total_loss).any(), "total_loss contain Inf"
+
+
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(selected_model.parameters(), max_norm=1.0)
+        optimizer.step()
+
         if log:
-            print(f"Port {port}: Reward {rewards_batch} Training completed. Loss: {total_loss.item()}")
+            print(f"Port {port}: Training completed. Loss: {total_loss.item()}")
 
         selected_model.eval()  # Switch back to eval mode
+
+
 # Function to request the current screen image
 async def request_screen_image(writer):
     try:
