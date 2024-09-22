@@ -33,6 +33,29 @@ import torch.optim as optim
 import torch.nn.functional as F
 
 
+import wandb
+
+import time
+from collections import defaultdict
+
+# Initialize global dictionaries for tracking per-instance state
+window_entry_time = {}
+previous_sent_dict = defaultdict(int)
+previous_inside_window_dict = defaultdict(float)
+
+# Global dictionaries for Planning Model
+planning_data_buffers = defaultdict(list)  # Stores data points during planning phase per port
+current_round_damage = defaultdict(float)  # Tracks damage dealt in the current round per port
+max_round_damage = defaultdict(float)  # Tracks max damage dealt in the current round
+planning_training_lock = Lock()  # Lock to ensure thread safety during planning training
+
+
+
+# Timer duration in seconds (can be set via environment variable or config)
+CHIP_WINDOW_TIMER = float(os.getenv("CHIP_WINDOW_TIMER", 5.0))  # Default is 5 seconds
+
+
+
 # Initialize locks for thread safety
 planning_model_lock = Lock()
 battle_model_lock = Lock()
@@ -43,14 +66,15 @@ APP_PATH = "./dist/tango-x86_64-linux.AppImage"
 env_common = os.environ.copy()
 env_common["INIT_LINK_CODE"] = "valuesearch"
 env_common["AI_MODEL_PATH"] = "ai_model"
-GAMMA = float(os.getenv("GAMMA", 0.05))  # Default gamma is 0.05
+GAMMA = float(os.getenv("GAMMA", 0.1))  # Default gamma is 0.05
 learning_rate = 5e-5
 
 # Initialize maximum health values
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
-battle_count = 0
+battle_count = 2
+include_orig = False
 INSTANCES = []
 # Define the server addresses and ports for each instance
 INSTANCES = [
@@ -109,8 +133,9 @@ def create_instance(port, rom_path, init_link_code, is_player=False):
 def generate_battles(num_matches):
     battles = []
     if num_matches  != 0:
-        INSTANCES.clear()
-        port_base = 12344  # Starting port number
+        if not include_orig:
+            INSTANCES.clear()
+        port_base = 12346  # Starting port number
 
         for match in range(num_matches):
             # Generate a unique init_link_code for this match
@@ -199,7 +224,7 @@ def load_models(image_memory=1):
     If checkpoints do not exist, initializes new models.
     Utilizes the configuration parameters.
     """
-    global planning_model, battle_model
+    global planning_model, battle_model, optimizer_planning, optimizer_battle
 
     # Define the root directory
     root_dir = get_root_dir()
@@ -239,6 +264,15 @@ def load_models(image_memory=1):
         print("No Battle Model checkpoint found. Initialized a new Battle Model.")
 
     battle_model.eval()
+
+    # Initialize separate optimizers
+    optimizer_planning = optim.Adam(planning_model.parameters(), lr=learning_rate)
+    optimizer_battle = optim.Adam(battle_model.parameters(), lr=learning_rate)
+
+    # Optionally, initialize separate GradScalers if using mixed precision
+    # scaler_planning = GradScaler()
+    # scaler_battle = GradScaler()
+
 # Transform to preprocess images before inference
 transform = transforms.Compose([
     transforms.Resize((160, 240)),
@@ -309,9 +343,9 @@ def normalize_health(player_health, enemy_health):
     return normalized_player_health, normalized_enemy_health
 
 # Function to perform inference with the AI model
-previous_sent = False
+# previous_sent = 0
 
-def predict(frames, position_tensor, inside_window, player_health, enemy_health, player_charge_seq, enemy_charge_seq, current_player_charge, current_enemy_charge):
+def predict(port, frames, position_tensor, inside_window, player_health, enemy_health, player_charge_seq, enemy_charge_seq, current_player_charge, current_enemy_charge):
     """
     Predict the next action based on a sequence of frames and additional game state information.
     Chooses between Planning and Battle models based on `inside_window`.
@@ -329,7 +363,75 @@ def predict(frames, position_tensor, inside_window, player_health, enemy_health,
         dict: Command dictionary to send to the game instance.
     """
     global planning_model, battle_model
-    global previous_sent  # Declare as global to modify the global variable
+    global window_entry_time, previous_sent_dict, previous_inside_window_dict
+
+    current_time = time.time()
+
+    # Detect entering or exiting the window
+    if inside_window.item() == 1.0 and previous_inside_window_dict[port] == 0.0:
+        
+        #check if planning_data_buffers has content
+        if planning_data_buffers[port]:
+            print(f"Port {port}: Entering planning window. Training Planning Model.")
+            max_round_damage[port] = 500#max(max_round_damage[port], current_round_damage[port])
+            # Normalize the damage
+            if max_round_damage[port] > 0:
+                normalized_damage = current_round_damage[port] / max_round_damage[port]
+            else:
+                normalized_damage = 0.0
+            print(f"Port {port}: Normalized Damage = {normalized_damage}")
+            
+            # Assign the normalized damage as the reward to all collected data points
+            with planning_training_lock:
+                for data_point in planning_data_buffers[port]:
+                    data_point['reward'] = normalized_damage  # Assign positive reward
+                # Train the Planning Model with the collected data points
+                if planning_data_buffers[port]:
+                    asyncio.create_task(train_model_online(
+                        port,
+                        planning_data_buffers[port],
+                        model_type="Planning_Model"
+                    ))
+                    print(f"Port {port}: Submitted {len(planning_data_buffers[port])} data points for Planning Model training.")
+                # Clear the buffer after training
+                planning_data_buffers[port].clear()
+                current_round_damage[port] = 0.0
+
+        window_entry_time[port] = current_time
+        previous_inside_window_dict[port] = 1.0
+        current_round_damage[port] = 0.0
+        # Ensure the planning data buffer is empty
+        planning_data_buffers[port].clear()
+        print(f"Port {port}: Entered window. Timer started.")
+
+    # If inside the window, check if the timer has expired
+    elif inside_window.item() == 1.0:
+        elapsed_time = current_time - window_entry_time.get(port, current_time)
+        if elapsed_time >= CHIP_WINDOW_TIMER:
+            if force_skip_chip_window:
+                if previous_sent_dict[port] == 0:
+                    previous_sent_dict[port] = 1
+                    # print(f"Port {port}: Sending first key in sequence.")
+                    return {'type': 'key_press', 'key': '0000000001000000'}
+                elif previous_sent_dict[port] == 1:
+                    previous_sent_dict[port] = 2
+                    # print(f"Port {port}: Sending second key in sequence.")
+                    return {'type': 'key_press', 'key': '0000000000001000'}
+                elif previous_sent_dict[port] == 2:
+                    previous_sent_dict[port] = 0
+                    # print(f"Port {port}: Sending third key in sequence.")
+                    return {'type': 'key_press', 'key': '0000000000000001'}
+                    
+
+    # If not inside the window, reset the tracking variables
+    else:
+        if port in window_entry_time:
+            del window_entry_time[port]
+        previous_sent_dict[port] = 0
+        previous_inside_window_dict[port] = 0.0
+
+    
+    
 
     # Preprocess and stack frames
     preprocessed_frames = []
@@ -363,13 +465,17 @@ def predict(frames, position_tensor, inside_window, player_health, enemy_health,
         selected_model = planning_model
         selected_lock = planning_model_lock
         model_type = "Planning_Model"
-        if(force_skip_chip_window and not previous_sent):
-            # Return hitting start and z at the same time
-            previous_sent = True
-            return {'type': 'key_press', 'key': '0000000000001000'}
-        if(previous_sent):
-            previous_sent = False
-            return {'type': 'key_press', 'key': '0000000000000001'}
+        # if(force_skip_chip_window):
+        #     if previous_sent == 0:
+        #         # Return hitting start and z at the same time
+        #         previous_sent = 1
+        #         return {'type': 'key_press', 'key': '0000000001000000'}
+        #     elif(previous_sent==1):
+        #         previous_sent = 2
+        #         return {'type': 'key_press', 'key': '0000000000001000'}
+        #     elif(previous_sent==2):
+        #         previous_sent = 0
+        #         return {'type': 'key_press', 'key': '0000000000000001'}
     else:
         selected_model = battle_model
         selected_lock = battle_model_lock
@@ -531,6 +637,9 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                     except json.JSONDecodeError:
                         print(f"Port {port}: Failed to parse screen_image details: {details}")
                         continue
+
+                    current_round_damage[port] += float(screen_data.get("reward", 0))
+
                     #input
                     # print(f"Port {port}: Current input: {current_input}")
                     #print rewards
@@ -620,6 +729,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         # Only send commands if the instance is not a player
                         game_instance = next((inst for inst in INSTANCES if inst['port'] == port), None)
                         if game_instance:# and not game_instance.get('is_player', False):
+
                             # Prepare data point
                             data_point = {
                                 'frames': sampled_frames,
@@ -635,6 +745,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             }
                             if not game_instance.get('is_player', False):
                                 command = predict(
+                                    port,
                                     sampled_frames,
                                     position_tensor,
                                     inside_window_tensor,
@@ -646,7 +757,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                     current_enemy_charge
                                 )
                                 data_point['action'] = command['key']  # Store the action
-                                print(f"Port {port}: Sending command: {command['key']}")
+                                # print(f"Port {port}: Sending command: {command['key']}")
                                 await send_input_command(writer, command, port)
                             else:
                                 data_point['action'] = current_input  # Store the current input
@@ -688,15 +799,32 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             #     data_buffers[port].append(data_point)
 
                                 
-                            else:
+                            # else:
+                            if current_player_charge != 0:# or current_punishment == 0:
+                                # print(f"Port {port}: Assigning reward: {0.1}")
                                 # Train on the current frame (data_point)
-                                data_point['reward'] = 0.01 
+                                if current_player_charge != 0:
+                                    data_point['reward'] = 0.1
+                                # else:
+                                #     data_point['reward'] = 0.001
+
                                 await train_model_online(
                                     port,
                                     [data_point],  # Pass a list with only the current data_point
                                     model_type="Battle_Model",  # Assuming you're updating the Battle Model
                                     log=False
                                 )
+                            
+                            #if not moving, give a small punishment
+                            # elif current_input == '0000000000000000':
+                            #     print(f"Port {port}: Assigning punishment: {-1}")
+                            #     data_point['reward'] = -1
+                            #     await train_model_online(
+                            #         port,
+                            #         [data_point],  # Pass a list with only the current data_point
+                            #         model_type="Battle_Model",  # Assuming you're updating the Battle Model
+                            #         log=False
+                            #     )
                             
                             # Reset rewards/punishments
                             current_reward = 0
@@ -720,6 +848,9 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             # print(f"Port {port}: Saved game state.")
 
                         # Reset additional fields after processing
+                        if current_inside_window == 1.0:
+                            # Append data_point to planning_data_buffers
+                            planning_data_buffers[port].append(data_point)
                         current_player_health = None
                         current_enemy_health = None
                         current_player_position = None
@@ -728,9 +859,14 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         current_player_charge = None  # Reset charge
                         current_enemy_charge = None
 
+                        
+
                     else:
                         print(f"Port {port}: Not enough frames for exponential sampling. Required: {minimum_required_frames}, Available: {len(frame_buffers[port])}")
 
+
+
+                            
                 elif event == "reward" or event == "punishment":
                     try:
                         value = float(details.split(":")[1].strip())
@@ -762,9 +898,11 @@ async def train_model_online(port, data_buffer, model_type="Battle_Model", log=T
     if model_type == "Battle_Model":
         selected_model = battle_model
         selected_lock = battle_model_lock
-    else:
+    elif model_type == "Planning_Model":
         selected_model = planning_model
         selected_lock = planning_model_lock
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}")
 
     with selected_lock:
         selected_model.train()  # Switch to train mode
@@ -968,7 +1106,20 @@ async def train_model_online(port, data_buffer, model_type="Battle_Model", log=T
         optimizer.step()
 
         if log:
-            print(f"Port {port}: Training completed. Loss: {total_loss.item()}")
+            print(f"Port {port}: {model_type}'s training completed. Loss: {total_loss.item()}")
+
+        # Log metrics to W&B
+        # After computing outputs and losses
+        total_loss_value = total_loss.item()
+        policy_loss_value = policy_loss.item()
+        entropy_value = entropy.mean().item()
+        wandb.log({
+            f"{model_type}/total_loss": total_loss_value,
+            f"{model_type}/policy_loss": policy_loss_value,
+            f"{model_type}/entropy": entropy_value,
+            f"{model_type}/batch_size": batch_size,
+            f"{model_type}/port": port
+        })
 
         selected_model.eval()  # Switch back to eval mode
 
@@ -1154,6 +1305,24 @@ def compute_grid(position, grid_size=(6, 3)):
 
 # Main function to start instances and handle inputs
 async def main():
+
+    # Initialize W&B
+    wandb.init(
+        project="BattleAI",  # Replace with your project name
+        name=f"Run-{int(time.time())}",  # Unique run name
+        config={
+            "learning_rate": learning_rate,
+            "gamma": GAMMA,
+            "image_memory": IMAGE_MEMORY,
+            "temporal_charge": TEMPORAL_CHARGE,
+            "batch_size": config['strategy']['parameters']['window_size'],
+            # Add other hyperparameters as needed
+        }
+    )
+    
+    # Optionally, log the entire config.yaml
+    wandb.config.update(config)
+
     start_instances()
     print("Instances are running.")
     await asyncio.sleep(0.5)  # Allow some time for instances to initialize
@@ -1166,6 +1335,9 @@ async def main():
 
     #save the models
     save_models()
+
+    # Finish the W&B run
+    wandb.finish()
 
 def save_models():
     """
@@ -1189,6 +1361,7 @@ def save_models():
         print(f"Battle Model saved to {battle_checkpoint_path}")
     else:
         print("Battle Model is not loaded. Skipping save.")
+
 
 
 if __name__ == '__main__':
