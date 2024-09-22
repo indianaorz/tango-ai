@@ -1,6 +1,7 @@
 # utils.py
 import os
 import glob
+import re
 from datetime import datetime
 
 def get_root_dir():
@@ -29,6 +30,18 @@ def get_checkpoint_dir(model_type='planning', image_memory=1):
     os.makedirs(checkpoint_dir, exist_ok=True)
     return checkpoint_dir
 
+def extract_number_from_checkpoint(checkpoint_path):
+    """
+    Extracts the numerical part from the checkpoint filename.
+    Example: 'checkpoint_5.pt' -> 5
+    """
+    basename = os.path.basename(checkpoint_path)
+    match = re.search(r'checkpoint_(\d+)\.pt', basename)
+    if match:
+        return int(match.group(1))
+    else:
+        raise ValueError(f"Invalid checkpoint filename: {checkpoint_path}")
+    
 def get_latest_checkpoint(model_type='planning', image_memory=1):
     """
     Returns the path to the latest checkpoint for the specified model type and image memory.

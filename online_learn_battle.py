@@ -25,7 +25,7 @@ from threading import Lock
 from train import GameInputPredictor  # Import the model class
 from utils import (
     get_image_memory, get_exponential_sample,
-    get_exponental_amount, get_threshold, get_root_dir, position_to_grid, get_threshold_plan, inference_fps,get_latest_checkpoint , get_checkpoint_dir
+    get_exponental_amount, get_threshold, get_root_dir, position_to_grid, get_threshold_plan, inference_fps,get_latest_checkpoint , get_checkpoint_dir,extract_number_from_checkpoint
 )
 
 # Import necessary modules at the top
@@ -47,8 +47,17 @@ previous_inside_window_dict = defaultdict(float)
 planning_data_buffers = defaultdict(list)  # Stores data points during planning phase per port
 current_round_damage = defaultdict(float)  # Tracks damage dealt in the current round per port
 max_round_damage = defaultdict(float)  # Tracks max damage dealt in the current round
-planning_training_lock = Lock()  # Lock to ensure thread safety during planning training
 
+
+# Initialize locks for thread safety
+# Removed existing planning_model_lock and battle_model_lock as we'll have separate training locks
+training_planning_lock = Lock()
+training_battle_lock = Lock()
+
+inference_planning_lock = Lock()
+inference_battle_lock = Lock()
+
+latest_checkpoint_number = {'planning': 0, 'battle': 0}
 
 
 # Timer duration in seconds (can be set via environment variable or config)
@@ -57,9 +66,9 @@ CHIP_WINDOW_TIMER = float(os.getenv("CHIP_WINDOW_TIMER", 5.0))  # Default is 5 s
 
 
 # Initialize locks for thread safety
-planning_model_lock = Lock()
-battle_model_lock = Lock()
-
+# planning_model_lock = Lock()
+# battle_model_lock = Lock()
+MAX_CHECKPOINTS = 5
 force_skip_chip_window = True
 # Path to the Tango AppImage
 APP_PATH = "./dist/tango-x86_64-linux.AppImage"
@@ -73,7 +82,7 @@ learning_rate = 5e-5
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
-battle_count = 2
+battle_count = 8
 include_orig = False
 INSTANCES = []
 # Define the server addresses and ports for each instance
@@ -218,60 +227,104 @@ config = load_config()
 # Function to load the AI model
 
 # Function to load the AI models
+# Initialize Separate Models for Inference and Training
 def load_models(image_memory=1):
     """
-    Loads both Planning and Battle models from their respective checkpoints.
+    Loads separate Inference and Training models for both Planning and Battle.
     If checkpoints do not exist, initializes new models.
     Utilizes the configuration parameters.
     """
-    global planning_model, battle_model, optimizer_planning, optimizer_battle
-
+    global inference_planning_model, training_planning_model
+    global inference_battle_model, training_battle_model
+    global optimizer_planning, optimizer_battle
+    global latest_checkpoint_number  # Access the global variable
+    
     # Define the root directory
     root_dir = get_root_dir()
 
-    # Load Planning Model
-    planning_checkpoint_path = get_latest_checkpoint(model_type='planning', image_memory=image_memory)
+    # Load Training Planning Model
+    training_planning_checkpoint_path = get_latest_checkpoint(model_type='planning', image_memory=image_memory)
 
-    if planning_checkpoint_path:
-        planning_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
-        checkpoint_planning = torch.load(planning_checkpoint_path, map_location=device)
-        if 'model_state_dict' in checkpoint_planning:
-            planning_model.load_state_dict(checkpoint_planning['model_state_dict'])
-            print(f"Planning Model loaded from {planning_checkpoint_path}")
+    if training_planning_checkpoint_path:
+        training_planning_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
+        checkpoint_training_planning = torch.load(training_planning_checkpoint_path, map_location=device)
+        if 'model_state_dict' in checkpoint_training_planning:
+            training_planning_model.load_state_dict(checkpoint_training_planning['model_state_dict'])
+            print(f"Training Planning Model loaded from {training_planning_checkpoint_path}")
+            # Extract the checkpoint number
+            latest_number = extract_number_from_checkpoint(training_planning_checkpoint_path)
+            latest_checkpoint_number['planning'] = latest_number
         else:
-            raise KeyError("Planning checkpoint does not contain 'model_state_dict'")
+            raise KeyError("Training Planning checkpoint does not contain 'model_state_dict'")
     else:
-        # Initialize new Planning Model
-        planning_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
-        print("No Planning Model checkpoint found. Initialized a new Planning Model.")
+        # Initialize new Training Planning Model
+        training_planning_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
+        print("No Training Planning Model checkpoint found. Initialized a new Training Planning Model.")
 
-    planning_model.eval()
+    training_planning_model.train()  # Set to train mode
 
-    # Load Battle Model
-    battle_checkpoint_path = get_latest_checkpoint(model_type='battle', image_memory=image_memory)
+    # Initialize Inference Planning Model as a copy of Training Planning Model
+    inference_planning_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
+    inference_planning_model.load_state_dict(training_planning_model.state_dict())
+    inference_planning_model.eval()  # Set to eval mode
 
-    if battle_checkpoint_path:
-        battle_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
-        checkpoint_battle = torch.load(battle_checkpoint_path, map_location=device)
-        if 'model_state_dict' in checkpoint_battle:
-            battle_model.load_state_dict(checkpoint_battle['model_state_dict'])
-            print(f"Battle Model loaded from {battle_checkpoint_path}")
+    # Load Training Battle Model
+    training_battle_checkpoint_path = get_latest_checkpoint(model_type='battle', image_memory=image_memory)
+
+    if training_battle_checkpoint_path:
+        training_battle_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
+        checkpoint_training_battle = torch.load(training_battle_checkpoint_path, map_location=device)
+        if 'model_state_dict' in checkpoint_training_battle:
+            training_battle_model.load_state_dict(checkpoint_training_battle['model_state_dict'])
+            print(f"Training Battle Model loaded from {training_battle_checkpoint_path}")
+            # Extract the checkpoint number
+            latest_number = extract_number_from_checkpoint(training_battle_checkpoint_path)
+            latest_checkpoint_number['battle'] = latest_number
         else:
-            raise KeyError("Battle checkpoint does not contain 'model_state_dict'")
+            raise KeyError("Training Battle checkpoint does not contain 'model_state_dict'")
     else:
-        # Initialize new Battle Model
-        battle_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
-        print("No Battle Model checkpoint found. Initialized a new Battle Model.")
+        # Initialize new Training Battle Model
+        training_battle_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
+        print("No Training Battle Model checkpoint found. Initialized a new Training Battle Model.")
 
-    battle_model.eval()
+    training_battle_model.train()  # Set to train mode
 
-    # Initialize separate optimizers
-    optimizer_planning = optim.Adam(planning_model.parameters(), lr=learning_rate)
-    optimizer_battle = optim.Adam(battle_model.parameters(), lr=learning_rate)
+    # Initialize Inference Battle Model as a copy of Training Battle Model
+    inference_battle_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
+    inference_battle_model.load_state_dict(training_battle_model.state_dict())
+    inference_battle_model.eval()  # Set to eval mode
 
-    # Optionally, initialize separate GradScalers if using mixed precision
-    # scaler_planning = GradScaler()
-    # scaler_battle = GradScaler()
+    # Initialize separate optimizers for Training Models
+    optimizer_planning = optim.Adam(training_planning_model.parameters(), lr=learning_rate)
+    optimizer_battle = optim.Adam(training_battle_model.parameters(), lr=learning_rate)
+
+def get_new_checkpoint_path(model_type='battle', image_memory=1, battle_count=4):
+    """
+    Generates a new checkpoint path by incrementing the latest checkpoint number
+    by battle_count * 2.
+    """
+    global latest_checkpoint_number
+
+    # Current latest number for the model_type
+    current_number = latest_checkpoint_number.get(model_type, 0)
+
+    # Compute new number
+    new_number = current_number + (battle_count * 2)
+
+    # Define the checkpoint directory
+    checkpoint_dir = get_checkpoint_dir(model_type=model_type, image_memory=image_memory)
+
+    # Define the new checkpoint filename
+    checkpoint_filename = f'checkpoint_{new_number}.pt'
+
+    # Full checkpoint path
+    checkpoint_path = os.path.join(checkpoint_dir, checkpoint_filename)
+
+    # Update the latest_checkpoint_number
+    latest_checkpoint_number[model_type] = new_number
+
+    return checkpoint_path
+
 
 # Transform to preprocess images before inference
 transform = transforms.Compose([
@@ -288,7 +341,7 @@ load_models(IMAGE_MEMORY)
 
 
 # Define optimizer and loss function
-optimizer = optim.Adam(battle_model.parameters(), lr=learning_rate)
+optimizer = optim.Adam(training_battle_model.parameters(), lr=learning_rate)
 criterion = nn.BCEWithLogitsLoss(reduction='none')
 scaler = GradScaler()
 
@@ -362,7 +415,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
     Returns:
         dict: Command dictionary to send to the game instance.
     """
-    global planning_model, battle_model
+    global inference_planning_model, inference_battle_model
     global window_entry_time, previous_sent_dict, previous_inside_window_dict
 
     current_time = time.time()
@@ -382,7 +435,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
             print(f"Port {port}: Normalized Damage = {normalized_damage}")
             
             # Assign the normalized damage as the reward to all collected data points
-            with planning_training_lock:
+            with training_planning_lock:
                 for data_point in planning_data_buffers[port]:
                     data_point['reward'] = normalized_damage  # Assign positive reward
                 # Train the Planning Model with the collected data points
@@ -462,27 +515,16 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
 
     # Select model based on inside_window
     if inside_window.item() == 1.0:
-        selected_model = planning_model
-        selected_lock = planning_model_lock
+        selected_model = inference_planning_model
+        selected_lock = inference_planning_lock
         model_type = "Planning_Model"
-        # if(force_skip_chip_window):
-        #     if previous_sent == 0:
-        #         # Return hitting start and z at the same time
-        #         previous_sent = 1
-        #         return {'type': 'key_press', 'key': '0000000001000000'}
-        #     elif(previous_sent==1):
-        #         previous_sent = 2
-        #         return {'type': 'key_press', 'key': '0000000000001000'}
-        #     elif(previous_sent==2):
-        #         previous_sent = 0
-        #         return {'type': 'key_press', 'key': '0000000000000001'}
     else:
-        selected_model = battle_model
-        selected_lock = battle_model_lock
+        selected_model = inference_battle_model
+        selected_lock = inference_battle_lock
         model_type = "Battle_Model"
 
     # If there's no model, perform the random action
-    if planning_model is None or battle_model is None:
+    if selected_model is None:
         print(f"Gamma condition met (gamma={GAMMA}). Taking a random action.")
         random_command = generate_random_action()
         # If inside_window ignore inputs for A, S, or X
@@ -491,6 +533,9 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
                    random_command[15 - KEY_BIT_POSITIONS['S']] == '1' or
                    random_command[15 - KEY_BIT_POSITIONS['X']] == '1'):
                 random_command = generate_random_action()
+        #no pausing while not inside window
+        if inside_window.item() == 0.0 and random_command[15 - KEY_BIT_POSITIONS['RETURN']] == '1':
+            random_command = '0000000000000000'
         return {'type': 'key_press', 'key': random_command}
 
     # Acquire the appropriate lock before performing model inference
@@ -542,7 +587,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
             print(f"Error during inference with {model_type}: {e}")
             return {'type': 'key_press', 'key': '0000000000000000'}  # Return no key press on failure
 
-    # print(f"{model_type} predicted binary command: {predicted_input_str}")
+    # print(f"{predicted_input_str} from {model_type}")
     #never allow sending the pause command when out of the window
     if inside_window.item() == 0.0 and predicted_input_str[15 - KEY_BIT_POSITIONS['RETURN']] == '1':
         predicted_input_str = '0000000000000000'
@@ -556,8 +601,12 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
                    random_command[15 - KEY_BIT_POSITIONS['S']] == '1' or
                    random_command[15 - KEY_BIT_POSITIONS['X']] == '1'):
                 random_command = generate_random_action()
+        #no pausing while not inside window
+        if inside_window.item() == 0.0 and random_command[15 - KEY_BIT_POSITIONS['RETURN']] == '1':
+            random_command = '0000000000000000'
         return {'type': 'key_press', 'key': random_command}
     else:
+        #no pausing 0000000000001000 while not inside window
         return {'type': 'key_press', 'key': predicted_input_str}
 max_reward = 1
 max_punishment = 1
@@ -892,15 +941,17 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
         print(traceback.format_exc())
 
 async def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
-    global battle_model, planning_model, optimizer, scaler
+    global training_battle_model, training_planning_model, optimizer_battle, optimizer_planning
 
-    # Select the appropriate model and lock
+    # Select the appropriate training model and lock
     if model_type == "Battle_Model":
-        selected_model = battle_model
-        selected_lock = battle_model_lock
+        selected_model = training_battle_model
+        selected_lock = training_battle_lock
+        selected_optimizer = optimizer_battle
     elif model_type == "Planning_Model":
-        selected_model = planning_model
-        selected_lock = planning_model_lock
+        selected_model = training_planning_model
+        selected_lock = training_planning_lock
+        selected_optimizer = optimizer_planning
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
 
@@ -1015,7 +1066,7 @@ async def train_model_online(port, data_buffer, model_type="Battle_Model", log=T
         rewards_batch = torch.tensor(rewards_batch, dtype=torch.float32, device=device)  # Shape: (batch_size,)
 
          # Zero gradients
-        optimizer.zero_grad()
+        selected_optimizer.zero_grad()
 
         assert not torch.isnan(frames_batch).any(), "frames_batch contains NaN"
         assert not torch.isinf(frames_batch).any(), "frames_batch contains Inf"
@@ -1121,7 +1172,7 @@ async def train_model_online(port, data_buffer, model_type="Battle_Model", log=T
             f"{model_type}/port": port
         })
 
-        selected_model.eval()  # Switch back to eval mode
+        # selected_model.eval()  # Switch back to eval mode
 
 
 # Function to request the current screen image
@@ -1341,26 +1392,51 @@ async def main():
 
 def save_models():
     """
-    Saves the Planning and Battle models to their respective checkpoint directories.
-    Utilizes unique checkpoint paths to prevent overwriting.
+    Saves the Training Planning and Training Battle models to their respective checkpoint directories.
+    Utilizes unique checkpoint paths to prevent overwriting and maintains a maximum of MAX_CHECKPOINTS.
     """
-    from utils import get_new_checkpoint_path  # Ensure we import after defining functions
+    # Define the battle_count
+    global battle_count
 
-    # Save Planning Model
-    if 'planning_model' in globals() and planning_model is not None:
-        planning_checkpoint_path = get_new_checkpoint_path(model_type='planning', image_memory=IMAGE_MEMORY)
-        torch.save({'model_state_dict': planning_model.state_dict()}, planning_checkpoint_path)
-        print(f"Planning Model saved to {planning_checkpoint_path}")
-    else:
-        print("Planning Model is not loaded. Skipping save.")
+    def manage_checkpoints(checkpoint_dir):
+        """
+        Ensures that only the latest MAX_CHECKPOINTS are retained in the checkpoint directory.
+        Older checkpoints are deleted.
+        """
+        try:
+            checkpoints = sorted(
+                [f for f in os.listdir(checkpoint_dir) if f.endswith('.pt')],
+                key=lambda x: os.path.getmtime(os.path.join(checkpoint_dir, x)),
+                reverse=True
+            )
+            for ckpt in checkpoints[MAX_CHECKPOINTS:]:
+                os.remove(os.path.join(checkpoint_dir, ckpt))
+                print(f"Removed old checkpoint: {ckpt}")
+        except Exception as e:
+            print(f"Failed to manage checkpoints in {checkpoint_dir}: {e}")
 
-    # Save Battle Model
-    if 'battle_model' in globals() and battle_model is not None:
-        battle_checkpoint_path = get_new_checkpoint_path(model_type='battle', image_memory=IMAGE_MEMORY)
-        torch.save({'model_state_dict': battle_model.state_dict()}, battle_checkpoint_path)
-        print(f"Battle Model saved to {battle_checkpoint_path}")
+    # Save Training Planning Model
+    if 'training_planning_model' in globals() and training_planning_model is not None:
+        planning_checkpoint_path = get_new_checkpoint_path(model_type='planning', image_memory=IMAGE_MEMORY, battle_count=battle_count)
+        torch.save({'model_state_dict': training_planning_model.state_dict()}, planning_checkpoint_path)
+        print(f"Training Planning Model saved to {planning_checkpoint_path}")
+        # Manage checkpoints
+        planning_checkpoint_dir = get_checkpoint_dir(model_type='planning', image_memory=IMAGE_MEMORY)
+        manage_checkpoints(planning_checkpoint_dir)
     else:
-        print("Battle Model is not loaded. Skipping save.")
+        print("Training Planning Model is not loaded. Skipping save.")
+
+    # Save Training Battle Model
+    if 'training_battle_model' in globals() and training_battle_model is not None:
+        battle_checkpoint_path = get_new_checkpoint_path(model_type='battle', image_memory=IMAGE_MEMORY, battle_count=battle_count)
+        torch.save({'model_state_dict': training_battle_model.state_dict()}, battle_checkpoint_path)
+        print(f"Training Battle Model saved to {battle_checkpoint_path}")
+        # Manage checkpoints
+        battle_checkpoint_dir = get_checkpoint_dir(model_type='battle', image_memory=IMAGE_MEMORY)
+        manage_checkpoints(battle_checkpoint_dir)
+    else:
+        print("Training Battle Model is not loaded. Skipping save.")
+
 
 
 
