@@ -21,6 +21,8 @@ from collections import deque  # For frame buffering and data storage
 import yaml  # To load config
 import random
 from threading import Lock
+import pyautogui
+import subprocess
 
 from train import GameInputPredictor  # Import the model class
 from utils import (
@@ -1320,8 +1322,84 @@ def process_position(player_position, enemy_position, config):
     else:
         raise ValueError(f"Unknown position_type: {position_type}")
 
+import asyncio
+
+async def monitor_mouse_over_instances(instances, check_interval=0.5):
+    """
+    Monitors the mouse position and updates the 'is_player' flag for each instance.
+
+    Args:
+        instances (list): List of instance dictionaries.
+        check_interval (float): Time interval between checks in seconds.
+    """
+    while True:
+        mouse_x, mouse_y = get_mouse_position()
+        for instance in instances:
+            window_title = str(instance['port'])
+            geometry = await get_window_geometry_async(window_title)
+            if geometry:
+                x, y, width, height = geometry
+                if (x <= mouse_x <= x + width) and (y <= mouse_y <= y + height):
+                    if not instance['is_player']:
+                        print(f"Mouse is over '{window_title}'. Setting is_player to True.")
+                        instance['is_player'] = True
+                else:
+                    if instance['is_player']:
+                        print(f"Mouse is not over '{window_title}'. Setting is_player to False.")
+                        instance['is_player'] = False
+            else:
+                print(f"Window '{window_title}' not found.")
+        await asyncio.sleep(check_interval)
+
+
+import asyncio
+import subprocess
+
+async def get_window_geometry_async(window_title):
+    """
+    Asynchronously retrieves the geometry of a window based on its title using wmctrl.
+
+    Args:
+        window_title (str): The exact title of the window.
+
+    Returns:
+        tuple: (x, y, width, height) if window is found, else None.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        output = await loop.run_in_executor(
+            None, subprocess.check_output, ['wmctrl', '-lG']
+        )
+        output = output.decode()
+        for line in output.splitlines():
+            parts = line.split(None, 7)
+            if len(parts) < 7:
+                continue
+            win_title = parts[7]
+            if win_title == window_title:
+                x = int(parts[2])
+                y = int(parts[3])
+                width = int(parts[4])
+                height = int(parts[5])
+                return (x, y, width, height)
+    except subprocess.CalledProcessError as e:
+        print(f"wmctrl command failed: {e}")
+    return None
+
+
+
+def get_mouse_position():
+    """
+    Retrieves the current position of the mouse cursor.
+
+    Returns:
+        tuple: (x, y) coordinates of the mouse.
+    """
+    return pyautogui.position()
+
+
 # Function to run the AppImage with specific ROM, SAVE paths, and PORT
-def run_instance(rom_path, save_path, port, replay_path, init_link_code):
+def run_instance(rom_path, save_path, port, replay_path, init_link_code, name):
     env = env_common.copy()
     env["ROM_PATH"] = rom_path
     env["SAVE_PATH"] = save_path
@@ -1329,22 +1407,28 @@ def run_instance(rom_path, save_path, port, replay_path, init_link_code):
     env["PORT"] = str(port)
     if replay_path:
         env["REPLAY_PATH"] = replay_path
+    env["INSTANCE_NAME"] = str(port)  # Pass the instance name as an environment variable
 
-    print(f"Running instance with ROM_PATH: {rom_path}, SAVE_PATH: {save_path}, PORT: {port}")
+    print(f"Running instance '{name}' with ROM_PATH: {rom_path}, SAVE_PATH: {save_path}, PORT: {port}")
     try:
         subprocess.Popen([APP_PATH], env=env)
     except Exception as e:
-        print(f"Failed to start instance on port {port}: {e}")
+        print(f"Failed to start instance '{name}' on port {port}: {e}")
+
+
 
 # Function to start all instances
 def start_instances():
     for instance in INSTANCES:
+        #ensure each instance has a different name
+        # instance['name'] = f"{instance['name']}_{instance['port']}"
         run_instance(
             instance['rom_path'],
             instance['save_path'],
             instance['port'],
             instance.get('replay_path', None),
-            instance['init_link_code']
+            instance['init_link_code'],
+            instance['name']
         )
         time.sleep(0.5)  # Adjust sleep time based on app's boot time
 
@@ -1370,7 +1454,6 @@ def compute_grid(position, grid_size=(6, 3)):
 
 # Main function to start instances and handle inputs
 async def main():
-
     # Initialize W&B
     wandb.init(
         project="BattleAI",  # Replace with your project name
@@ -1388,21 +1471,34 @@ async def main():
     # Optionally, log the entire config.yaml
     wandb.config.update(config)
 
+    # Start game instances
     start_instances()
     print("Instances are running.")
     await asyncio.sleep(0.5)  # Allow some time for instances to initialize
 
-    tasks = [asyncio.create_task(handle_connection(instance, config)) for instance in INSTANCES]
+    # Start handling connections
+    connection_tasks = [asyncio.create_task(handle_connection(instance, config)) for instance in INSTANCES]
 
-    # Wait for all handle_connection tasks to complete
-    await asyncio.gather(*tasks)
+    # Start mouse monitoring task
+    monitor_task = asyncio.create_task(monitor_mouse_over_instances(INSTANCES))
+
+    # Wait for all connection tasks to complete
+    await asyncio.gather(*connection_tasks)
     print("All instances have completed. Exiting program.")
 
-    #save the models
+    # Cancel the monitor task gracefully
+    monitor_task.cancel()
+    try:
+        await monitor_task
+    except asyncio.CancelledError:
+        print("Mouse monitoring task cancelled.")
+
+    # Save the models
     save_models()
 
     # Finish the W&B run
     wandb.finish()
+
 
 def save_models():
     """
