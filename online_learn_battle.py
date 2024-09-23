@@ -61,7 +61,7 @@ latest_checkpoint_number = {'planning': 0, 'battle': 0}
 
 
 # Timer duration in seconds (can be set via environment variable or config)
-CHIP_WINDOW_TIMER = float(os.getenv("CHIP_WINDOW_TIMER", 5.0))  # Default is 5 seconds
+CHIP_WINDOW_TIMER = float(os.getenv("CHIP_WINDOW_TIMER", 10.0))  # Default is 5 seconds
 
 
 
