@@ -82,7 +82,7 @@ learning_rate = 5e-5
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
-battle_count = 8
+battle_count = 1
 include_orig = False
 INSTANCES = []
 # Define the server addresses and ports for each instance
@@ -110,6 +110,30 @@ INSTANCES = [
 
 # Paths
 SAVES_DIR = '/home/lee/Documents/Tango/saves'
+
+
+from collections import deque, defaultdict
+from threading import Lock
+
+# Shared queue to collect data points from all instances for batched inference
+batch_data_queue = deque()
+batch_data_lock = Lock()
+
+# Mapping from port to writer for sending commands back to instances
+port_writer_map = {}
+
+# Maximum batch size for inference
+MAX_BATCH_SIZE = battle_count*2  # Adjust based on GPU memory and performance
+
+# Inference interval (how often to perform batched inference)
+INFERENCE_INTERVAL = 1 / inference_fps()  # seconds, adjust as needed
+
+
+# Initialize the port_writer_map within the global scope
+port_writer_map = {}
+
+
+
 
 # Define a function to filter save files based on the ROM type
 def get_random_save(rom_path):
@@ -693,16 +717,11 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
 
                     current_round_damage[port] += float(screen_data.get("reward", 0))
 
-                    #input
-                    # print(f"Port {port}: Current input: {current_input}")
-                    #print rewards
-                    # print(f"Port {port}: Current reward: {current_reward}, Current punishment: {current_punishment}")
-
                     # Update sliding windows if temporal_charge is included
                     if TEMPORAL_CHARGE > 0:
                         player_charge_sliding_windows[port].append(current_player_charge)
                         enemy_charge_sliding_windows[port].append(current_enemy_charge)
-                    
+
                     # Process position based on configuration
                     position_tensor = process_position(current_player_position, current_enemy_position, config)
 
@@ -781,8 +800,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
 
                         # Only send commands if the instance is not a player
                         game_instance = next((inst for inst in INSTANCES if inst['port'] == port), None)
-                        if game_instance:# and not game_instance.get('is_player', False):
-
+                        if game_instance:
                             # Prepare data point
                             data_point = {
                                 'frames': sampled_frames,
@@ -796,36 +814,17 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 'current_enemy_charge': current_enemy_charge,
                                 'action': None  # Will be updated after sending the command
                             }
-                            if not game_instance.get('is_player', False):
-                                command = predict(
-                                    port,
-                                    sampled_frames,
-                                    position_tensor,
-                                    inside_window_tensor,
-                                    player_health_tensor,
-                                    enemy_health_tensor,
-                                    player_charge_seq,
-                                    enemy_charge_seq,
-                                    current_player_charge,
-                                    current_enemy_charge
-                                )
-                                #final check to make sure the action doesn't contain the pause button while outside the window
-                                if current_inside_window == 0 and command['key'][15 - KEY_BIT_POSITIONS['RETURN']] == '1': 
-                                    command['key'][15 - KEY_BIT_POSITIONS['RETURN']] = '0'
-                                data_point['action'] = command['key']  # Store the action
-                                # print(f"Port {port}: Sending command: {command['key']}")
-                                await send_input_command(writer, command, port)
-                            else:
-                                data_point['action'] = current_input  # Store the current input
-                                # print(f"Port {port}: Sending command: {current_input}")
-                            # print(command['key'])
 
-                            # Append data_point to buffer
-                            data_buffers[port].append(data_point)
-                            max_reward = 200#max(max_reward, current_reward)
-                            max_punishment = 200#max(max_punishment, current_punishment)
-                            # If we received a reward or punishment, perform online training
-                            # Assign reward to the current data_point
+                            # Enqueue data for batched inference
+                            with batch_data_lock:
+                                batch_data_queue.append({
+                                    'port': port,
+                                    'data_point': data_point
+                                })
+
+                            # Assign rewards
+                            max_reward = 200  # Example value
+                            max_punishment = 200  # Example value
                             if current_reward != 0 or current_punishment != 0:
                                 # Compute reward for the data_point
                                 reward_value = (current_reward / max_reward) - (current_punishment / max_punishment)
@@ -838,109 +837,43 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                     discounted_reward = reward_value * (gamma ** i)
                                     past_data_point['reward'] = discounted_reward
 
-                                # Train on the updated buffer
-                                # await train_model_online(
-                                #     port,
-                                #     list(data_buffers[port]),
-                                #     model_type="Battle_Model"
-                                # )
-                                asyncio.create_task(asyncio.to_thread(
-                                    train_model_online,
-                                    port,
-                                    list(data_buffers[port]),
-                                    model_type="Battle_Model"
-                                ))
+                                # Enqueue additional data for training
+                                asyncio.create_task(
+                                    train_model_online(
+                                        port,
+                                        list(data_buffers[port]),
+                                        model_type="Battle_Model"
+                                    )
+                                )
+
                                 # Reset rewards
                                 current_reward = 0
                                 current_punishment = 0
-                            # else:
-                            #     # Assign a small positive reward for frames with no damage taken
-                            #     # data_point['reward'] = 0.1  # Adjust the value as appropriate
 
-                            #     # Append data_point to buffer
-                            #     data_buffers[port].append(data_point)
+                            # Assign small rewards for charges
+                            if current_player_charge != 0:
+                                data_point['reward'] = 0.001
+                                asyncio.create_task(
+                                    train_model_online(
+                                        port,
+                                        [data_point],  # Pass a list with only the current data_point
+                                        model_type="Battle_Model",
+                                        log=False
+                                    )
+                                )
 
-                                
-                            # else:
-                            if current_player_charge != 0:# or current_punishment == 0:
-                                # print(f"Port {port}: Assigning reward: {0.1}")
-                                # Train on the current frame (data_point)
-                                if current_player_charge != 0:
-                                    data_point['reward'] = 0.001
-                                # else:
-                                #     data_point['reward'] = 0.001
+                            # Append data_point to planning_data_buffers if inside window
+                            if current_inside_window == 1.0:
+                                planning_data_buffers[port].append(data_point)
 
-                                asyncio.create_task(asyncio.to_thread(
-                                    train_model_online,
-                                    port,
-                                    [data_point],  # Pass a list with only the current data_point
-                                    model_type="Battle_Model",
-                                    log=False
-                                ))
-                            
-                            #if not moving, give a small punishment
-                            # elif current_input == '0000000000000000':
-                            #     print(f"Port {port}: Assigning punishment: {-1}")
-                            #     data_point['reward'] = -1
-                            #     await train_model_online(
-                            #         port,
-                            #         [data_point],  # Pass a list with only the current data_point
-                            #         model_type="Battle_Model",  # Assuming you're updating the Battle Model
-                            #         log=False
-                            #     )
-                            
-                            # Reset rewards/punishments
-                            current_reward = 0
-                            current_punishment = 0
-
-                        # Save the game state only if training_data_dir is set
-                        # if training_data_dir and current_input is not None:
-                        #     input_binary = current_input
-                            # save_game_state(
-                            #     image_path=image_path,
-                            #     input_binary=input_binary,
-                            #     reward=current_reward,
-                            #     punishment=current_punishment,
-                            #     training_data_dir=training_data_dir,
-                            #     player_health=current_player_health,
-                            #     enemy_health=current_enemy_health,
-                            #     player_position=current_player_position,
-                            #     enemy_position=current_enemy_position,
-                            #     inside_window=current_inside_window
-                            # )
-                            # print(f"Port {port}: Saved game state.")
-
-                        # Reset additional fields after processing
-                        if current_inside_window == 1.0:
-                            # Append data_point to planning_data_buffers
-                            planning_data_buffers[port].append(data_point)
-                        current_player_health = None
-                        current_enemy_health = None
-                        current_player_position = None
-                        current_enemy_position = None
-                        current_inside_window = None
-                        current_player_charge = None  # Reset charge
-                        current_enemy_charge = None
-
-                        
-
-                    else:
-                        print(f"Port {port}: Not enough frames for exponential sampling. Required: {minimum_required_frames}, Available: {len(frame_buffers[port])}")
-
-
-
-                            
-                elif event == "reward" or event == "punishment":
-                    try:
-                        value = float(details.split(":")[1].strip())
-                        if event == "reward":
-                            current_reward += value
-                        else:
-                            current_punishment -= value  # Negative for punishment
-                        print(f"Port {port}: Received {event}: {value}")
-
-                    except (IndexError, ValueError):
-                        print(f"Port {port}: Failed to parse {event} message: {details}")
+                            # Reset additional fields after processing
+                            current_player_health = None
+                            current_enemy_health = None
+                            current_player_position = None
+                            current_enemy_position = None
+                            current_inside_window = None
+                            current_player_charge = None  # Reset charge
+                            current_enemy_charge = None
 
                 elif event == "winner":
                     player_won = details.lower() == "true"
@@ -953,6 +886,283 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
         print(f"Port {port}: Failed to receive message: {e}")    
         print("Detailed error line:")
         print(traceback.format_exc())
+
+async def batch_inference_task():
+    while True:
+        await asyncio.sleep(INFERENCE_INTERVAL)
+        batch = []
+        with batch_data_lock:
+            while batch_data_queue and len(batch) < MAX_BATCH_SIZE:
+                batch.append(batch_data_queue.popleft())
+
+        if batch:
+            await perform_batched_inference(batch)
+
+async def monitor_window_timer(port):
+    while True:
+        await asyncio.sleep(1)  # Check every second
+        if port in window_entry_time:
+            elapsed_time = time.time() - window_entry_time[port]
+            if elapsed_time >= CHIP_WINDOW_TIMER:
+                if force_skip_chip_window:
+                    # Send the sequence of three key presses
+                    for key_binary in ['0000000001000000', '0000000000001000', '0000000000000001']:
+                        command = {
+                            'type': 'key_press',
+                            'key': key_binary
+                        }
+                        await send_input_command_to_port(port, command)
+                        await asyncio.sleep(0.5)  # Adjust delay between key presses as needed
+                # Reset the timer to prevent repeated triggers
+                window_entry_time.pop(port, None)
+                previous_sent_dict[port] = 0
+async def perform_batched_inference(batch):
+    global inference_planning_model, inference_battle_model
+
+    # Prepare batched inputs
+    frames_batch = []
+    position_batch = []
+    player_charge_seq_batch = []
+    enemy_charge_seq_batch = []
+    player_charge_batch = []
+    enemy_charge_batch = []
+    inside_window_batch = []
+    ports = []
+
+    # Collect all required data from the batch
+    for item in batch:
+        port = item['port']
+        data_point = item['data_point']
+        ports.append(port)
+
+        # Preprocess frames
+        preprocessed_frames = []
+        for img in data_point['frames']:
+            if img is None:
+                print(f"Port {port}: Encountered None in frames. Skipping this data point.")
+                preprocessed_frames = None
+                break
+            img = img.convert('RGB')
+            img = transform(img).unsqueeze(0).to(device)
+            preprocessed_frames.append(img)
+        
+        if preprocessed_frames is None:
+            continue  # Skip this data point
+
+        stacked_frames = torch.stack(preprocessed_frames, dim=2).squeeze(0)  # Shape: (3, D, H, W)
+        frames_batch.append(stacked_frames)
+
+        # Positions
+        if data_point['position_tensor'] is not None:
+            position_batch.append(data_point['position_tensor'].squeeze(0))
+        else:
+            position_batch.append(torch.zeros(4, dtype=torch.float32, device=device))  # Example padding
+
+        # Temporal charges
+        if data_point['player_charge_seq'] is not None:
+            player_charge_seq = data_point['player_charge_seq'].squeeze(0)
+            # Ensure the sequence is of length TEMPORAL_CHARGE by padding if necessary
+            if player_charge_seq.size(0) < TEMPORAL_CHARGE:
+                padding = torch.zeros(TEMPORAL_CHARGE - player_charge_seq.size(0), device=device)
+                player_charge_seq = torch.cat((padding, player_charge_seq))
+            player_charge_seq_batch.append(player_charge_seq)
+        else:
+            player_charge_seq_batch.append(torch.zeros(TEMPORAL_CHARGE, device=device))
+
+        if data_point['enemy_charge_seq'] is not None:
+            enemy_charge_seq = data_point['enemy_charge_seq'].squeeze(0)
+            if enemy_charge_seq.size(0) < TEMPORAL_CHARGE:
+                padding = torch.zeros(TEMPORAL_CHARGE - enemy_charge_seq.size(0), device=device)
+                enemy_charge_seq = torch.cat((padding, enemy_charge_seq))
+            enemy_charge_seq_batch.append(enemy_charge_seq)
+        else:
+            enemy_charge_seq_batch.append(torch.zeros(TEMPORAL_CHARGE, device=device))
+
+        # Current charges
+        if data_point['current_player_charge'] is not None:
+            player_charge_batch.append(
+                torch.tensor(data_point['current_player_charge'], dtype=torch.float32, device=device)
+            )
+        else:
+            player_charge_batch.append(torch.tensor(0.0, dtype=torch.float32, device=device))
+
+        if data_point['current_enemy_charge'] is not None:
+            enemy_charge_batch.append(
+                torch.tensor(data_point['current_enemy_charge'], dtype=torch.float32, device=device)
+            )
+        else:
+            enemy_charge_batch.append(torch.tensor(0.0, dtype=torch.float32, device=device))
+
+        # Inside window
+        inside_window = data_point['inside_window']
+        inside_window_batch.append(inside_window)
+
+    if not frames_batch:
+        return  # Nothing to infer
+
+    # Stack batches
+    frames_batch = torch.stack(frames_batch)  # Shape: (batch_size, 3, D, H, W)
+    position_batch = torch.stack(position_batch)  # Shape: (batch_size, position_dim)
+    player_charge_seq_batch = torch.stack(player_charge_seq_batch)  # Shape: (batch_size, TEMPORAL_CHARGE)
+    enemy_charge_seq_batch = torch.stack(enemy_charge_seq_batch)    # Shape: (batch_size, TEMPORAL_CHARGE)
+    player_charge_batch = torch.stack(player_charge_batch)          # Shape: (batch_size,)
+    enemy_charge_batch = torch.stack(enemy_charge_batch)          # Shape: (batch_size,)
+    inside_window_batch = torch.stack(inside_window_batch)        # Shape: (batch_size, 1)
+
+    # Determine which model to use for each data point based on inside_window
+    planning_indices = [i for i, iw in enumerate(inside_window_batch) if iw.item() == 1.0]
+    battle_indices = [i for i, iw in enumerate(inside_window_batch) if iw.item() == 0.0]
+
+    # Prepare dictionaries to hold data for each model
+    batched_data = {
+        "Planning_Model": {
+            "indices": planning_indices,
+            "frames": frames_batch[planning_indices],
+            "position": position_batch[planning_indices] if position_batch is not None else None,
+            "player_charge_seq": player_charge_seq_batch[planning_indices] if TEMPORAL_CHARGE > 0 else None,
+            "enemy_charge_seq": enemy_charge_seq_batch[planning_indices] if TEMPORAL_CHARGE > 0 else None,
+            "player_charge": player_charge_batch[planning_indices],
+            "enemy_charge": enemy_charge_batch[planning_indices],
+        },
+        "Battle_Model": {
+            "indices": battle_indices,
+            "frames": frames_batch[battle_indices],
+            "position": position_batch[battle_indices] if position_batch is not None else None,
+            "player_charge_seq": player_charge_seq_batch[battle_indices] if TEMPORAL_CHARGE > 0 else None,
+            "enemy_charge_seq": enemy_charge_seq_batch[battle_indices] if TEMPORAL_CHARGE > 0 else None,
+            "player_charge": player_charge_batch[battle_indices],
+            "enemy_charge": enemy_charge_batch[battle_indices],
+        }
+    }
+
+    predictions = {}
+
+    # Perform inference for Planning_Model
+    if batched_data["Planning_Model"]["indices"]:
+        try:
+            with inference_planning_lock:
+                with torch.no_grad():
+                    inputs = {
+                        'frames': batched_data["Planning_Model"]["frames"],
+                        'position': batched_data["Planning_Model"]["position"],
+                        'player_charge_seq': batched_data["Planning_Model"]["player_charge_seq"],
+                        'enemy_charge_seq': batched_data["Planning_Model"]["enemy_charge_seq"],
+                        'player_charge': batched_data["Planning_Model"]["player_charge"],
+                        'enemy_charge': batched_data["Planning_Model"]["enemy_charge"],
+                    }
+                    outputs = inference_planning_model(
+                        inputs['frames'],
+                        position=inputs.get('position'),
+                        player_charge=inputs.get('player_charge'),
+                        enemy_charge=inputs.get('enemy_charge'),
+                        player_charge_temporal=inputs.get('player_charge_seq'),
+                        enemy_charge_temporal=inputs.get('enemy_charge_seq')
+                    )
+                    probs = torch.sigmoid(outputs).cpu().numpy()
+                    command_threshold = get_threshold_plan()
+
+                    # Convert probabilities to binary input strings based on threshold
+                    predicted_inputs = (probs >= command_threshold).astype(int)
+                    predicted_input_strs = [''.join(map(str, pred)) for pred in predicted_inputs]
+                    predictions["Planning_Model"] = predicted_input_strs
+        except Exception as e:
+            print(f"Error during Planning_Model inference: {e}")
+            predictions["Planning_Model"] = ['0000000000000000'] * len(batched_data["Planning_Model"]["indices"])
+
+    # Perform inference for Battle_Model
+    if batched_data["Battle_Model"]["indices"]:
+        try:
+            with inference_battle_lock:
+                with torch.no_grad():
+                    inputs = {
+                        'frames': batched_data["Battle_Model"]["frames"],
+                        'position': batched_data["Battle_Model"]["position"],
+                        'player_charge_seq': batched_data["Battle_Model"]["player_charge_seq"],
+                        'enemy_charge_seq': batched_data["Battle_Model"]["enemy_charge_seq"],
+                        'player_charge': batched_data["Battle_Model"]["player_charge"],
+                        'enemy_charge': batched_data["Battle_Model"]["enemy_charge"],
+                    }
+                    outputs = inference_battle_model(
+                        inputs['frames'],
+                        position=inputs.get('position'),
+                        player_charge=inputs.get('player_charge'),
+                        enemy_charge=inputs.get('enemy_charge'),
+                        player_charge_temporal=inputs.get('player_charge_seq'),
+                        enemy_charge_temporal=inputs.get('enemy_charge_seq')
+                    )
+                    probs = torch.sigmoid(outputs).cpu().numpy()
+                    command_threshold = get_threshold()
+
+                    # Convert probabilities to binary input strings based on threshold
+                    predicted_inputs = (probs >= command_threshold).astype(int)
+                    predicted_input_strs = [''.join(map(str, pred)) for pred in predicted_inputs]
+                    predictions["Battle_Model"] = predicted_input_strs
+        except Exception as e:
+            print(f"Error during Battle_Model inference: {e}")
+            predictions["Battle_Model"] = ['0000000000000000'] * len(batched_data["Battle_Model"]["indices"])
+
+    # Send predictions back to respective instances with constraints
+    for model_type, predicted_input_strs in predictions.items():
+        if model_type == "Planning_Model":
+            indices = batched_data["Planning_Model"]["indices"]
+        else:
+            indices = batched_data["Battle_Model"]["indices"]
+
+        for i, port in enumerate([ports[idx] for idx in indices]):
+            command_key = predicted_input_strs[i]
+            inside_window = inside_window_batch[i].item()
+
+            # Apply constraints
+            if inside_window == 1.0:
+                # Inside window: ignore 'A', 'S', 'X'
+                # Assuming 'A' is at bit 8, 'S' is at bit 9, 'X' is at bit 1
+                command_list = list(command_key)
+                for key, bit_pos in KEY_BIT_POSITIONS.items():
+                    if key in ['A', 'S', 'X']:
+                        command_list[15 - bit_pos] = '0'
+                command_key = ''.join(command_list)
+            else:
+                # Outside window: prevent 'RETURN' (bit 3)
+                command_list = list(command_key)
+                if command_list[15 - KEY_BIT_POSITIONS['RETURN']] == '1':
+                    command_list[15 - KEY_BIT_POSITIONS['RETURN']] = '0'
+                command_key = ''.join(command_list)
+
+            # Create command dict
+            command = {
+                'type': 'key_press',
+                'key': command_key
+            }
+
+            # Send the command asynchronously
+            asyncio.create_task(send_input_command_to_port(port, command))
+
+
+async def send_input_command_to_port(port, command):
+    writer = port_writer_map.get(port)
+    if writer:
+        try:
+            await send_input_command(writer, command, port)
+            print(f"Port {port}: Sent command: {command['key']}")
+        except Exception as e:
+            print(f"Failed to send command to port {port}: {e}")
+    else:
+        print(f"No writer found for port {port}. Cannot send command.")
+
+# Existing send_input_command function remains the same
+async def send_input_command(writer, command, port=0):
+    try:
+        command_json = json.dumps(command)
+        writer.write(command_json.encode() + b'\n')
+        await writer.drain()
+        # print(f"Port {port}: Sent command: {command}")
+    except (ConnectionResetError, BrokenPipeError):
+        # Connection has been closed; handle gracefully
+        raise
+    except Exception as e:
+        print(f"Failed to send command on port {port}: {e}")
+        raise
+
 
 async def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
     global training_battle_model, training_planning_model, optimizer_battle, optimizer_planning
@@ -1210,55 +1420,45 @@ def save_winner_status(training_data_dir, player_won):
     except Exception as e:
         print(f"Failed to save winner status to {file_path}: {e}")
 
-# Function to send input command to a specific instance
-async def send_input_command(writer, command, port=0):
-    try:
-        command_json = json.dumps(command)
-        writer.write(command_json.encode() + b'\n')
-        await writer.drain()
-        # print(f"Port {port}: Sent command: {command}")
-    except (ConnectionResetError, BrokenPipeError):
-        # Connection has been closed; handle gracefully
-        raise
-    except Exception as e:
-        print(f"Failed to send command on port {port}: {e}")
-        raise
 # Other functions remain the same (handle_connection, process_position, train_model_online, etc.)
 async def handle_connection(instance, config):
     writer = None
     try:
         reader, writer = await asyncio.open_connection(instance['address'], instance['port'])
         print(f"Connected to {instance['name']} at {instance['address']}:{instance['port']}")
-
+        
+        # Map the port to its writer for later use
+        port_writer_map[instance['port']] = writer
+        
         training_data_dir = get_training_data_dir(instance.get('replay_path'))
-
+        
         # Start receiving messages
         receive_task = asyncio.create_task(receive_messages(reader, writer, instance['port'], training_data_dir, config))
-
+        
+        # Start the window timer monitoring task
+        timer_task = asyncio.create_task(monitor_window_timer(instance['port']))
+        
         # Set inference interval for higher frequency (e.g., 60 times per second)
         inference_interval = 1 / inference_fps()  # seconds
         # If the instance is doing a replay, adjust the interval
         if instance.get('replay_path'):
             inference_interval = inference_interval / 4.0
-
+        
         while not reader.at_eof():
             try:
                 # Request the current screen image
-                # print(f"Requesting screen image from {instance['name']} on port {instance['port']}")
                 await request_screen_image(writer)
-                # print(f"Requested screen image from {instance['name']} on port {instance['port']}")
                 await asyncio.sleep(inference_interval)  # Run inferences at the desired rate
-
             except (ConnectionResetError, BrokenPipeError):
                 print(f"Connection to {instance['name']} was reset. Stopping send loop.")
                 break  # Exit the loop
             except Exception as e:
                 print(f"An error occurred in connection to {instance['name']} on port {instance['port']}: {e}")
                 break  # Exit the loop on other exceptions
-
+        
         # Wait for the receive_messages task to finish
         await receive_task
-
+        await timer_task
     except ConnectionRefusedError:
         print(f"Failed to connect to {instance['name']} on port {instance['port']}. Is the application running?")
     except Exception as e:
@@ -1271,6 +1471,9 @@ async def handle_connection(instance, config):
             except Exception as e:
                 print(f"Error closing connection to {instance['name']} on port {instance['port']}: {e}")
         print(f"Connection to {instance['name']} on port {instance['port']} closed.")
+        # Remove the writer from the mapping
+        port_writer_map.pop(instance['port'], None)
+
 
 def process_position(player_position, enemy_position, config):
     """
@@ -1392,17 +1595,22 @@ async def main():
     print("Instances are running.")
     await asyncio.sleep(0.5)  # Allow some time for instances to initialize
 
-    tasks = [asyncio.create_task(handle_connection(instance, config)) for instance in INSTANCES]
+    # Start handling connections
+    connection_tasks = [asyncio.create_task(handle_connection(instance, config)) for instance in INSTANCES]
 
-    # Wait for all handle_connection tasks to complete
-    await asyncio.gather(*tasks)
+    # Start the batch inference task
+    inference_task = asyncio.create_task(batch_inference_task())
+
+    # Wait for all tasks to complete
+    await asyncio.gather(*connection_tasks, inference_task)
     print("All instances have completed. Exiting program.")
 
-    #save the models
+    # Save the models
     save_models()
 
     # Finish the W&B run
     wandb.finish()
+
 
 def save_models():
     """
