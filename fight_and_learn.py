@@ -811,6 +811,9 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         input_buffers[port].append(current_input)
 
 
+                    if current_player_health is not None and current_enemy_health is not None:
+                        final_health[port] = (current_player_health, current_enemy_health)
+                        # print(f"Port {port}: Final Health - Player: {current_player_health}, Enemy: {current_enemy_health}")
                     #input
                     # print(f"Port {port}: Current input: {current_input}")
                     #print rewards
@@ -1121,9 +1124,6 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
         print("Detailed error line:")
         print(traceback.format_exc())
     finally:
-        if current_player_health is not None and current_enemy_health is not None:
-            final_health[port] = (current_player_health, current_enemy_health)
-            print(f"Port {port}: Final Health - Player: {current_player_health}, Enemy: {current_enemy_health}")
 
         if writer:
             try:
