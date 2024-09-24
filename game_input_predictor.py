@@ -16,6 +16,11 @@ class GameInputPredictor(nn.Module):
         self.include_enemy_charge = input_features.get('include_enemy_charge', False)
         self.temporal_charge = input_features.get('temporal_charge', 0)
         self.include_temporal_charge = self.temporal_charge > 0
+        self.input_memory = input_features.get('input_memory', 0)
+        self.include_previous_inputs = self.input_memory > 0
+        self.health_memory_size = input_features.get('health_memory', 0)
+        self.include_health_memory = self.health_memory_size > 0
+
         
         # Image processing layers
         if self.include_image:
@@ -34,7 +39,7 @@ class GameInputPredictor(nn.Module):
                 nn.ReLU(),
             )
             self._to_linear = None
-            self._get_conv_output_shape((3, image_memory, 160, 240))  # Input shape based on (channels, depth, height, width)
+            self._get_conv_output_shape((3, image_memory, 160, 240))  # Adjust the input size as needed
             
             # LSTM layer to capture temporal dependencies in the flattened output
             self.lstm = nn.LSTM(input_size=self._to_linear, hidden_size=512, num_layers=1, batch_first=True)
@@ -78,6 +83,34 @@ class GameInputPredictor(nn.Module):
             self.player_charge_lstm = nn.LSTM(input_size=1, hidden_size=64, num_layers=1, batch_first=True)
             self.enemy_charge_lstm = nn.LSTM(input_size=1, hidden_size=64, num_layers=1, batch_first=True)
         
+        # Process previous inputs
+        if self.include_previous_inputs:
+            previous_inputs_size = self.input_memory * 16
+            additional_input_size += 128  # We'll reduce the size using an FC layer
+
+            # Define a fully connected layer to reduce previous inputs
+            self.previous_inputs_fc = nn.Sequential(
+                nn.Linear(previous_inputs_size, 128),
+                nn.ReLU(),
+                nn.Dropout(p=0.5)
+            )
+        else:
+            self.previous_inputs_fc = None
+
+         # Process health memory
+        if self.include_health_memory:
+            health_memory_input_size = self.health_memory_size * 2  # player and enemy health
+            additional_input_size += 128  # We'll reduce the size using an FC layer
+            
+            # Define a fully connected layer to reduce health memory
+            self.health_memory_fc = nn.Sequential(
+                nn.Linear(health_memory_input_size, 128),
+                nn.ReLU(),
+                nn.Dropout(p=0.5)
+            )
+        else:
+            self.health_memory_fc = None
+
         # Fully connected layers for additional inputs
         if additional_input_size > 0:
             self.additional_fc = nn.Sequential(
@@ -97,8 +130,6 @@ class GameInputPredictor(nn.Module):
         # If you plan to include other features directly, add their sizes here
         
         # Assuming 'input' is a bitstring of length 16
-        # If you want to predict the 'input', you might need to adjust this
-        # For now, assuming it's a multi-label classification with 16 classes
         self.fc_layers = nn.Sequential(
             nn.Linear(final_input_size, 256),
             nn.ReLU(),
@@ -115,15 +146,17 @@ class GameInputPredictor(nn.Module):
         print(f"Convolution output size: {output.shape}")
         print(f"Flattened size: {self._to_linear}")
 
-    def forward(self, x, position=None, player_charge=None, enemy_charge=None, player_charge_temporal=None, enemy_charge_temporal=None):
+    def forward(self, x, position=None, player_charge=None, enemy_charge=None,
+                player_charge_temporal=None, enemy_charge_temporal=None, previous_inputs=None,
+                health_memory=None):
         features = []
         
         if self.include_image:
             # Process image through convolutional layers
             x = self.conv_layers(x)  # Shape: (batch_size, 256, D_out, H_out, W_out)
-            x = x.view(x.size(0), -1, self._to_linear)  # Shape: (batch_size, 1, _to_linear)
-            x, _ = self.lstm(x)  # Shape: (batch_size, 1, 512)
-            x = x[:, -1, :]  # Shape: (batch_size, 512)
+            x = x.view(x.size(0), -1, self._to_linear)  # Shape: (batch_size, sequence_length, _to_linear)
+            x, _ = self.lstm(x)  # Shape: (batch_size, sequence_length, 512)
+            x = x[:, -1, :]  # Take the last time step
             x = self.image_fc(x)  # Shape: (batch_size, 256)
             features.append(x)
         
@@ -165,16 +198,37 @@ class GameInputPredictor(nn.Module):
                         enemy_charge = enemy_charge.unsqueeze(1)  # Shape: (batch_size, 1)
                     additional.append(enemy_charge)
 
-            
+            else:
+                # Process scalar charges if temporal_charge is not included
+                if self.include_player_charge and player_charge is not None:
+                    if player_charge.dim() == 1:
+                        player_charge = player_charge.unsqueeze(1)  # Shape: (batch_size, 1)
+                    additional.append(player_charge)
+
+                if self.include_enemy_charge and enemy_charge is not None:
+                    if enemy_charge.dim() == 1:
+                        enemy_charge = enemy_charge.unsqueeze(1)  # Shape: (batch_size, 1)
+                    additional.append(enemy_charge)
+
+            # Process previous inputs
+            if self.include_previous_inputs and previous_inputs is not None:
+                previous_inputs_features = self.previous_inputs_fc(previous_inputs)
+                additional.append(previous_inputs_features)
+
+            # Process health memory
+            if self.include_health_memory and health_memory is not None:
+                health_memory_features = self.health_memory_fc(health_memory)
+                additional.append(health_memory_features)
+
             # Concatenate all additional features
             if additional:
-                additional = torch.cat(additional, dim=1)  # Shape: (batch_size, 134)
-                additional = self.additional_fc(additional)   # Shape: (batch_size, 128)
+                additional = torch.cat(additional, dim=1)
+                additional = self.additional_fc(additional)
                 features.append(additional)
         
         # Concatenate all features
         if features:
-            combined = torch.cat(features, dim=1)  # Shape: (batch_size, 384) if image is included
+            combined = torch.cat(features, dim=1)
         else:
             raise ValueError("No features to combine. Check configuration.")
         

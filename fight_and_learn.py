@@ -50,9 +50,11 @@ previous_sent_dict = defaultdict(int)
 previous_inside_window_dict = defaultdict(float)
 
 # Global dictionaries for Planning Model
-planning_data_buffers = defaultdict(list)  # Stores data points during planning phase per port
+
 current_round_damage = defaultdict(float)  # Tracks damage dealt in the current round per port
 max_round_damage = defaultdict(float)  # Tracks max damage dealt in the current round
+
+final_health = defaultdict(lambda: (0.0, 0.0))  # {port: (player_health, enemy_health)}
 
 
 # Initialize locks for thread safety
@@ -424,7 +426,13 @@ else:
 
 # Initialize data buffers for online learning
 window_size = config['strategy']['parameters']['window_size']
-data_buffers = {instance['port']: deque(maxlen=window_size) for instance in INSTANCES}
+# Initialize data buffers for online learning without window_size limit
+data_buffers = {instance['port']: [] for instance in INSTANCES}
+
+# Global dictionaries for Planning Model
+# Keep all data points as long as their actions aren't all zeros
+planning_data_buffers = defaultdict(list)  # Stores data points during planning phase per port
+
 
 # Function to convert integer to a 16-bit binary string
 def int_to_binary_string(value):
@@ -526,28 +534,31 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
             print(f"Port {port}: Normalized Damage = {normalized_damage}")
             
             # Assign the normalized damage as the reward to all collected data points
-            with training_planning_lock:
-                for data_point in planning_data_buffers[port]:
+            # with training_planning_lock:
+            for data_point in planning_data_buffers[port]:
+                if not data_point.get('assigned_reward', False):
                     data_point['reward'] = normalized_damage  # Assign positive reward
-                # Train the Planning Model with the collected data points
-                if planning_data_buffers[port]:
-                    # asyncio.create_task(asyncio.to_thread(
-                    #     train_model_online,
-                    #     port,
-                    #     planning_data_buffers[port],
-                    #     model_type="Planning_Model"
-                    # ))
-                    training_queue.put((port, list(data_buffers[port]), "Planning_Model", True))
-                    print(f"Port {port}: Submitted {len(planning_data_buffers[port])} data points for Planning Model training.")
-                # Clear the buffer after training
-                planning_data_buffers[port].clear()
-                current_round_damage[port] = 0.0
+                    # Train the Planning Model with the collected data points
+                    if planning_data_buffers[port]:
+                        # asyncio.create_task(asyncio.to_thread(
+                        #     train_model_online,
+                        #     port,
+                        #     planning_data_buffers[port],
+                        #     model_type="Planning_Model"
+                        # ))
+                        # training_queue.put((port, list(data_buffers[port]), "Planning_Model", True))
+                        print(f"Port {port}: Submitted {len(planning_data_buffers[port])} data points for Planning Model training.")
+                    # Clear the buffer after training
+                    # planning_data_buffers[port].clear()
+                    data_point['assigned_reward']=True
+                    current_round_damage[port] = 0.0
 
         window_entry_time[port] = current_time
         previous_inside_window_dict[port] = 1.0
         current_round_damage[port] = 0.0
         # Ensure the planning data buffer is empty
-        planning_data_buffers[port].clear()
+        # planning_data_buffers[port].clear()
+        # data_point['assigned_reward']=True
         print(f"Port {port}: Entered window. Timer started.")
 
     # If inside the window, check if the timer has expired
@@ -968,6 +979,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
 
                             # Append data_point to buffer
                             data_buffers[port].append(data_point)
+                           
                             max_reward = 200#max(max_reward, current_reward)
                             max_punishment = 200#max(max_punishment, current_punishment)
                             # If we received a reward or punishment, perform online training
@@ -976,13 +988,21 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 # Compute reward for the data_point
                                 reward_value = (current_reward / max_reward) - (current_punishment / max_punishment)
                                 print(f"Port {port}: Assigning reward: {reward_value}")
-                                data_point['reward'] = reward_value
+
+                                #assign datapoint if not assigned
+                                if 'reward' not in data_buffers[port][-1]:
+                                    data_buffers[port][-1]['reward'] = reward_value
+                                else:
+                                    data_point['reward'] += reward_value    
 
                                 # Apply discounted rewards to past data points
                                 gamma = 0.99  # Discount factor
                                 for i, past_data_point in enumerate(reversed(data_buffers[port])):
                                     discounted_reward = reward_value * (gamma ** i)
-                                    past_data_point['reward'] = discounted_reward
+                                    if 'reward' in past_data_point:
+                                        past_data_point['reward'] += discounted_reward
+                                    else:
+                                        past_data_point['reward'] = discounted_reward
 
                                 # Train on the updated buffer
                                 # await train_model_online(
@@ -997,10 +1017,26 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 #     model_type="Battle_Model"
                                 # ))
 
-                                training_queue.put((port, list(data_buffers[port]), "Battle_Model", True))
+                                # training_queue.put((port, list(data_buffers[port]), "Battle_Model", True))
                                 # Reset rewards
                                 current_reward = 0
                                 current_punishment = 0
+
+                            # Pruning Logic Starts Here
+                            # Remove data points older than window_size that have no reward assigned
+                            if len(data_buffers[port]) > window_size:
+                                # Calculate how many data points to prune
+                                num_to_prune = len(data_buffers[port]) - window_size
+                                pruned_count = 0
+                                i = 0
+                                while pruned_count < num_to_prune and i < len(data_buffers[port]):
+                                    if 'reward' not in data_buffers[port][i]:
+                                        del data_buffers[port][i]
+                                        pruned_count += 1
+                                    else:
+                                        i += 1
+                                # if pruned_count > 0:
+                                #     print(f"Port {port}: Pruned {pruned_count} data points from data_buffers.")
                             # else:
                             #     # Assign a small positive reward for frames with no damage taken
                             #     # data_point['reward'] = 0.1  # Adjust the value as appropriate
@@ -1078,30 +1114,24 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
 
 
 
-                            
-                elif event == "reward" or event == "punishment":
-                    try:
-                        value = float(details.split(":")[1].strip())
-                        if event == "reward":
-                            current_reward += value
-                        else:
-                            current_punishment -= value  # Negative for punishment
-                        print(f"Port {port}: Received {event}: {value}")
-
-                    except (IndexError, ValueError):
-                        print(f"Port {port}: Failed to parse {event} message: {details}")
-
-                elif event == "winner":
-                    player_won = details.lower() == "true"
-                    print(f"Port {port}: Received winner message: Player won = {player_won}")
-                    save_winner_status(training_data_dir, player_won)
-
     except (ConnectionResetError, BrokenPipeError):
         print(f"Port {port}: Connection was reset by peer, closing receiver.")
     except Exception as e:
         print(f"Port {port}: Failed to receive message: {e}")    
         print("Detailed error line:")
         print(traceback.format_exc())
+    finally:
+        if current_player_health is not None and current_enemy_health is not None:
+            final_health[port] = (current_player_health, current_enemy_health)
+            print(f"Port {port}: Final Health - Player: {current_player_health}, Enemy: {current_enemy_health}")
+
+        if writer:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception as e:
+                print(f"Error closing connection to {game_instance['name']} on port {port}: {e}")
+        print(f"Connection to {game_instance['name']} on port {port} closed.")
         
 def inputs_to_tensor(inputs_list, input_memory_size):
     """
@@ -1133,62 +1163,54 @@ def inputs_to_tensor(inputs_list, input_memory_size):
 
 from tqdm import tqdm
 import traceback
+data_buffers_locks = {instance['port']: Lock() for instance in INSTANCES}
 
-def training_thread_function(batch_size=4, max_wait_time=1.0):
+def training_thread_function(batch_size=64, max_wait_time=1.0):
     """
-    Training thread that processes training data in batches.
+    Training thread that processes training data in batches from each port's data buffer.
     
     Args:
         batch_size (int): Number of training data items per batch.
-        max_wait_time (float): Maximum time (in seconds) to wait for a batch to fill.
+        max_wait_time (float): Maximum time (in seconds) to wait before processing a batch.
     """
     global training_battle_model, training_planning_model, optimizer_battle, optimizer_planning
-    # Initialize the progress bar for the total size of the training_queue
-    progress_bar = tqdm(total=training_queue.qsize(), desc="Training Progress", unit="batch")
     
-    batch = []
-    last_batch_time = time.time()
+    # Initialize the progress bar
+    progress_bar = tqdm(desc="Training Progress", unit="batch")
     
     while True:
-        try:
-            # Calculate remaining time for the current batch
-            remaining_time = max_wait_time - (time.time() - last_batch_time)
-            if remaining_time <= 0:
-                remaining_time = 0.1  # Prevent negative timeout
-            
-            # Attempt to get a training data item with a timeout
-            training_data = training_queue.get(timeout=remaining_time)
-            if training_data is None:
-                # If None is received, it's a signal to stop the thread.
-                if batch:
-                    # Process the remaining batch
-                    train_model_online_batch(batch)
-                    progress_bar.update(len(batch))
-                break
-            batch.append(training_data)
-            training_queue.task_done()
-            last_batch_time = time.time()
-            
-            # If batch is full, process it
-            if len(batch) >= batch_size:
-                train_model_online_batch(batch)
-                progress_bar.update(len(batch))
-                batch = []  # Reset batch
+        start_time = time.time()
+        any_data_processed = False
+        
+        for port, buffer in data_buffers.items():
+            lock = data_buffers_locks[port]
+            with lock:
+                if len(buffer) == 0:
+                    continue  # No data to process for this port
                 
-        except queue.Empty:
-            # If timeout occurs, process whatever is in the batch
-            if batch:
-                train_model_online_batch(batch)
-                progress_bar.update(len(batch))
-                batch = []
-            continue
-        except Exception as e:
-            print(f"Error in training thread: {e}")
-            traceback.print_exc()
-    
-    # Close the progress bar
-    progress_bar.close()
-
+                # Determine the number of data points to process
+                current_batch_size = min(batch_size, len(buffer))
+                batch_data = buffer[:current_batch_size]
+                
+                # Remove the processed data points from the buffer
+                del buffer[:current_batch_size]
+            
+            if batch_data:
+                any_data_processed = True
+                # Perform training on the batch_data
+                train_model_online(port, batch_data, model_type="Battle_Model", log=True)
+                progress_bar.update(1)
+        
+        if not any_data_processed:
+            # If no data was processed, wait for a short duration
+            elapsed = time.time() - start_time
+            sleep_time = max_wait_time - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+        
+        # Stop once all the data finished being processed
+        if all(len(buffer) == 0 for buffer in data_buffers.values()):
+            break
 
 def train_model_online_batch(batch):
     """
@@ -1226,9 +1248,9 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
         selected_model.train()  # Switch to train mode
 
         batch_size = len(data_buffer)
-        if batch_size == 0:
-            print(f"Port {port}: No data to train on.")
-            return
+        # if batch_size == 0:
+        #     print(f"Port {port}: No data to train on.")
+        #     return
 
         # Prepare batches
         frames_batch = []
@@ -1451,9 +1473,9 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
         torch.nn.utils.clip_grad_norm_(selected_model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        if log:
-            print(f"{model_type} learning from Port {port}:\nLoss: {total_loss.item()}")
-            #log remaining items to train on
+        # if log:
+        #     print(f"{model_type} learning from Port {port}:\nLoss: {total_loss.item()}")
+        #     #log remaining items to train on
 
         # Log metrics to W&B
         # After computing outputs and losses
@@ -1769,6 +1791,33 @@ async def main():
     # Wait for all connection tasks to complete
     await asyncio.gather(*connection_tasks)
     print("All instances have completed. Exiting program.")
+
+    # Determine winners and losers based on final_health
+    print("Processing final health to determine winners and losers.")
+    for port, (player_health, enemy_health) in final_health.items():
+        if player_health > enemy_health:
+            # Winner: Add +1 to all rewards
+            with data_buffers_locks[port]:
+                for data_point in data_buffers[port]:
+                    data_point['reward'] += 1
+                for data_point in planning_data_buffers[port]:
+                    data_point['reward'] += 1
+            print(f"Port {port}: Winner. Added +1 reward to all data points.")
+        else:
+            # Loser: Add -1 to all rewards
+            with data_buffers_locks[port]:
+                for data_point in data_buffers[port]:
+                    #make sure the reward exists
+                    if 'reward' in data_point:
+                        data_point['reward'] -= 1
+                    else:
+                        data_point['reward'] = -1
+                for data_point in planning_data_buffers[port]:
+                    if 'reward' in data_point:
+                        data_point['reward'] -= 1
+                    else:
+                        data_point['reward'] = -1
+            print(f"Port {port}: Loser. Added -1 reward to all data points.")
 
      # Start the training thread... testing to see if we can do this after the instances have been closed
     training_thread = threading.Thread(target=training_thread_function, daemon=True)

@@ -47,7 +47,7 @@ def run_battle_instances(gamma):
         
         # Run online_learn_battle.py as a subprocess
         # You can adjust the command as needed, e.g., run multiple instances if required
-        subprocess.run(["python3", "online_learn_battle.py"], check=True, env=env)
+        subprocess.run(["python3", "fight_and_learn.py"], check=True, env=env)
     except subprocess.CalledProcessError as e:
         print(f"Battle instances terminated with an error: {e}")
     except Exception as e:

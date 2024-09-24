@@ -541,61 +541,61 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
 
         // Define the directory where training data will be saved
         // only do if replay path is set
-        if !replay_path.is_empty() {
-            //split replay path on the last /
-            let filename_path = replay_path.split("/").last().unwrap();
-            //remove everything after .
-            let path = format!("/home/lee/TANGO/training_data/{}", filename_path.split(".").next().unwrap());
-            let training_data_dir = Path::new(&path);
+        // if !replay_path.is_empty() {
+        //     //split replay path on the last /
+        //     let filename_path = replay_path.split("/").last().unwrap();
+        //     //remove everything after .
+        //     let path = format!("/home/lee/TANGO/training_data/{}", filename_path.split(".").next().unwrap());
+        //     let training_data_dir = Path::new(&path);
 
-            // Retrieve the screen image
-            // only save the screen image once every 60 frames
-            let current_frame_count = get_frame_count();
-            if current_frame_count % 2 == 0 {
-                if let Some(image) = get_screen_image() {
-                    // Convert Color32 slice to raw bytes (RGBA)
-                    let rgba_bytes: Vec<u8> = image.pixels.iter().flat_map(|pixel| {
-                        vec![pixel.r(), pixel.g(), pixel.b(), pixel.a()]
-                    }).collect();
+        //     // Retrieve the screen image
+        //     // only save the screen image once every 60 frames
+        //     let current_frame_count = get_frame_count();
+        //     if current_frame_count % 2 == 0 {
+        //         if let Some(image) = get_screen_image() {
+        //             // Convert Color32 slice to raw bytes (RGBA)
+        //             let rgba_bytes: Vec<u8> = image.pixels.iter().flat_map(|pixel| {
+        //                 vec![pixel.r(), pixel.g(), pixel.b(), pixel.a()]
+        //             }).collect();
 
-                    // Encode image to PNG format
-                    let mut png_data = Vec::new();
-                    let encoder = PngEncoder::new(&mut png_data);
-                    encoder.write_image(
-                        &rgba_bytes,
-                        image.size[0] as u32,
-                        image.size[1] as u32,
-                        ColorType::Rgba8.into(),
-                    ).expect("Failed to encode image");
+        //             // Encode image to PNG format
+        //             let mut png_data = Vec::new();
+        //             let encoder = PngEncoder::new(&mut png_data);
+        //             encoder.write_image(
+        //                 &rgba_bytes,
+        //                 image.size[0] as u32,
+        //                 image.size[1] as u32,
+        //                 ColorType::Rgba8.into(),
+        //             ).expect("Failed to encode image");
 
-                    // Save the game state locally
-                    let inputString = match get_local_input() {
-                        Some(input) => format!("{:016b}", input),
-                        None => "0000000000000000".to_string(), // or handle None case appropriately
-                    };
-                    println!("Local input: {:?}", inputString);
-                    if let Err(e) = save_game_state(
-                        &png_data,
-                        &inputString,
-                        get_player_health(),
-                        get_enemy_health(),
-                        get_player_position(),
-                        get_enemy_position(),
-                        get_is_player_inside_window(),
-                        get_rewards().last().cloned(),
-                        get_punishments().last().cloned(),
-                        get_player_charge(),
-                        get_enemy_charge(),
-                        training_data_dir,
-                    ) {
-                        println!("Failed to save game state: {:?}", e);
-                    }
-                    //clear rewards and punishments
-                    clear_rewards();
-                    clear_punishments();
-                }
-            }
-        }
+        //             // Save the game state locally
+        //             let inputString = match get_local_input() {
+        //                 Some(input) => format!("{:016b}", input),
+        //                 None => "0000000000000000".to_string(), // or handle None case appropriately
+        //             };
+        //             // println!("Local input: {:?}", inputString);
+        //             if let Err(e) = save_game_state(
+        //                 &png_data,
+        //                 &inputString,
+        //                 get_player_health(),
+        //                 get_enemy_health(),
+        //                 get_player_position(),
+        //                 get_enemy_position(),
+        //                 get_is_player_inside_window(),
+        //                 get_rewards().last().cloned(),
+        //                 get_punishments().last().cloned(),
+        //                 get_player_charge(),
+        //                 get_enemy_charge(),
+        //                 training_data_dir,
+        //             ) {
+        //                 // println!("Failed to save game state: {:?}", e);
+        //             }
+        //             //clear rewards and punishments
+        //             clear_rewards();
+        //             clear_punishments();
+        //         }
+        //     }
+        // }
 
         // Handling local inputs
         let local_inputs = get_local_input();
@@ -717,49 +717,49 @@ fn save_game_state(
     training_data_dir: &Path,
 ) -> Result<()> {
     // Convert to absolute path
-    let absolute_path = env::current_dir()?.join(training_data_dir);
-    println!("Saving game state to directory: {:?}", absolute_path);
+    // let absolute_path = env::current_dir()?.join(training_data_dir);
+    // println!("Saving game state to directory: {:?}", absolute_path);
 
-    // Ensure the training_data_dir exists
-    fs::create_dir_all(&absolute_path)?;
+    // // Ensure the training_data_dir exists
+    // fs::create_dir_all(&absolute_path)?;
 
-    // Create a timestamp for the filename
-    let start = SystemTime::now();
-    let since_the_epoch = start.duration_since(UNIX_EPOCH)?;
-    let timestamp = since_the_epoch.as_millis();
+    // // Create a timestamp for the filename
+    // let start = SystemTime::now();
+    // let since_the_epoch = start.duration_since(UNIX_EPOCH)?;
+    // let timestamp = since_the_epoch.as_millis();
 
-    // Define the image and JSON filenames
-    let image_filename = format!("{}.png", timestamp);
-    let json_filename = format!("{}.json", timestamp);
+    // // Define the image and JSON filenames
+    // let image_filename = format!("{}.png", timestamp);
+    // let json_filename = format!("{}.json", timestamp);
 
-    let image_path = training_data_dir.join(&image_filename);
-    let json_path = training_data_dir.join(&json_filename);
+    // let image_path = training_data_dir.join(&image_filename);
+    // let json_path = training_data_dir.join(&json_filename);
 
-    // Save the image
-    fs::write(&image_path, image_bytes)?;
+    // // Save the image
+    // fs::write(&image_path, image_bytes)?;
 
-    let reward = reward.map(|reward| reward.damage).unwrap_or(0);
-    let punishment = punishment.map(|punishment| punishment.damage).unwrap_or(0);
-    // Create the GameState instance
-    let game_state = GameState {
-        image_path: image_path.to_string_lossy().to_string(),
-        input: input_binary.to_string(),
-        player_health,
-        enemy_health,
-        player_position,
-        enemy_position,
-        inside_window,
-        reward,
-        punishment,
-        player_charge,
-        enemy_charge,
-    };
+    // let reward = reward.map(|reward| reward.damage).unwrap_or(0);
+    // let punishment = punishment.map(|punishment| punishment.damage).unwrap_or(0);
+    // // Create the GameState instance
+    // let game_state = GameState {
+    //     image_path: image_path.to_string_lossy().to_string(),
+    //     input: input_binary.to_string(),
+    //     player_health,
+    //     enemy_health,
+    //     player_position,
+    //     enemy_position,
+    //     inside_window,
+    //     reward,
+    //     punishment,
+    //     player_charge,
+    //     enemy_charge,
+    // };
 
-    // Serialize the GameState to pretty JSON
-    let json_data = to_string_pretty(&game_state)?;
+    // // Serialize the GameState to pretty JSON
+    // let json_data = to_string_pretty(&game_state)?;
 
-    // Write the JSON data to the file
-    fs::write(&json_path, json_data)?;
+    // // Write the JSON data to the file
+    // fs::write(&json_path, json_data)?;
 
     Ok(())
 }
@@ -858,7 +858,7 @@ struct ScreenImageDetails {
     enemy_health: u16,
     player_position: Option<(u16, u16)>,
     enemy_position: Option<(u16, u16)>,
-    inside_window: Option<bool>,
+    inside_window: bool,
     player_charge: u16,
     enemy_charge: u16,
     reward: u16,
@@ -919,7 +919,9 @@ async fn handle_tcp_client(
                                                 let enemy_health = get_enemy_health();
                                                 let player_position = get_player_position();
                                                 let enemy_position = get_enemy_position();
-                                                let inside_window = get_is_player_inside_window();
+                                                // let inside_window = get_is_player_inside_window();
+                                                //if inside window is none return false
+                                                let inside_window = get_is_player_inside_window().unwrap_or(false);
                                                 // Create ScreenImageDetails
                                                 let screen_details = ScreenImageDetails {
                                                     image: encoded_image,

@@ -15,7 +15,7 @@ use std::fs::File;
 
 use std::sync::LazyLock;
 
-pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0 )* 2.0;
+pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0);//* 2.0;
 
 // session.rs
 use crate::global::{add_punishment, add_reward, clear_punishments, clear_rewards, get_frame_count,set_frame_count, get_player_health_index, set_enemy_health, set_enemy_position, set_is_player_inside_window, set_local_input, set_player_health, set_player_health_index, set_player_position, set_winner, set_player_charge, set_enemy_charge, RewardPunishment};
@@ -1125,6 +1125,8 @@ impl Session {
                     // Retrieve the health addresses
                     let player_health_addr = *PLAYER_HEALTH_ADDRESS.lock();
                     let opponent_health_addr = *OPPONENT_HEALTH_ADDRESS.lock();
+                    set_player_charge(core_ref.raw_read_8(0x02036948, -1) as u16);
+                    set_enemy_charge(core_ref.raw_read_8(0x02036A10, -1) as u16);
 
                     // Ensure the addresses are set before calling `display_health_state`
                     if let (Some(player_addr), Some(opponent_addr)) = (player_health_addr, opponent_health_addr) {
