@@ -1799,9 +1799,15 @@ async def main():
             # Winner: Add +1 to all rewards
             with data_buffers_locks[port]:
                 for data_point in data_buffers[port]:
-                    data_point['reward'] += 1
+                    if 'reward' in data_point:
+                        data_point['reward'] += 1
+                    else:
+                        data_point['reward'] = 1
                 for data_point in planning_data_buffers[port]:
-                    data_point['reward'] += 1
+                    if 'reward' in data_point:
+                        data_point['reward'] += 1
+                    else:
+                        data_point['reward'] = 1
             print(f"Port {port}: Winner. Added +1 reward to all data points.")
         else:
             # Loser: Add -1 to all rewards
