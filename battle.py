@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 import numpy as np  # Import numpy for type conversion if needed
 from train import GameInputPredictor  # Import the model class
 from utils import (
-    get_checkpoint_path, get_image_memory, get_exponential_sample,
+    get_image_memory, get_exponential_sample,
     get_exponental_amount, get_threshold, get_root_dir, position_to_grid, get_threshold_plan, inference_fps
 )
 import random
@@ -38,7 +38,7 @@ GAMMA = float(os.getenv("GAMMA", 0.05))  # Default gamma is 0.05
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 INSTANCES = []
-battle_count = 1
+battle_count = 0
 # Define the server addresses and ports for each instance
 INSTANCES = [
     {
@@ -61,7 +61,7 @@ INSTANCES = [
         'init_link_code': 'areana1',
         # 'replay_path':'/home/lee/Documents/Tango/replays/20240917185150-gregarbattleset1-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
         # 'replay_path': '/home/lee/Documents/Tango/replays/20230929014832-ummm-bn6-vs-IndianaOrz-round1-p1.tangoreplay',
-        'is_player': False  # Set to True if you don't want this instance to send inputs
+        'is_player': True  # Set to True if you don't want this instance to send inputs
     },
     # Additional instances can be added here
 ]
@@ -220,7 +220,7 @@ IMAGE_MEMORY = get_image_memory()  # Default to 1 if not set
 TEMPORAL_CHARGE = config['input_features'].get('temporal_charge', 0)
 
 # Load the model checkpoint
-load_models(IMAGE_MEMORY)
+# load_models(IMAGE_MEMORY)
 
 # Initialize frame buffers and frame counters
 frame_buffers = {instance['port']: deque(maxlen=2**IMAGE_MEMORY) for instance in INSTANCES}
@@ -635,7 +635,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                 if event == "local_input":
                     try:
                         current_input = int_to_binary_string(int(details))
-                        print(f"Port {port}: Updated current_input to {current_input}")
+                        # print(f"Port {port}: Updated current_input to {current_input}")
                     except ValueError:
                         print(f"Port {port}: Failed to parse local input: {details}")
 
@@ -789,21 +789,21 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             # print(f"Port {port}: Sent command: {command}")
 
                         # Save the game state only if training_data_dir is set
-                        if training_data_dir and current_input is not None:
-                            input_binary = current_input
-                            save_game_state(
-                                image_path=image_path,
-                                input_binary=input_binary,
-                                reward=current_reward,
-                                punishment=current_punishment,
-                                training_data_dir=training_data_dir,
-                                player_health=current_player_health,
-                                enemy_health=current_enemy_health,
-                                player_position=current_player_position,
-                                enemy_position=current_enemy_position,
-                                inside_window=current_inside_window
-                            )
-                            print(f"Port {port}: Saved game state.")
+                        # if training_data_dir and current_input is not None:
+                        #     input_binary = current_input
+                        #     save_game_state(
+                        #         image_path=image_path,
+                        #         input_binary=input_binary,
+                        #         reward=current_reward,
+                        #         punishment=current_punishment,
+                        #         training_data_dir=training_data_dir,
+                        #         player_health=current_player_health,
+                        #         enemy_health=current_enemy_health,
+                        #         player_position=current_player_position,
+                        #         enemy_position=current_enemy_position,
+                        #         inside_window=current_inside_window
+                        #     )
+                        #     print(f"Port {port}: Saved game state.")
 
                         # Reset rewards/punishments and additional fields after processing
                         current_reward = None

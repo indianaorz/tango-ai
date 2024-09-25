@@ -430,7 +430,7 @@ impl Session {
             
         
             // Shared storage for initial boolean states
-            static INITIAL_BOOLEAN_STATES: LazyLock<Mutex<HashMap<u32, u8>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+            static INITIAL_BOOLEAN_STATES: LazyLock<Mutex<HashMap<u32, u16>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 
             // Initialize the log file with thread-safe access
@@ -486,6 +486,11 @@ impl Session {
                     //player charge state 020369AC
                     //player charge state 020369B0
                     //player charge state 020369BB
+                    
+                    //possible first chip: 0x20364E0
+
+                    println!("First Chip: {}", core.raw_read_16(0x203A9DA, -1));
+                    
                     // println!("Enemy Charge state: {}", core.raw_read_8(0x02036A10, -1));
                     // println!("Player Charge state: {}", core.raw_read_8(0x02036948, -1));
                     //set enemy and player charge globally
@@ -516,7 +521,7 @@ impl Session {
                         //display 0x0203A9C4's value
                         //opponent's y position 261 517 773
                         // let current_value = core_ref.raw_read_16(0x0203A9C4, -1);
-                        
+                       
                         // println!("0x0203A9C4's value: {}", current_value);
 
                         // //display x position 220 panel 6, 180 panel 5, 140 panel 4, 100 panel 3, 60 panel 2, 20 panel 1 
@@ -553,7 +558,7 @@ impl Session {
 
                     //         // Store the initial values of those addresses in INITIAL_BOOLEAN_STATES
                     //         for &address in addresses.iter() {
-                    //             let current_value = core_ref.raw_read_8(address, -1);
+                    //             let current_value = core_ref.raw_read_16(address, -1);
                     //             initial_states.insert(address, current_value);
                     //             println!("Captured Address: 0x{:08X}, Initial Value: {}", address, current_value);
                     //         }
@@ -567,7 +572,7 @@ impl Session {
                     //         let mut addresses = boolean_addresses.lock();
                     //         let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
                     //         addresses.retain(|&address| {
-                    //             let current_value = core_ref.raw_read_8(address, -1);
+                    //             let current_value = core_ref.raw_read_16(address, -1);
                     //             if let Some(&initial_value) = initial_states.get(&address) {
                     //                 if current_value != initial_value {
                     //                     // Value has changed, prune it from the list
@@ -590,7 +595,7 @@ impl Session {
                     //         let mut addresses = boolean_addresses.lock();
                     //         let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
                     //         addresses.retain(|&address| {
-                    //             let current_value = core_ref.raw_read_8(address, -1);
+                    //             let current_value = core_ref.raw_read_16(address, -1);
                     //             if let Some(&initial_value) = initial_states.get(&address) {
                     //                 if current_value == initial_value {
                     //                     // Value has changed, prune it from the list
@@ -614,7 +619,7 @@ impl Session {
                     //     let initial_states = INITIAL_BOOLEAN_STATES.lock();
 
                     //     for &address in addresses.iter() {
-                    //         let current_value = core_ref.raw_read_8(address, -1);
+                    //         let current_value = core_ref.raw_read_16(address, -1);
                     //         if let Some(&initial_value) = initial_states.get(&address) {
                     //             // Only display if the current value has changed compared to the initial value
                     //             if current_value != initial_value {

@@ -33,13 +33,18 @@ from utils import (
 import threading
 import queue
 
+print("Saving data points to disk.")
+planning_data_dir = get_root_dir() + "/data/planning_data"
+os.makedirs(planning_data_dir, exist_ok=True)
+battle_data_dir = get_root_dir() + "/data/battle_data"
+os.makedirs(battle_data_dir, exist_ok=True)
 
 # Import necessary modules at the top
 import torch.optim as optim
 import torch.nn.functional as F
 
 
-import wandb
+# import wandb
 
 import time
 from collections import defaultdict
@@ -1165,7 +1170,7 @@ from tqdm import tqdm
 import traceback
 data_buffers_locks = {instance['port']: Lock() for instance in INSTANCES}
 
-def training_thread_function(batch_size=64, max_wait_time=1.0):
+def training_thread_function(batch_size=48, max_wait_time=1.0):
     """
     Training thread that processes training data in batches from each port's data buffer.
     
@@ -1182,6 +1187,7 @@ def training_thread_function(batch_size=64, max_wait_time=1.0):
         start_time = time.time()
         any_data_processed = False
         
+        #train battle model
         for port, buffer in data_buffers.items():
             lock = data_buffers_locks[port]
             with lock:
@@ -1199,6 +1205,32 @@ def training_thread_function(batch_size=64, max_wait_time=1.0):
                 any_data_processed = True
                 # Perform training on the batch_data
                 train_model_online(port, batch_data, model_type="Battle_Model", log=True)
+                progress_bar.update(1)
+            
+        #remove all battle data from memory
+        for port, buffer in data_buffers.items():
+            lock = data_buffers_locks[port]
+            with lock:
+                buffer.clear()
+
+        #train planning model
+        for port, buffer in planning_data_buffers.items():
+            lock = data_buffers_locks[port]
+            with lock:
+                if len(buffer) == 0:
+                    continue
+                
+                # Determine the number of data points to process
+                current_batch_size = min(batch_size, len(buffer))
+                batch_data = buffer[:current_batch_size]
+
+                # Remove the processed data points from the buffer
+                del buffer[:current_batch_size]
+
+            if batch_data:
+                any_data_processed = True
+                # Perform training on the batch_data
+                train_model_online(port, batch_data, model_type="Planning_Model", log=True)
                 progress_bar.update(1)
         
         if not any_data_processed:
@@ -1402,6 +1434,31 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
         assert not torch.isnan(enemy_charge_seq_batch).any(), "enemy_charge_seq_batch contains NaN"
         assert not torch.isinf(enemy_charge_seq_batch).any(), "enemy_charge_seq_batch contains Inf"
 
+        # Save the batch here
+        batch_data = {
+            'frames': frames_batch,  # Shape: (batch_size, 3, D, H, W)
+            'position': position_batch,  # Shape: (batch_size, position_dim) or None
+            'player_charge_seq': player_charge_seq_batch,  # Shape: (batch_size, TEMPORAL_CHARGE)
+            'enemy_charge_seq': enemy_charge_seq_batch,  # Shape: (batch_size, TEMPORAL_CHARGE)
+            'player_charge': player_charge_batch,  # Shape: (batch_size,)
+            'enemy_charge': enemy_charge_batch,  # Shape: (batch_size,)
+            'previous_inputs': previous_inputs_batch,  # Shape: (batch_size, input_memory_size * 16) or None
+            'health_memory': health_memory_batch,  # Shape: (batch_size, 2 * health_memory_size) or None
+            'actions': targets_batch,  # Shape: (batch_size, num_actions)
+            'rewards': rewards_batch   # Shape: (batch_size,)
+        }
+
+        # Determine the training_data_dir based on model_type and port
+        # Assuming you have access to `instance` or `replay_path`. Modify as necessary.
+        # If `replay_path` is part of your data_buffer or accessible globally, adjust accordingly.
+        # Here, we'll assume it's `None`. Adjust this based on your actual implementation.
+        
+        # Save the batch data using HDF5
+        if model_type == "Battle_Model":
+            save_batch_to_hdf5(batch_data, battle_data_dir, port, model_type)
+        elif model_type == "Planning_Model":
+            save_batch_to_hdf5(batch_data, planning_data_dir, port, model_type)
+
 
         # Forward pass
         outputs = selected_model(
@@ -1415,25 +1472,15 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
             health_memory = health_memory_batch
         )  # Shape: (batch_size, num_actions)
 
-        # Compute the negative log probabilities
-        negative_log_probs = F.binary_cross_entropy_with_logits(
-            outputs, targets_batch, reduction='none'
-        )  # Shape: (batch_size, num_actions)
 
-       # Compute log probabilities directly
-        log_probs = -F.softplus(-outputs) * targets_batch - F.softplus(outputs) * (1 - targets_batch)  # Shape: (batch_size, num_actions)
-
-        # Sum over the action dimensions
-        action_log_probs = log_probs.sum(dim=1)  # Shape: (batch_size,)
+        # Compute log probabilities directly
+        probs = torch.sigmoid(outputs)
+        epsilon = 1e-6  # For numerical stability
+        probs = torch.clamp(probs, epsilon, 1 - epsilon)
+        log_probs = targets_batch * torch.log(probs) + (1 - targets_batch) * torch.log(1 - probs)
 
         # Compute the policy loss with the correct sign
-        policy_loss = - (action_log_probs * rewards_batch).mean()
-
-
-        # Compute probabilities safely
-        probs = torch.sigmoid(outputs)
-        epsilon = 1e-6  # Increase epsilon for better stability
-        probs = torch.clamp(probs, epsilon, 1 - epsilon)
+        policy_loss = - (log_probs.sum(dim=1) * rewards_batch).mean()
 
         # Compute entropy
         entropy = -(probs * torch.log(probs) + (1 - probs) * torch.log(1 - probs)).sum(dim=1)
@@ -1451,10 +1498,6 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
         # After computing log_probs
         assert not torch.isnan(log_probs).any(), "log_probs contain NaN"
         assert not torch.isinf(log_probs).any(), "log_probs contain Inf"
-
-        # After computing action_log_probs
-        assert not torch.isnan(action_log_probs).any(), "action_log_probs contain NaN"
-        assert not torch.isinf(action_log_probs).any(), "action_log_probs contain Inf"
 
         # After computing policy_loss
         assert not torch.isnan(policy_loss).any(), "policy_loss contains NaN"
@@ -1482,13 +1525,13 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
         total_loss_value = total_loss.item()
         policy_loss_value = policy_loss.item()
         entropy_value = entropy.mean().item()
-        wandb.log({
-            f"{model_type}/total_loss": total_loss_value,
-            f"{model_type}/policy_loss": policy_loss_value,
-            f"{model_type}/entropy": entropy_value,
-            f"{model_type}/batch_size": batch_size,
-            f"{model_type}/port": port
-        })
+        # wandb.log({
+        #     f"{model_type}/total_loss": total_loss_value,
+        #     f"{model_type}/policy_loss": policy_loss_value,
+        #     f"{model_type}/entropy": entropy_value,
+        #     f"{model_type}/batch_size": batch_size,
+        #     f"{model_type}/port": port
+        # })
 
         # selected_model.eval()  # Switch back to eval mode
 
@@ -1759,21 +1802,21 @@ async def main():
 
 
     # Initialize W&B
-    wandb.init(
-        project="BattleAI",  # Replace with your project name
-        name=f"Run-{int(time.time())}",  # Unique run name
-        config={
-            "learning_rate": learning_rate,
-            "gamma": GAMMA,
-            "image_memory": IMAGE_MEMORY,
-            "temporal_charge": TEMPORAL_CHARGE,
-            "batch_size": config['strategy']['parameters']['window_size'],
-            # Add other hyperparameters as needed
-        }
-    )
+    # wandb.init(
+    #     project="BattleAI",  # Replace with your project name
+    #     name=f"Run-{int(time.time())}",  # Unique run name
+    #     config={
+    #         "learning_rate": learning_rate,
+    #         "gamma": GAMMA,
+    #         "image_memory": IMAGE_MEMORY,
+    #         "temporal_charge": TEMPORAL_CHARGE,
+    #         "batch_size": config['strategy']['parameters']['window_size'],
+    #         # Add other hyperparameters as needed
+    #     }
+    # )
     
-    # Optionally, log the entire config.yaml
-    wandb.config.update(config)
+    # # Optionally, log the entire config.yaml
+    # wandb.config.update(config)
 
     # Start game instances
     start_instances()
@@ -1791,7 +1834,8 @@ async def main():
     # Wait for all connection tasks to complete
     await asyncio.gather(*connection_tasks)
     print("All instances have completed. Exiting program.")
-
+    WIN_REWARD = 0.5
+    REPLAY_REWARD = 0.5
     # Determine winners and losers based on final_health
     print("Processing final health to determine winners and losers.")
     for port, (player_health, enemy_health) in final_health.items():
@@ -1800,30 +1844,69 @@ async def main():
             with data_buffers_locks[port]:
                 for data_point in data_buffers[port]:
                     if 'reward' in data_point:
-                        data_point['reward'] += 1
+                        data_point['reward'] += WIN_REWARD
                     else:
-                        data_point['reward'] = 1
+                        data_point['reward'] = WIN_REWARD
                 for data_point in planning_data_buffers[port]:
                     if 'reward' in data_point:
-                        data_point['reward'] += 1
+                        data_point['reward'] += WIN_REWARD
                     else:
-                        data_point['reward'] = 1
-            print(f"Port {port}: Winner. Added +1 reward to all data points.")
+                        data_point['reward'] = WIN_REWARD
+            print(f"Port {port}: Winner. Added +{WIN_REWARD} reward to all data points.")
         else:
-            # Loser: Add -1 to all rewards
+            # Only punish non-replay instances
+            # Get instance
+            instance = [instance for instance in INSTANCES if instance['port'] == port][0]
+            if not instance.get('replay_path'):
+                # Loser: Add -1 to all rewards
+                with data_buffers_locks[port]:
+                    for data_point in data_buffers[port]:
+                        # Make sure the reward exists
+                        if 'reward' in data_point:
+                            data_point['reward'] -= WIN_REWARD
+                        else:
+                            data_point['reward'] = -WIN_REWARD
+                    for data_point in planning_data_buffers[port]:
+                        if 'reward' in data_point:
+                            data_point['reward'] -= WIN_REWARD
+                        else:
+                            data_point['reward'] = -WIN_REWARD
+                print(f"Port {port}: Loser. Added -{WIN_REWARD} reward to all data points.")
+    
+    # Iterate over all instances
+    for instance in INSTANCES:
+        port = instance['port']
+        if instance.get('replay_path'):
             with data_buffers_locks[port]:
                 for data_point in data_buffers[port]:
-                    #make sure the reward exists
                     if 'reward' in data_point:
-                        data_point['reward'] -= 1
+                        data_point['reward'] += REPLAY_REWARD
                     else:
-                        data_point['reward'] = -1
+                        data_point['reward'] = REPLAY_REWARD
                 for data_point in planning_data_buffers[port]:
                     if 'reward' in data_point:
-                        data_point['reward'] -= 1
+                        data_point['reward'] += REPLAY_REWARD
                     else:
-                        data_point['reward'] = -1
-            print(f"Port {port}: Loser. Added -1 reward to all data points.")
+                        data_point['reward'] = REPLAY_REWARD
+            print(f"Port {port}: Replay. Added +{REPLAY_REWARD} reward to all data points.")
+
+    
+    # print("Saving data points to disk.")
+    # planning_data_dir = get_root_dir() + "/data/planning_data"
+    # os.makedirs(planning_data_dir, exist_ok=True)
+    # battle_data_dir = get_root_dir() + "/data/battle_data"
+    # os.makedirs(battle_data_dir, exist_ok=True)
+    
+    # # Save all data points after assigning final rewards
+    # for port, buffer in tqdm(data_buffers.items(), desc="Saving battle data"):
+    #     for data_point in buffer:
+    #         save_data_point(data_point, battle_data_dir, port)
+    
+    # for port, buffer in tqdm(planning_data_buffers.items(), desc="Saving planning data"):
+    #     for data_point in buffer:
+    #         save_data_point(data_point, planning_data_dir, port)
+    
+    # print("Data points saved to disk.")
 
      # Start the training thread... testing to see if we can do this after the instances have been closed
     training_thread = threading.Thread(target=training_thread_function, daemon=True)
@@ -1832,6 +1915,7 @@ async def main():
     # At the end, before exiting, signal the training thread to stop
     training_queue.put(None)  # Sentinel value to stop the thread
     training_thread.join() # Wait for the thread to finish
+    
 
     # Cancel the monitor task gracefully
     monitor_task.cancel()
@@ -1840,11 +1924,317 @@ async def main():
     except asyncio.CancelledError:
         print("Mouse monitoring task cancelled.")
 
+    # Perform Final Training Epoch to Prevent Catastrophic Forgetting
+    print("Starting final training epoch on all accumulated data.")
+
+    # # Clear all data from memory and GPU
+    # clear_memory()# After deleting variables and before starting final training
+    # gc.collect()
+    # torch.cuda.empty_cache()
+
+    # # Train on Battle Data
+    # if os.path.exists(battle_data_dir) and os.listdir(battle_data_dir):
+    #     try:
+    #         final_training_epoch(
+    #             model=training_battle_model,
+    #             optimizer=optimizer_battle,
+    #             training_data_dir=battle_data_dir,
+    #             model_type='Battle_Model',
+    #             batch_size=1,  # Adjust based on your system
+    #             num_workers=0
+    #         )
+    #     except Exception as e:
+    #         print(f"Failed to train Battle_Model: {e}")
+    #         traceback.print_exc()
+    # else:
+    #     print("No Battle data available for final training.")
+
+    # # Train on Planning Data
+    # if os.path.exists(planning_data_dir) and os.listdir(planning_data_dir):
+    #     try:
+    #         final_training_epoch(
+    #             model=training_planning_model,
+    #             optimizer=optimizer_planning,
+    #             training_data_dir=planning_data_dir,
+    #             model_type='Planning_Model',
+    #             batch_size=1,  # Adjust based on your system
+    #             num_workers=0
+    #         )
+    #     except Exception as e:
+    #         print(f"Failed to train Planning_Model: {e}")
+    #         traceback.print_exc()
+    # else:
+    #     print("No Planning data available for final training.")
+    
+
     # Save the models
     save_models()
 
-    # Finish the W&B run
-    wandb.finish()
+import h5py
+import numpy as np
+import torch
+
+def load_hdf5_data(file_path):
+    """
+    Loads data from an HDF5 file.
+
+    Args:
+        file_path (str): Path to the HDF5 file.
+
+    Returns:
+        dict: Dictionary containing loaded data.
+    """
+    data = {}
+    with h5py.File(file_path, 'r') as hf:
+        for key in hf.keys():
+            data[key] = hf[key][:]
+        # Load metadata if needed
+        metadata = dict(hf.attrs)
+    return data, metadata
+
+def aggregate_data_from_dir(directory, model_type='Battle_Model'):
+    """
+    Aggregates data from all HDF5 files in a directory.
+
+    Args:
+        directory (str): Path to the directory containing HDF5 files.
+        model_type (str): Type of model ('Battle_Model' or 'Planning_Model').
+
+    Returns:
+        dict: Aggregated data ready for training.
+    """
+    aggregated_data = {
+        'frames': [],
+        'position': [],
+        'player_charge_seq': [],
+        'enemy_charge_seq': [],
+        'player_charge': [],
+        'enemy_charge': [],
+        'previous_inputs': [],
+        'health_memory': [],
+        'actions': [],
+        'rewards': []
+    }
+
+    for root, _, files in os.walk(directory):
+        for file in files:
+            if file.endswith('.h5') and file.startswith(model_type):
+                file_path = os.path.join(root, file)
+                data, metadata = load_hdf5_data(file_path)
+
+                aggregated_data['frames'].append(torch.tensor(data['frames'], dtype=torch.float32))
+                aggregated_data['position'].append(torch.tensor(data.get('position', np.zeros((data['frames'].shape[0], 4))), dtype=torch.float32))
+                aggregated_data['player_charge_seq'].append(torch.tensor(data.get('player_charge_seq', np.zeros((data['frames'].shape[0], TEMPORAL_CHARGE))), dtype=torch.float32))
+                aggregated_data['enemy_charge_seq'].append(torch.tensor(data.get('enemy_charge_seq', np.zeros((data['frames'].shape[0], TEMPORAL_CHARGE))), dtype=torch.float32))
+                aggregated_data['player_charge'].append(torch.tensor(data.get('player_charge', np.zeros(data['frames'].shape[0])), dtype=torch.float32))
+                aggregated_data['enemy_charge'].append(torch.tensor(data.get('enemy_charge', np.zeros(data['frames'].shape[0])), dtype=torch.float32))
+                aggregated_data['previous_inputs'].append(torch.tensor(data.get('previous_inputs', np.zeros((data['frames'].shape[0], input_memory_size * 16))), dtype=torch.float32))
+                aggregated_data['health_memory'].append(torch.tensor(data.get('health_memory', np.zeros((data['frames'].shape[0], 2 * health_memory_size))), dtype=torch.float32))
+                aggregated_data['actions'].append(torch.tensor(data['actions'], dtype=torch.float32))
+                aggregated_data['rewards'].append(torch.tensor(data['rewards'], dtype=torch.float32))
+
+    # Concatenate all data
+    for key in aggregated_data:
+        if aggregated_data[key]:
+            aggregated_data[key] = torch.cat(aggregated_data[key], dim=0)
+        else:
+            aggregated_data[key] = None
+
+    return aggregated_data
+
+from torch.utils.data import TensorDataset, DataLoader
+from tqdm import tqdm
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+import torch.nn.functional as F
+import traceback
+
+import h5py
+import os
+from datetime import datetime
+
+import h5py
+import os
+from datetime import datetime
+import numpy as np
+import h5py
+import torch
+from torch.utils.data import IterableDataset
+import os
+import random
+
+class HDF5IterableDataset(IterableDataset):
+    def __init__(self, directory, model_type='Battle_Model'):
+        """
+        Initializes the dataset by listing all relevant HDF5 files.
+
+        Args:
+            directory (str): Directory containing HDF5 files.
+            model_type (str): Type of model ('Battle_Model' or 'Planning_Model').
+        """
+        self.directory = directory
+        self.model_type = model_type
+        self.files = [
+            os.path.join(root, file)
+            for root, _, files in os.walk(directory)
+            for file in files
+            if file.endswith('.h5') and file.startswith(model_type)
+        ]
+        if not self.files:
+            raise FileNotFoundError(f"No HDF5 files found for model type '{model_type}' in directory '{directory}'.")
+
+    def __iter__(self):
+        """
+        Yields data points one by one from the HDF5 files.
+        """
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is None:
+            # Single-process data loading
+            files = self.files
+        else:
+            # In a worker process
+            per_worker = int(np.ceil(len(self.files) / float(worker_info.num_workers)))
+            worker_id = worker_info.id
+            files = self.files[worker_id * per_worker : (worker_id + 1) * per_worker]
+
+        for file_path in files:
+            try:
+                with h5py.File(file_path, 'r') as hf:
+                    # Assume all datasets have the same length
+                    num_samples = hf['actions'].shape[0]
+                    for i in range(num_samples):
+                        data_point = {}
+                        for key in hf.keys():
+                            data_point[key] = torch.tensor(hf[key][i], dtype=torch.float32)
+                        data_point['reward'] = torch.tensor(hf['rewards'][i], dtype=torch.float32)
+                        yield data_point
+            except Exception as e:
+                print(f"Failed to read {file_path}: {e}")
+                continue
+
+def save_batch_to_hdf5(batch_data, training_data_dir, port, model_type):
+    """
+    Saves a batch of training data to an HDF5 file with gzip compression.
+
+    Args:
+        batch_data (dict): Dictionary containing batch data tensors.
+        training_data_dir (str): Directory where training data is saved.
+        port (int): Port number for the instance.
+        model_type (str): 'Battle_Model' or 'Planning_Model'.
+    """
+    # Ensure the training_data_dir exists
+    os.makedirs(training_data_dir, exist_ok=True)
+    
+    # Create a timestamp for unique file naming
+    timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S%f')
+    filename = f"{model_type}_port_{port}_{timestamp}.h5"
+    file_path = os.path.join(training_data_dir, filename)
+    
+    # Prepare data for saving
+    # Convert all torch tensors to numpy arrays
+    numpy_data = {}
+    for key, value in batch_data.items():
+        if isinstance(value, torch.Tensor):
+            numpy_data[key] = value.cpu().numpy()
+        elif isinstance(value, list):
+            # Handle lists of tensors or other data types as needed
+            # Example: list of previous inputs
+            numpy_data[key] = np.array(value)
+        elif value is None:
+            # Handle None by skipping or assigning default values
+            continue  # Skip saving if not essential
+        else:
+            numpy_data[key] = value  # Handle other data types appropriately
+    
+    # Additional metadata
+    metadata = {
+        'timestamp': timestamp,
+        'port': port,
+        'model_type': model_type
+    }
+    
+    # Save to HDF5 with gzip compression
+    try:
+        with h5py.File(file_path, 'w') as hf:
+            for key, data in numpy_data.items():
+                # Determine appropriate compression level (0-9)
+                hf.create_dataset(key, data=data, compression="gzip", compression_opts=4)
+            # Save metadata as attributes
+            for meta_key, meta_value in metadata.items():
+                hf.attrs[meta_key] = meta_value
+        print(f"Saved batch to {file_path} with metadata.")
+        
+        # Optionally verify the saved data
+        with h5py.File(file_path, 'r') as hf:
+            for key in numpy_data.keys():
+                if key not in hf:
+                    raise ValueError(f"Dataset '{key}' not found in the saved file.")
+                if not np.array_equal(hf[key][:], numpy_data[key]):
+                    raise ValueError(f"Data mismatch in dataset '{key}'.")
+        print(f"Verified the integrity of {file_path}")
+    except Exception as e:
+        print(f"Failed to save or verify batch to {file_path}: {e}")
+
+import os
+import json
+from datetime import datetime
+
+def save_data_point(data_point, training_data_dir, port):
+    """
+    Saves a single data_point to the training_data_dir.
+    
+    Args:
+        data_point (dict): The data point to save.
+        training_data_dir (str): Directory where training data is stored.
+        port (int): Port number of the instance (used to organize data).
+    """
+    # Create a subdirectory for the port
+    port_dir = os.path.join(training_data_dir, f"port_{port}")
+    os.makedirs(port_dir, exist_ok=True)
+    
+    # Create a unique identifier for the data point
+    timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S%f')
+    data_point_id = f"data_{timestamp}"
+    
+    # Create a subdirectory for this data point
+    data_point_dir = os.path.join(port_dir, data_point_id)
+    os.makedirs(data_point_dir, exist_ok=True)
+    
+    # Save frames as image files
+    frame_paths = []
+    for i, frame in enumerate(data_point['frames']):
+        frame_filename = f"frame_{i:03d}.png"
+        frame_path = os.path.join(data_point_dir, frame_filename)
+        frame.save(frame_path)
+        frame_paths.append(frame_filename)
+    
+    # Prepare metadata
+    metadata = {
+        'frames': frame_paths,
+        'position_tensor': data_point['position_tensor'].cpu().numpy().tolist() if data_point['position_tensor'] is not None else None,
+        'inside_window': data_point['inside_window'].cpu().numpy().tolist() if data_point['inside_window'] is not None else None,
+        'player_health': data_point['player_health'].cpu().numpy().tolist() if data_point['player_health'] is not None else None,
+        'enemy_health': data_point['enemy_health'].cpu().numpy().tolist() if data_point['enemy_health'] is not None else None,
+        'player_charge_seq': data_point['player_charge_seq'].cpu().numpy().tolist() if data_point['player_charge_seq'] is not None else None,
+        'enemy_charge_seq': data_point['enemy_charge_seq'].cpu().numpy().tolist() if data_point['enemy_charge_seq'] is not None else None,
+        'current_player_charge': data_point['current_player_charge'],
+        'current_enemy_charge': data_point['current_enemy_charge'],
+        'previous_inputs': data_point['previous_inputs'].cpu().numpy().tolist() if data_point['previous_inputs'] is not None else None,
+        'health_memory': data_point['health_memory'].cpu().numpy().tolist() if data_point['health_memory'] is not None else None,
+        'action': data_point['action'],
+        'reward': data_point.get('reward', 0.0)
+    }
+    
+    # Save metadata as JSON
+    metadata_path = os.path.join(data_point_dir, "metadata.json")
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=4)
+    
+    print(f"Port {port}: Saved data_point {data_point_id} to {data_point_dir}")
 
 
 def save_models():
@@ -1895,6 +2285,38 @@ def save_models():
         print("Training Battle Model is not loaded. Skipping save.")
 
 
+import gc
+
+# After your main training loops and before final_training_epoch()
+def clear_memory():
+    global data_buffers, planning_data_buffers, final_health, frame_buffers, frame_counters
+    global player_charge_sliding_windows, enemy_charge_sliding_windows
+    global training_battle_model, training_planning_model
+    global inference_battle_model, inference_planning_model
+
+    # Delete buffers and data structures
+    del data_buffers
+    del planning_data_buffers
+    del final_health
+    del frame_buffers
+    del frame_counters
+    del player_charge_sliding_windows
+    del enemy_charge_sliding_windows
+
+    # Delete models if they are not needed anymore or to reset their memory
+    # If you need them later, consider keeping them; otherwise, delete to free memory
+    # del training_battle_model
+    # del training_planning_model
+    # del inference_battle_model
+    # del inference_planning_model
+
+    # Force garbage collection
+    gc.collect()
+
+    # Clear CUDA cache
+    torch.cuda.empty_cache()
+
+    print("Cleared memory and CUDA cache.")
 
 
 if __name__ == '__main__':
