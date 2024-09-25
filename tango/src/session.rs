@@ -4,9 +4,8 @@ use parking_lot::Mutex;
 use rand::SeedableRng;
 use std::sync::Arc;
 
-
-use std::io::Write;
 use std::collections::HashMap;
+use std::io::Write;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -15,11 +14,17 @@ use std::fs::File;
 
 use std::sync::LazyLock;
 
-pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0);//* 2.0;
+
+pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0); //* 2.0;
 
 // session.rs
-use crate::global::{add_punishment, add_reward, clear_punishments, clear_rewards, get_frame_count,set_frame_count, get_player_health_index, set_enemy_health, set_enemy_position, set_is_player_inside_window, set_local_input, set_player_health, set_player_health_index, set_player_position, set_winner, set_player_charge, set_enemy_charge, RewardPunishment};
-use crate::global::{REWARDS, PUNISHMENTS}; // Import the global variables
+use crate::global::{
+    add_punishment, add_reward, clear_punishments, clear_rewards, get_frame_count, get_player_health_index,
+    set_enemy_charge, set_enemy_health, set_enemy_position, set_enemy_selected_chip, set_frame_count,
+    set_is_player_inside_window, set_local_input, set_player_charge, set_player_health, set_player_health_index,
+    set_player_position, set_player_selected_chip, set_winner, RewardPunishment,
+};
+use crate::global::{PUNISHMENTS, REWARDS}; // Import the global variables
 
 enum AddressSize {
     U8,
@@ -73,12 +78,51 @@ pub enum Mode {
     Replayer,
 }
 
-
 use mgba::core::CoreMutRef;
 
+
+use tango_dataview::rom::NavicustPart;
+use tango_dataview::save::NaviView;
+use tango_dataview::save::Save;
+use tango_dataview::rom::Assets;
+
+/// Extracts Navi Cust IDs from the save data.
+///
+/// # Arguments
+///
+/// * `save` - A reference to the game's save data.
+/// * `assets` - A reference to the game's assets.
+///
+/// # Returns
+///
+/// A vector containing the IDs of all Navi Cust parts.
+fn extract_navi_cust_ids(save: &dyn Save, assets: &dyn Assets) -> Vec<usize> {
+    // Access the Navi Cust view from the save data
+    if let Some(navi_view) = save.view_navi() {
+        match navi_view {
+            NaviView::Navicust(navicust_view) => {
+                let size = navicust_view.size(); // Typically [7, 7]
+                let mut navi_cust_ids = Vec::new();
+
+                for i in 0..(size[0] * size[1]) {
+                    if let Some(part) = navicust_view.navicust_part(i) {
+                        navi_cust_ids.push(part.id);
+                    }
+                }
+
+                navi_cust_ids
+            },
+            NaviView::LinkNavi(_) => {
+                // Handle LinkNavi if necessary, or ignore
+                Vec::new()
+            },
+        }
+    } else {
+        Vec::new()
+    }
+}
+
 impl Session {
-
-
     pub fn new_pvp(
         config: std::sync::Arc<parking_lot::RwLock<config::Config>>,
         audio_binder: audio::LateBinder,
@@ -104,9 +148,6 @@ impl Session {
         match_type: (u8, u8),
         rng_seed: [u8; 16],
     ) -> Result<Self, anyhow::Error> {
-
-
-
         let mut core = mgba::core::Core::new_gba("tango")?;
         core.enable_video_buffer();
 
@@ -325,25 +366,23 @@ impl Session {
                 as usize
         ]));
 
-
-
         fn search_all_health_values(core: &mut CoreMutRef) -> Vec<u32> {
             let segment = -1; // Default segment, adjust as necessary
             let value_to_find = 1800;
             let mut found_addresses = Vec::new();
-        
+
             // Define the memory range to search - adjust based on your game's addressable space
             let start_address = 0x02000000; // Start of EWRAM, commonly used in GBA games
             let end_address = 0x02040000; // End of EWRAM
-        
+
             // Search through the address range for the value 1800
             for address in (start_address..end_address).step_by(4) {
                 let current_value = core.raw_read_16(address, segment);
-                if current_value == value_to_find || current_value == 1400{
+                if current_value == value_to_find || current_value == 1400 {
                     found_addresses.push(address);
                 }
             }
-        
+
             found_addresses
         }
 
@@ -351,11 +390,11 @@ impl Session {
         fn search_all_boolean_values(core: &mut CoreMutRef) -> Vec<u32> {
             let segment = -1; // Default segment, adjust as necessary
             let mut found_addresses = Vec::new();
-        
+
             // Define the memory range to search - adjust based on your game's addressable space
             let start_address = 0x02000000; // Start of EWRAM, commonly used in GBA games
             let end_address = 0x02040000; // End of EWRAM
-        
+
             // Search through the address range for the value 1800
             for address in (start_address..end_address).step_by(4) {
                 let current_value = core.raw_read_16(address, segment);
@@ -363,37 +402,63 @@ impl Session {
                 found_addresses.push(address);
                 // }
             }
-        
+
             found_addresses
         }
 
+        fn search_all_specific_values(core: &mut CoreMutRef) -> Vec<u32> {
+            let segment = -1; // Default segment, adjust as necessary
+            let mut found_addresses = Vec::new();
+
+            // Define the memory range to search - adjust based on your game's addressable space
+            let start_address = 0x02000000; // Start of EWRAM, commonly used in GBA games
+            let end_address = 0x02040000; // End of EWRAM
+
+            // Search through the address range for the value 196
+            for address in (start_address..end_address).step_by(2) {
+                // Changed step_by from 4 to 2
+                let current_value = core.raw_read_16(address, segment);
+                if current_value == 196 {
+                    found_addresses.push(address);
+                }
+            }
+
+            found_addresses
+        }
 
         // Add these as state variables or within a struct if needed.
         static mut LAST_PLAYER_HEALTH: u16 = 0;
         static mut LAST_OPPONENT_HEALTH: u16 = 0;
 
-        fn display_health_state(
-            core: &mut CoreMutRef,
-            is_offerer: bool,
-        ) {
+        fn display_health_state(core: &mut CoreMutRef, is_offerer: bool) {
             // Define addresses for potential health values
             let server_health_address = 0x0203A9D4; // Server side health
             let client_health_address = 0x0203AAAC; // Client side health
             let segment = -1; // Default segment; adjust if necessary
-        
+
             // Determine labels based on whether the instance is the server or the client
             let (player_label, opponent_label, player_health_address, opponent_health_address) = if is_offerer {
                 // Server: Player is at 0x0203A9D4, Opponent is at 0x0203AAAC
-                ("Player Health", "Opponent Health", server_health_address, client_health_address)
+                (
+                    "Player Health",
+                    "Opponent Health",
+                    server_health_address,
+                    client_health_address,
+                )
             } else {
                 // Client: Opponent is at 0x0203A9D4, Player is at 0x0203AAAC
-                ("Opponent Health", "Player Health", client_health_address, server_health_address)
+                (
+                    "Opponent Health",
+                    "Player Health",
+                    client_health_address,
+                    server_health_address,
+                )
             };
-        
+
             // Read current health values
             let current_player_health = core.raw_read_16(player_health_address, segment);
             let current_opponent_health = core.raw_read_16(opponent_health_address, segment);
-        
+
             // Safety: Ensure safe access to the static variables
             unsafe {
                 // Check if player's health has decreased (punishment)
@@ -402,218 +467,234 @@ impl Session {
                     // Record punishment in global PUNISHMENTS
                     add_punishment(RewardPunishment { damage });
                 }
-        
+
                 // Check if opponent's health has decreased (reward)
                 if current_opponent_health < LAST_OPPONENT_HEALTH {
                     let damage = LAST_OPPONENT_HEALTH - current_opponent_health;
                     // Record reward in global REWARDS
                     add_reward(RewardPunishment { damage });
                 }
-        
+
                 // Update last known health values
                 LAST_PLAYER_HEALTH = current_player_health;
                 LAST_OPPONENT_HEALTH = current_opponent_health;
 
                 set_player_health(current_player_health);
                 set_enemy_health(current_opponent_health);
+                //display player and enemy health
+                //display if is player
+                // println!("{}: {}", player_label, current_player_health);
+                // println!("{}: {}", opponent_label, current_opponent_health);
 
-                if(current_player_health == 0 && !current_opponent_health == 0
-                || !current_player_health == 0 && current_opponent_health == 0){
+                if (current_player_health == 0 && !current_opponent_health == 0
+                    || !current_player_health == 0 && current_opponent_health == 0)
+                {
                     //close the program
-                        // Exit the application after sending the winner message
-                        std::process::exit(0);
-                        }
+                    // Exit the application after sending the winner message
+                    std::process::exit(0);
+                }
             }
         }
-        
-        
-            
-        
-            // Shared storage for initial boolean states
-            static INITIAL_BOOLEAN_STATES: LazyLock<Mutex<HashMap<u32, u16>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+        // Shared storage for initial boolean states
+        static INITIAL_BOOLEAN_STATES: LazyLock<Mutex<HashMap<u32, u16>>> =
+            LazyLock::new(|| Mutex::new(HashMap::new()));
 
-            // Initialize the log file with thread-safe access
-            let log_file = Arc::new(Mutex::new(
-                File::create("/home/lee/log.txt").expect("Failed to create log file"),
-            ));
-            // Clone the Arc to pass into the closure
-            let log_file_clone = Arc::clone(&log_file);
+        // Initialize the log file with thread-safe access
+        let log_file = Arc::new(Mutex::new(
+            File::create("/home/lee/log.txt").expect("Failed to create log file"),
+        ));
+        // Clone the Arc to pass into the closure
+        let log_file_clone = Arc::clone(&log_file);
 
-            let window_state_addresses = vec![
-                (0x02035288, 0, 255),//success! 0=closed, 255 = open
-            ];
-        
-            
-            // Clone for use inside the callback
-            let window_state_addresses = Arc::new(window_state_addresses);
+        let window_state_addresses = vec![
+            (0x02035288, 0, 255), //success! 0=closed, 255 = open
+        ];
 
-            // Shared storage for boolean addresses
-            // let boolean_addresses = Arc::new(Mutex::new(Vec::new()));
-            // let boolean_addresses_clone = Arc::clone(&boolean_addresses);
-            // Initialize toggle state variables for Command 4
-            let logging_enabled = Arc::new(AtomicBool::new(false));
-            let command4_prev_state = Arc::new(AtomicBool::new(false));
+        // Clone for use inside the callback
+        let window_state_addresses = Arc::new(window_state_addresses);
 
-            // // Clone these for use inside the closure
-            let logging_enabled_clone = Arc::clone(&logging_enabled);
-            let command4_prev_state_clone = Arc::clone(&command4_prev_state);
-            
-            // Set the frame callback
-            thread.set_frame_callback({
-                let completion_token = completion_token.clone();
-                let joyflags = joyflags.clone();
-                let vbuf = vbuf.clone();
-                let emu_tps_counter = emu_tps_counter.clone();
-                let log_file = log_file_clone.clone(); // Clone the Arc for use inside the closure
-                // let boolean_addresses = boolean_addresses_clone.clone();
-                move |mut core, video_buffer, mut thread_handle| {
-                    let mut vbuf = vbuf.lock();
-                    vbuf.copy_from_slice(video_buffer);
-                    video::fix_vbuf_alpha(&mut vbuf);
-                    //joyflags.load(std::sync::atomic::Ordering::Relaxed)
-                    let joyflags_val = joyflags.load(std::sync::atomic::Ordering::Relaxed);
-                    core.set_keys(joyflags_val);
-                    set_local_input(joyflags_val as u16);
-                    emu_tps_counter.lock().mark();
-                    //log charge state 0x020369BD
-                    //enemy charge state 02036A10
-                    //enemy charge state 02036A74
-                    //enemy charge state 02036A78
-                    //enemy charge state 02036A80
+        // Shared storage for boolean addresses
+        // let boolean_addresses = Arc::new(Mutex::new(Vec::new()));
+        // let boolean_addresses_clone = Arc::clone(&boolean_addresses);
+        // Initialize toggle state variables for Command 4
+        let logging_enabled = Arc::new(AtomicBool::new(false));
+        let command4_prev_state = Arc::new(AtomicBool::new(false));
 
-                    //player charge state 02036948
-                    //player charge state 020369AC
-                    //player charge state 020369B0
-                    //player charge state 020369BB
-                    
-                    //possible first chip: 0x20364E0
+        // // Clone these for use inside the closure
+        let logging_enabled_clone = Arc::clone(&logging_enabled);
+        let command4_prev_state_clone = Arc::clone(&command4_prev_state);
 
-                    println!("First Chip: {}", core.raw_read_16(0x203A9DA, -1));
-                    
-                    // println!("Enemy Charge state: {}", core.raw_read_8(0x02036A10, -1));
-                    // println!("Player Charge state: {}", core.raw_read_8(0x02036948, -1));
-                    //set enemy and player charge globally
-                    set_player_charge(core.raw_read_8(0x02036948, -1) as u16);
-                    set_enemy_charge(core.raw_read_8(0x02036A10, -1) as u16);
-                    if completion_token.is_complete() {
-                        thread_handle.pause();
-                        //close application
-                        std::process::exit(0);
-                    } else {
-                        display_health_state(&mut core, is_offerer);
-                        let core_ref = &mut core;
+        // Set the frame callback
+        thread.set_frame_callback({
+            let completion_token = completion_token.clone();
+            let joyflags = joyflags.clone();
+            let vbuf = vbuf.clone();
+            let emu_tps_counter = emu_tps_counter.clone();
+            let log_file = log_file_clone.clone(); // Clone the Arc for use inside the closure
+                                                   // let boolean_addresses = boolean_addresses_clone.clone();
+            move |mut core, video_buffer, mut thread_handle| {
+                let mut vbuf = vbuf.lock();
+                vbuf.copy_from_slice(video_buffer);
+                video::fix_vbuf_alpha(&mut vbuf);
+                //joyflags.load(std::sync::atomic::Ordering::Relaxed)
+                let joyflags_val = joyflags.load(std::sync::atomic::Ordering::Relaxed);
+                core.set_keys(joyflags_val);
+                set_local_input(joyflags_val as u16);
+                emu_tps_counter.lock().mark();
+                //log charge state 0x020369BD
+                //enemy charge state 02036A10
+                //enemy charge state 02036A74
+                //enemy charge state 02036A78
+                //enemy charge state 02036A80
 
-                        // **Determine and Log the Assumed Window State for Each Address**
-                        for &(address, expected_closed, expected_open) in window_state_addresses.iter() {
-                            let current_value = core_ref.raw_read_8(address, -1);
-                            let assumed_state = if current_value == expected_open {
-                                "Open"
-                            } else if current_value == expected_closed {
-                                "Closed"
-                            } else {
-                                "Unknown"
-                            };
-                            set_is_player_inside_window(assumed_state == "Open");
-                        }
-                        
+                //player charge state 02036948
+                //player charge state 020369AC
+                //player charge state 020369B0
+                //player charge state 020369BB
 
-                        //display 0x0203A9C4's value
-                        //opponent's y position 261 517 773
-                        // let current_value = core_ref.raw_read_16(0x0203A9C4, -1);
-                       
-                        // println!("0x0203A9C4's value: {}", current_value);
+                if is_offerer {
+                    // println!("First Chip P1: {}", core.raw_read_16(0x203A9DA, -1));
+                    set_player_selected_chip(core.raw_read_16(0x203A9DA, -1));
+                    // println!("First Chip P2: {}", core.raw_read_16(0x203AAB2, -1));
+                    set_enemy_selected_chip(core.raw_read_16(0x203AAB2, -1));
+                } else {
+                    // println!("First Chip P2: {}", core.raw_read_16(0x203A9DA, -1));
+                    set_enemy_selected_chip(core.raw_read_16(0x203A9DA, -1));
+                    // println!("First Chip P1: {}", core.raw_read_16(0x203AAB2, -1));
+                    set_player_selected_chip(core.raw_read_16(0x203AAB2, -1));
+                }
 
-                        // //display x position 220 panel 6, 180 panel 5, 140 panel 4, 100 panel 3, 60 panel 2, 20 panel 1 
-                        // let current_value = core_ref.raw_read_16(0x0203AA4C, -1);
-                        // println!("0x0203AA4C's value: {}", current_value);
+                // //search all raw 16 values for ones that equal 196
+                // let found_addresses = search_all_specific_values(&mut core);
+                // println!("Found {} addresses with value 196", found_addresses.len());
+                // //print out the addresses
+                // for address in found_addresses.iter() {
+                //     println!("Address: 0x{:08X}", address);
+                // }
 
-                        //0x02036A8C local player x
-                        //0x0203AA9C local player y
+                // println!("Enemy Charge state: {}", core.raw_read_8(0x02036A10, -1));
+                // println!("Player Charge state: {}", core.raw_read_8(0x02036948, -1));
+                //set enemy and player charge globally
+                set_player_charge(core.raw_read_8(0x02036948, -1) as u16);
+                set_enemy_charge(core.raw_read_8(0x02036A10, -1) as u16);
+                if completion_token.is_complete() {
+                    thread_handle.pause();
+                    //close application
+                    std::process::exit(0);
+                } else {
+                    display_health_state(&mut core, is_offerer);
+                    let core_ref = &mut core;
 
-                        let player_x = core_ref.raw_read_16(0x0203AA4C, -1);
-                        let player_y = core_ref.raw_read_16(0x0203A9C4, -1);
-                        let enemy_x = core_ref.raw_read_16(0x02036A8C, -1);
-                        let enemy_y = core_ref.raw_read_16(0x0203AA9C, -1);
-                        // println!("Enemy x: {}, Enemy y: {}", enemy_x, enemy_y);
-                        // println!("Player x: {}, Player y: {}", player_x, player_y);
-                        
-                        set_enemy_position((enemy_x, enemy_y));
-                        set_player_position((player_x, player_y));
+                    // **Determine and Log the Assumed Window State for Each Address**
+                    for &(address, expected_closed, expected_open) in window_state_addresses.iter() {
+                        let current_value = core_ref.raw_read_8(address, -1);
+                        let assumed_state = if current_value == expected_open {
+                            "Open"
+                        } else if current_value == expected_closed {
+                            "Closed"
+                        } else {
+                            "Unknown"
+                        };
+                        set_is_player_inside_window(assumed_state == "Open");
+                    }
 
-                        // let joyflags_val = joyflags.load(std::sync::atomic::Ordering::Relaxed);
-                        // Command 1 (Set all values, triggered by 0x00000200)
-                    //     if joyflags_val & 0x00000200 != 0 {
-                    //         println!("Set Command - Populating boolean addresses");
-                    //         let mut addresses = boolean_addresses.lock();
-                    //         let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
+                    //display 0x0203A9C4's value
+                    //opponent's y position 261 517 773
+                    // let current_value = core_ref.raw_read_16(0x0203A9C4, -1);
 
-                    //         // Clear previous boolean addresses and states
-                    //         addresses.clear();
-                    //         initial_states.clear();
+                    // println!("0x0203A9C4's value: {}", current_value);
 
-                    //         // Search for boolean values in memory and populate boolean_addresses
-                    //         let found_addresses = search_all_boolean_values(core_ref);
-                    //         addresses.extend(found_addresses);
+                    // //display x position 220 panel 6, 180 panel 5, 140 panel 4, 100 panel 3, 60 panel 2, 20 panel 1
+                    // let current_value = core_ref.raw_read_16(0x0203AA4C, -1);
+                    // println!("0x0203AA4C's value: {}", current_value);
 
-                    //         // Store the initial values of those addresses in INITIAL_BOOLEAN_STATES
-                    //         for &address in addresses.iter() {
-                    //             let current_value = core_ref.raw_read_16(address, -1);
-                    //             initial_states.insert(address, current_value);
-                    //             println!("Captured Address: 0x{:08X}, Initial Value: {}", address, current_value);
+                    //0x02036A8C local player x
+                    //0x0203AA9C local player y
+
+                    let player_x = core_ref.raw_read_16(0x0203AA4C, -1);
+                    let player_y = core_ref.raw_read_16(0x0203A9C4, -1);
+                    let enemy_x = core_ref.raw_read_16(0x02036A8C, -1);
+                    let enemy_y = core_ref.raw_read_16(0x0203AA9C, -1);
+                    // println!("Enemy x: {}, Enemy y: {}", enemy_x, enemy_y);
+                    // println!("Player x: {}, Player y: {}", player_x, player_y);
+
+                    set_enemy_position((enemy_x, enemy_y));
+                    set_player_position((player_x, player_y));
+
+                    // let joyflags_val = joyflags.load(std::sync::atomic::Ordering::Relaxed);
+                    // // Command 1 (Set all values, triggered by 0x00000200)
+                    // if joyflags_val & 0x00000200 != 0 {
+                    //     println!("Set Command - Populating boolean addresses");
+                    //     let mut addresses = boolean_addresses.lock();
+                    //     let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
+
+                    //     // Clear previous boolean addresses and states
+                    //     addresses.clear();
+                    //     initial_states.clear();
+
+                    //     // Search for boolean values in memory and populate boolean_addresses
+                    //     let found_addresses = search_all_boolean_values(core_ref);
+                    //     addresses.extend(found_addresses);
+
+                    //     // Store the initial values of those addresses in INITIAL_BOOLEAN_STATES
+                    //     for &address in addresses.iter() {
+                    //         let current_value = core_ref.raw_read_16(address, -1);
+                    //         initial_states.insert(address, current_value);
+                    //         println!("Captured Address: 0x{:08X}, Initial Value: {}", address, current_value);
+                    //     }
+
+                    //     println!("Set Command - Populated {} boolean addresses.", addresses.len());
+                    // }
+
+                    // // Command 2 (Prune the list, triggered by 0x00000100)
+                    // if joyflags_val & 0x00000100 != 0 {
+                    //     println!("Prune Command - Pruning boolean addresses");
+                    //     let mut addresses = boolean_addresses.lock();
+                    //     let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
+                    //     addresses.retain(|&address| {
+                    //         let current_value = core_ref.raw_read_16(address, -1);
+                    //         if let Some(&initial_value) = initial_states.get(&address) {
+                    //             if current_value != initial_value {
+                    //                 // Value has changed, prune it from the list
+                    //                 println!(
+                    //                     "Pruned Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
+                    //                     address, initial_value, current_value
+                    //                 );
+                    //                 return false;
+                    //             }
                     //         }
+                    //         true
+                    //     });
 
-                    //         println!("Set Command - Populated {} boolean addresses.", addresses.len());
-                    //     }
+                    //     println!("Prune Command - Remaining {} boolean addresses.", addresses.len());
+                    // }
 
-                    //     // Command 2 (Prune the list, triggered by 0x00000100)
-                    //     if joyflags_val & 0x00000100 != 0 {
-                    //         println!("Prune Command - Pruning boolean addresses");
-                    //         let mut addresses = boolean_addresses.lock();
-                    //         let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
-                    //         addresses.retain(|&address| {
-                    //             let current_value = core_ref.raw_read_16(address, -1);
-                    //             if let Some(&initial_value) = initial_states.get(&address) {
-                    //                 if current_value != initial_value {
-                    //                     // Value has changed, prune it from the list
-                    //                     println!(
-                    //                         "Pruned Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
-                    //                         address, initial_value, current_value
-                    //                     );
-                    //                     return false;
-                    //                 }
+                    // // Command 2 (Prune the list, triggered by 0x00000100)
+                    // if joyflags_val & 0x00000002 != 0 {
+                    //     println!("Prune Command - Pruning same boolean addresses");
+                    //     let mut addresses = boolean_addresses.lock();
+                    //     let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
+                    //     addresses.retain(|&address| {
+                    //         let current_value = core_ref.raw_read_16(address, -1);
+                    //         if let Some(&initial_value) = initial_states.get(&address) {
+                    //             if current_value == initial_value {
+                    //                 // Value has changed, prune it from the list
+                    //                 println!(
+                    //                     "Pruned Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
+                    //                     address, initial_value, current_value
+                    //                 );
+                    //                 return false;
                     //             }
-                    //             true
-                    //         });
+                    //         }
+                    //         true
+                    //     });
 
-                    //         println!("Prune Command - Remaining {} boolean addresses.", addresses.len());
-                    //     }
+                    //     println!("Prune Command - Remaining {} boolean addresses.", addresses.len());
+                    // }
 
-                    //     // Command 2 (Prune the list, triggered by 0x00000100)
-                    //     if joyflags_val & 0x00000001 != 0 {
-                    //         println!("Prune Command - Pruning same boolean addresses");
-                    //         let mut addresses = boolean_addresses.lock();
-                    //         let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
-                    //         addresses.retain(|&address| {
-                    //             let current_value = core_ref.raw_read_16(address, -1);
-                    //             if let Some(&initial_value) = initial_states.get(&address) {
-                    //                 if current_value == initial_value {
-                    //                     // Value has changed, prune it from the list
-                    //                     println!(
-                    //                         "Pruned Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
-                    //                         address, initial_value, current_value
-                    //                     );
-                    //                     return false;
-                    //                 }
-                    //             }
-                    //             true
-                    //         });
-
-                    //         println!("Prune Command - Remaining {} boolean addresses.", addresses.len());
-                    //     }
-
-                    //    // Command 3 (Compare the current values, triggered by 0x00000008)
-                    //    if joyflags_val & 0x00000008 != 0 {
+                    // // Command 3 (Compare the current values, triggered by 0x00000008)
+                    // if joyflags_val & 0x00000008 != 0 {
                     //     println!("Compare Command - Checking different current values");
                     //     let addresses = boolean_addresses.lock();
                     //     let initial_states = INITIAL_BOOLEAN_STATES.lock();
@@ -630,7 +711,7 @@ impl Session {
                     //             }
                     //         }
                     //     }
-                    // } 
+                    // }
                     // // Command 3 (Compare the current values, triggered by 0x00000008)
                     // // if joyflags_val & 0x00000001 != 0 {
                     // //    // Lock the boolean_addresses and log_file for safe access
@@ -688,11 +769,52 @@ impl Session {
                     //         }
                     //     }
                     // }
-
-
-                    }
                 }
-            });
+            }
+        });
+
+        let own_setup=  {
+            let assets = local_game.load_rom_assets(local_rom, &local_save.as_raw_wram(), local_patch_overrides)?;
+            Some(Setup {
+                game_lang: local_patch_overrides
+                    .language
+                    .clone()
+                    .unwrap_or_else(|| crate::game::region_to_language(local_game.gamedb_entry().region)),
+                save: local_save,
+                assets,
+            })
+        };
+        let opponent_setup= if reveal_setup {
+            let assets =
+                remote_game.load_rom_assets(remote_rom, &remote_save.as_raw_wram(), remote_patch_overrides)?;
+            Some(Setup {
+                game_lang: remote_patch_overrides
+                    .language
+                    .clone()
+                    .unwrap_or_else(|| crate::game::region_to_language(remote_game.gamedb_entry().region)),
+                save: remote_save,
+                assets,
+            })
+        } else {
+            None
+        };
+
+        // After initializing `own_setup` and `opponent_setup`
+        let own_navi_cust_ids = if let Some(ref setup) = own_setup {
+            extract_navi_cust_ids(&*setup.save, setup.assets.as_ref())
+        } else {
+            Vec::new()
+        };
+
+        let opponent_navi_cust_ids = if let Some(ref setup) = opponent_setup {
+            extract_navi_cust_ids(&*setup.save, setup.assets.as_ref())
+        } else {
+            Vec::new()
+        };
+
+        // Log the Navi Cust IDs
+        println!("Local Player Navi Cust IDs: {:?}", own_navi_cust_ids);
+        println!("Opponent Player Navi Cust IDs: {:?}", opponent_navi_cust_ids);
 
         Ok(Session {
             start_time: std::time::SystemTime::now(),
@@ -712,34 +834,10 @@ impl Session {
             }),
             completion_token,
             pause_on_next_frame: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            own_setup: {
-                let assets = local_game.load_rom_assets(local_rom, &local_save.as_raw_wram(), local_patch_overrides)?;
-                Some(Setup {
-                    game_lang: local_patch_overrides
-                        .language
-                        .clone()
-                        .unwrap_or_else(|| crate::game::region_to_language(local_game.gamedb_entry().region)),
-                    save: local_save,
-                    assets,
-                })
-            },
-            opponent_setup: if reveal_setup {
-                let assets =
-                    remote_game.load_rom_assets(remote_rom, &remote_save.as_raw_wram(), remote_patch_overrides)?;
-                Some(Setup {
-                    game_lang: remote_patch_overrides
-                        .language
-                        .clone()
-                        .unwrap_or_else(|| crate::game::region_to_language(remote_game.gamedb_entry().region)),
-                    save: remote_save,
-                    assets,
-                })
-            } else {
-                None
-            },
+            own_setup,
+            opponent_setup,
         })
     }
-    
 
     pub fn new_singleplayer(
         audio_binder: audio::LateBinder,
@@ -855,15 +953,15 @@ impl Session {
                         addr,
                         Box::new(move |core: mgba::core::CoreMutRef<'_>| {
                             original_func(core);
-                            
+
                             // Capture local input
                             let stepper_inner = stepper_state_clone.lock_inner();
                             if let Some(input_pair) = stepper_inner.peek_input_pair() {
                                 let local_input = input_pair.local.joyflags;
-        
+
                                 // Add the local input to the global list
                                 set_local_input(local_input);
-        
+
                                 // Print or log if necessary for debugging
                                 // println!(
                                 //     "At address {:08X}, Local Input: {:016b}",
@@ -902,26 +1000,19 @@ impl Session {
                 as usize
         ]));
 
-
         // Add these as state variables or within a struct if needed.
         static mut LAST_PLAYER_HEALTH: u16 = 0;
         static mut LAST_OPPONENT_HEALTH: u16 = 0;
         static mut HEALTH_INITIALIZED: bool = false; // Flag to check if health has been properly initialized
         static HEALTH_ADDRESSES: LazyLock<Mutex<HashMap<u32, u16>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-        
 
         static PLAYER_HEALTH_ADDRESS: Mutex<Option<u32>> = Mutex::new(None);
         static OPPONENT_HEALTH_ADDRESS: Mutex<Option<u32>> = Mutex::new(None);
         static ADDRESSES_SET: Mutex<bool> = Mutex::new(false);
 
-
-        fn display_health_state(
-            core: &mut CoreMutRef,
-            player_address: u32,
-            opponent_address: u32,
-        ) {
+        fn display_health_state(core: &mut CoreMutRef, player_address: u32, opponent_address: u32) {
             let segment = -1; // Default segment; adjust if necessary
-            // Read current health values
+                              // Read current health values
             let current_player_health = core.raw_read_16(player_address, segment);
             let current_opponent_health = core.raw_read_16(opponent_address, segment);
 
@@ -933,18 +1024,18 @@ impl Session {
             //     // Client: Opponent is at 0x0203A9D4, Player is at 0x0203AAAC
             //     ("Opponent Health", "Player Health", client_health_address, server_health_address)
             // };
-        
+
             // Read current health values
             // let current_player_health = core.raw_read_16(player_health_address, segment);
             // let current_opponent_health = core.raw_read_16(opponent_health_address, segment);
-        
+
             // Safety: Ensure safe access to the static variables
             unsafe {
                 // Check if health values are greater than 0 for the first time
                 if !HEALTH_INITIALIZED && current_player_health > 0 && current_opponent_health > 0 {
                     HEALTH_INITIALIZED = true; // Set the flag to true, start checking for game state changes
                 }
-                
+
                 // If health values are initialized, start monitoring for winner or damage changes
                 if HEALTH_INITIALIZED {
                     // Check if player's health has decreased (punishment)
@@ -987,9 +1078,7 @@ impl Session {
                 set_enemy_charge(core.raw_read_8(0x02036A10, -1) as u16);
             }
         }
-        
-         
-       
+
         // Function to search for all potential health addresses
         fn search_all_health_values(core: &mut CoreMutRef, value_to_find: u16) -> Vec<u32> {
             let segment = -1; // Default segment, adjust as necessary
@@ -1012,7 +1101,7 @@ impl Session {
 
         // for setting the player index
         set_frame_count(0);
-        
+
         thread.set_frame_callback({
             let vbuf = vbuf.clone();
             let emu_tps_counter = emu_tps_counter.clone();
@@ -1030,11 +1119,11 @@ impl Session {
                 let currentFrame = get_frame_count();
 
                 set_frame_count(currentFrame + 1);
-        
+
                 if !replay_is_complete && stepper_state.lock_inner().input_pairs_left() == 0 {
                     completion_token.complete();
                 }
-        
+
                 if pause_on_next_frame.swap(false, std::sync::atomic::Ordering::SeqCst)
                     || completion_token.is_complete()
                 {
@@ -1044,10 +1133,10 @@ impl Session {
                         println!("Replay completed. Exiting application...");
                         std::process::exit(0); // Exit the application with code 0 (normal exit)
                     }
-                }else {
+                } else {
                     let core_ref = &mut core;
-        
-                        // Print local player index
+
+                    // Print local player index
                     // println!("Local Player Index: {}", local_player_index);
                     let is_offerer = local_player_index == 1;
 
@@ -1057,13 +1146,7 @@ impl Session {
                         // Define addresses for potential health values
                         let player_health_address = 0x020F52A4; // Example address
                         let segment = -1; // Default segment; adjust if necessary
-                        let possible_addresses = [
-                            0x0203AAAC, 
-                            0x02B7AAAC,
-                            0x0257AAAC,
-                            0x0203A9D4,
-                            0x0293A9D4,
-                        ];
+                        let possible_addresses = [0x0203AAAC, 0x02B7AAAC, 0x0257AAAC, 0x0203A9D4, 0x0293A9D4];
 
                         // //debug print all possible healths
                         // for &address in &possible_addresses {
@@ -1124,7 +1207,7 @@ impl Session {
                     }
 
                     let window_state_addresses = vec![
-                        (0x02035288, 0, 255),//success! 0=closed, 255 = open
+                        (0x02035288, 0, 255), //success! 0=closed, 255 = open
                     ];
 
                     // Retrieve the health addresses
@@ -1155,10 +1238,10 @@ impl Session {
                         //display 0x0203A9C4's value
                         //opponent's y position 261 517 773
                         // let current_value = core_ref.raw_read_16(0x0203A9C4, -1);
-                        
+
                         // println!("0x0203A9C4's value: {}", current_value);
 
-                        // //display x position 220 panel 6, 180 panel 5, 140 panel 4, 100 panel 3, 60 panel 2, 20 panel 1 
+                        // //display x position 220 panel 6, 180 panel 5, 140 panel 4, 100 panel 3, 60 panel 2, 20 panel 1
                         // let current_value = core_ref.raw_read_16(0x0203AA4C, -1);
                         // println!("0x0203AA4C's value: {}", current_value);
 
@@ -1172,17 +1255,26 @@ impl Session {
                         if get_player_health_index() == 0 {
                             set_player_position((player1_x, player1_y));
                             set_enemy_position((player2_x, player2_y));
+
+                            // println!("First Chip P1: {}", core.raw_read_16(0x203A9DA, -1));
+                            set_player_selected_chip(core_ref.raw_read_16(0x203A9DA, -1));
+                            // println!("First Chip P2: {}", core.raw_read_16(0x203AAB2, -1));
+                            set_enemy_selected_chip(core_ref.raw_read_16(0x203AAB2, -1));
                         } else if get_player_health_index() == 1 {
                             set_player_position((player2_x, player2_y));
                             set_enemy_position((player1_x, player1_y));
-                        }
-                        else{
-                            set_player_position((0,0));
+
+                            // println!("First Chip P2: {}", core.raw_read_16(0x203A9DA, -1));
+                            set_enemy_selected_chip(core_ref.raw_read_16(0x203A9DA, -1));
+                            // println!("First Chip P1: {}", core.raw_read_16(0x203AAB2, -1));
+                            set_player_selected_chip(core_ref.raw_read_16(0x203AAB2, -1));
+                        } else {
+                            set_player_position((0, 0));
                         }
                     } else {
                         println!("Health addresses not properly set.");
                     }
-                     // Search for health values that start at 1250
+                    // Search for health values that start at 1250
                     // Search for health values that start at 1250
                     // let health_addresses = search_all_health_values(core_ref, 1250);
 
@@ -1223,7 +1315,7 @@ impl Session {
                     // for (addr, value) in &*health_map {
                     //     println!("Address: 0x{:08X}, Current Value: {}", addr, value);
                     // }
-                    }
+                }
             }
         });
 

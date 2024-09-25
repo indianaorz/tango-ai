@@ -45,7 +45,7 @@ use keyboard::Key;
 
 mod global; // Include the global module
 
-use crate::global::{get_punishments,get_rewards,add_reward, add_punishment, clear_rewards, clear_punishments, get_enemy_charge, get_screen_image, get_local_input, clear_local_input, get_winner,get_player_health,get_player_position,get_enemy_health,get_enemy_position, get_is_player_inside_window, SCREEN_IMAGE, RewardPunishment};
+use crate::global::{get_punishments,get_rewards,add_reward, add_punishment, clear_rewards, clear_punishments, get_enemy_charge, get_screen_image, get_local_input, clear_local_input, get_winner,get_player_health,get_player_position,get_enemy_health,get_enemy_position, get_is_player_inside_window, get_player_selected_chip, get_enemy_selected_chip, SCREEN_IMAGE, RewardPunishment};
 use crate::global::{REWARDS, PUNISHMENTS}; // Import the global variables
 
 use base64::{encode}; // Add base64 for encoding images as strings
@@ -864,6 +864,8 @@ struct ScreenImageDetails {
     reward: u16,
     punishment: u16,
     current_input: u16,
+    player_chip: u16,
+    enemy_chip: u16,
 }
 use image::ImageEncoder;
 use egui::Color32;
@@ -935,6 +937,8 @@ async fn handle_tcp_client(
                                                     reward: get_rewards().last().map(|reward| reward.damage).unwrap_or(0),
                                                     punishment: get_punishments().last().map(|punishment| punishment.damage).unwrap_or(0),
                                                     current_input: get_local_input().unwrap_or(0),
+                                                    player_chip: get_player_selected_chip(),
+                                                    enemy_chip: get_enemy_selected_chip(),
                                                 };
                                                 clear_local_input();
                                                 clear_rewards();

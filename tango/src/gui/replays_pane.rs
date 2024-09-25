@@ -653,7 +653,7 @@ if !state.replay_loaded {
                                                                 None
                                                             };
 
-                                                            println!("Local ROM: {:?}", local_rom);
+                                                            // println!("Local ROM: {:?}", local_rom);
                                                              // Start the replay session
                                                             let audio_binder = shared_root_state.audio_binder.clone();
                                                             let emu_tps_counter = shared_root_state.emu_tps_counter.clone();

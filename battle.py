@@ -56,7 +56,7 @@ INSTANCES = [
         'address': '127.0.0.1',
         'port': 12345,
         'rom_path': 'bn6,0',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
+        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
         'name': 'Instance 2',
         'init_link_code': 'areana1',
         # 'replay_path':'/home/lee/Documents/Tango/replays/20240917185150-gregarbattleset1-bn6-vs-IndianaOrz-round1-p1.tangoreplay',

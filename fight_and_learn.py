@@ -75,7 +75,7 @@ latest_checkpoint_number = {'planning': 0, 'battle': 0}
 training_queue = queue.Queue()
 
 # Timer duration in seconds (can be set via environment variable or config)
-CHIP_WINDOW_TIMER = float(os.getenv("CHIP_WINDOW_TIMER", 10.0))  # Default is 5 seconds
+CHIP_WINDOW_TIMER = float(os.getenv("CHIP_WINDOW_TIMER", 30.0))  # Default is 5 seconds
 REPLAYS_DIR = '/home/lee/Documents/Tango/replaysOrig'
 
 
@@ -97,33 +97,34 @@ learning_rate = 5e-5
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
-replay_count = 8
-battle_count = 4
+replay_count = 18
+battle_count = 9
 include_orig = False
 do_replays = True
 
 INSTANCES = []
 # Define the server addresses and ports for each instance
 INSTANCES = [
-    # {
-    #     'address': '127.0.0.1',
-    #     'port': 12344,
-    #     'rom_path': 'bn6,0',
-    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
-    #     'name': 'Instance 1',
-    #     'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
-    #     'init_link_code': 'arena1',
-    #     'is_player': True  # Set to True if you don't want this instance to send inputs
-    # },
-    # {
-    #     'address': '127.0.0.1',
-    #     'port': 12345,
-    #     'rom_path': 'bn6,0',
-    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar.sav',
-    #     'name': 'Instance 2',
-    #     'init_link_code': 'arena1',
-    #     'is_player': False  # Set to False if you want this instance to send inputs
-    # },
+    {
+        'address': '127.0.0.1',
+        'port': 12344,
+        'rom_path': 'bn6,0',
+        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
+        'name': 'Instance 1',
+        # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
+        # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-IndianaOrz-round1-p2.tangoreplay',
+        'init_link_code': 'arena1',
+        'is_player': True  # Set to True if you don't want this instance to send inputs
+    },
+    {
+        'address': '127.0.0.1',
+        'port': 12345,
+        'rom_path': 'bn6,0',
+        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
+        'name': 'Instance 2',
+        'init_link_code': 'arena1',
+        'is_player': True  # Set to False if you want this instance to send inputs
+    },
     # Additional instances can be added here
 ]
 
@@ -191,7 +192,7 @@ if do_replays:
     print(f"Found {len(replay_files)} replay files.")
     processed_replays = []
     port = 12844
-    #shuffle the replay_files
+    #shuffle the replay_files/home/lee/Documents/Tango/replaysOrig/
     random.shuffle(replay_files)
     #create an instance for battle_count * 2 replays
     for replay_file in replay_files:
@@ -252,6 +253,8 @@ KEY_BIT_POSITIONS = {
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+print(f"Using device: {device}")
 
 # Function to get the training directory based on the replay file name
 def get_training_data_dir(replay_path):
@@ -366,6 +369,11 @@ def load_models(image_memory=1):
     inference_battle_model = training_battle_model
     inference_planning_model = training_planning_model
 
+    inference_battle_model.eval()
+    inference_planning_model.eval()
+    inference_battle_model.half()
+    inference_planning_model.half()
+
     # Initialize separate optimizers for Training Models
     optimizer_planning = optim.Adam(training_planning_model.parameters(), lr=learning_rate)
     optimizer_battle = optim.Adam(training_battle_model.parameters(), lr=learning_rate)
@@ -418,7 +426,7 @@ criterion = nn.BCEWithLogitsLoss(reduction='none')
 scaler = GradScaler()
 
 # Initialize frame buffers and frame counters
-frame_buffers = {instance['port']: deque(maxlen=2**IMAGE_MEMORY) for instance in INSTANCES}
+frame_buffers = {instance['port']: deque(maxlen=get_exponental_amount()**IMAGE_MEMORY) for instance in INSTANCES}
 frame_counters = {instance['port']: -1 for instance in INSTANCES}
 
 # Initialize sliding windows for temporal_charge if enabled
@@ -473,36 +481,24 @@ def normalize_health(player_health, enemy_health):
     normalized_enemy_health = enemy_health / max_enemy_health
     return normalized_player_health, normalized_enemy_health
 
-def health_memory_to_tensor(health_list, health_memory_size):
+def process_chip(chip_value):
     """
-    Converts a list of (player_health, enemy_health) tuples to a tensor.
-    
-    Args:
-        health_list (list): List of tuples containing (player_health, enemy_health).
-        health_memory_size (int): Number of past health states to include.
-    
-    Returns:
-        torch.Tensor: Tensor of shape (1, 2 * health_memory_size)
+    Converts chip_value into a one-hot tensor of size 400.
+    If chip_value is greater than or equal to 400, returns a tensor of zeros.
     """
-    # Flatten the list of tuples
-    flattened_health = []
-    for player_hp, enemy_hp in health_list:
-        flattened_health.extend([player_hp, enemy_hp])
-    
-    # Pad with zeros if necessary
-    if len(flattened_health) < 2 * health_memory_size:
-        padding = [0.0] * (2 * health_memory_size - len(flattened_health))
-        flattened_health = padding + flattened_health
-    
-    health_tensor = torch.tensor([flattened_health], dtype=torch.float32, device=device)  # Shape: (1, 2 * health_memory_size)
-    return health_tensor
+    chip_size = 400
+    chip_tensor = torch.zeros(chip_size, dtype=torch.float32, device=device)
+    if 0 <= chip_value < chip_size:
+        chip_tensor[chip_value] = 1.0
+    return chip_tensor.unsqueeze(0)  # Shape: (1, 400)
+
 
 # Function to perform inference with the AI model
 # previous_sent = 0
 
 def predict(port, frames, position_tensor, inside_window, player_health, enemy_health,
             player_charge_seq, enemy_charge_seq, current_player_charge, current_enemy_charge,
-            previous_inputs_tensor, health_memory_tensor):
+            previous_inputs_tensor, health_memory_tensor, current_player_chip, current_enemy_chip):
     """
     Predict the next action based on a sequence of frames and additional game state information.
     Chooses between Planning and Battle models based on `inside_window`.
@@ -651,55 +647,66 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
     with selected_lock:
         try:
             with torch.no_grad():
-                # Prepare additional inputs based on configuration
-                additional_inputs = {}
+                with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+                    # Prepare additional inputs based on configuration
+                    additional_inputs = {}
 
-                if input_memory_size > 0 and previous_inputs_tensor is not None:
-                    additional_inputs['previous_inputs'] = previous_inputs_tensor  # Shape: (1, input_memory_size * 16)
+                    if input_memory_size > 0 and previous_inputs_tensor is not None:
+                        additional_inputs['previous_inputs'] = previous_inputs_tensor  # Shape: (1, input_memory_size * 16)
 
-                # Include health_memory if health_memory_size is set
-                if health_memory_size > 0 and health_memory_tensor is not None:
-                    additional_inputs['health_memory'] = health_memory_tensor  # Shape: (1, 2 * health_memory_size)
+                    # Include health_memory if health_memory_size is set
+                    if health_memory_size > 0 and health_memory_tensor is not None:
+                        additional_inputs['health_memory'] = health_memory_tensor  # Shape: (1, 2 * health_memory_size)
 
-                if config['input_features'].get('include_position', False):
-                    additional_inputs['position'] = position_tensor  # Shape based on config
-                if config['input_features'].get('temporal_charge', 0) > 0:
-                    additional_inputs['player_charge_temporal'] = player_charge_seq  # Shape: (1, temporal_charge)
-                    additional_inputs['enemy_charge_temporal'] = enemy_charge_seq    # Shape: (1, temporal_charge)
-                    
-                    # Convert scalar charges to tensors
-                    additional_inputs['player_charge'] = torch.tensor(
-                        [current_player_charge], dtype=torch.float32, device=device
-                    )  # Shape: (1,)
-                    additional_inputs['enemy_charge'] = torch.tensor(
-                        [current_enemy_charge], dtype=torch.float32, device=device
-                    )  # Shape: (1,)
-                else:
-                    if config['input_features'].get('include_player_charge', False):
+                    if config['input_features'].get('include_position', False):
+                        additional_inputs['position'] = position_tensor  # Shape based on config
+                    if config['input_features'].get('temporal_charge', 0) > 0:
+                        additional_inputs['player_charge_temporal'] = player_charge_seq  # Shape: (1, temporal_charge)
+                        additional_inputs['enemy_charge_temporal'] = enemy_charge_seq    # Shape: (1, temporal_charge)
+                        
+                        # Convert scalar charges to tensors
                         additional_inputs['player_charge'] = torch.tensor(
                             [current_player_charge], dtype=torch.float32, device=device
                         )  # Shape: (1,)
-                    if config['input_features'].get('include_enemy_charge', False):
                         additional_inputs['enemy_charge'] = torch.tensor(
                             [current_enemy_charge], dtype=torch.float32, device=device
                         )  # Shape: (1,)
-                    
-                # Perform inference
-                outputs = selected_model(
-                    stacked_frames,
-                    **additional_inputs
-                )
-                probs = torch.sigmoid(outputs)
-                probs = probs.cpu().numpy()[0]
-                # Get threshold based on model type
-                if model_type == "Planning_Model":
-                    command_threshold = get_threshold_plan()
-                else:
-                    command_threshold = get_threshold()
+                    else:
+                        if config['input_features'].get('include_player_charge', False):
+                            additional_inputs['player_charge'] = torch.tensor(
+                                [current_player_charge], dtype=torch.float32, device=device
+                            )  # Shape: (1,)
+                        if config['input_features'].get('include_enemy_charge', False):
+                            additional_inputs['enemy_charge'] = torch.tensor(
+                                [current_enemy_charge], dtype=torch.float32, device=device
+                            )  # Shape: (1,)
 
-                # Convert probabilities to binary input string based on threshold
-                predicted_inputs = (probs >= command_threshold).astype(int)
-                predicted_input_str = ''.join(map(str, predicted_inputs))
+                    # Process player_chip
+                    if config['input_features'].get('include_player_chip', False):
+                        player_chip_tensor = process_chip(current_player_chip)
+                        additional_inputs['player_chip'] = player_chip_tensor  # Shape: (1, 400)
+
+                    # Process enemy_chip
+                    if config['input_features'].get('include_enemy_chip', False):
+                        enemy_chip_tensor = process_chip(current_enemy_chip)
+                        additional_inputs['enemy_chip'] = enemy_chip_tensor  # Shape: (1, 400)
+                        
+                    # Perform inference
+                    outputs = selected_model(
+                        stacked_frames,
+                        **additional_inputs
+                    )
+                    probs = torch.sigmoid(outputs)
+                    probs = probs.cpu().numpy()[0]
+                    # Get threshold based on model type
+                    if model_type == "Planning_Model":
+                        command_threshold = get_threshold_plan()
+                    else:
+                        command_threshold = get_threshold()
+
+                    # Convert probabilities to binary input string based on threshold
+                    predicted_inputs = (probs >= command_threshold).astype(int)
+                    predicted_input_str = ''.join(map(str, predicted_inputs))
         except Exception as e:
             print(f"Error during inference with {model_type}: {e}")
             return {'type': 'key_press', 'key': '0000000000000000'}  # Return no key press on failure
@@ -750,7 +757,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
     is_replay = game_instance.get('replay_path', None) is not None
 
     # Define the minimum required frames for exponential sampling
-    minimum_required_frames = 2**(IMAGE_MEMORY - 1) if IMAGE_MEMORY > 1 else 1
+    minimum_required_frames = get_exponental_amount()**(IMAGE_MEMORY - 1) if IMAGE_MEMORY > 1 else 1
 
     try:
         while True:
@@ -805,9 +812,14 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         current_input = screen_data.get("current_input", None)  # Update current_input if available
                         if current_input is not None:
                             current_input = int_to_binary_string(current_input)
+                        current_player_chip = screen_data.get("player_chip", 0)#value 0-400
+                        current_enemy_chip = screen_data.get("enemy_chip", 0)#value 0-400
                     except json.JSONDecodeError:
                         print(f"Port {port}: Failed to parse screen_image details: {details}")
                         continue
+                    
+                    #print current player chip and enemy chip
+                    # print(f"Port {port}: Current player chip: {current_player_chip}, Current enemy chip: {current_enemy_chip}")
 
                     current_round_damage[port] += float(screen_data.get("reward", 0))
                     current_round_damage[port] -= float(screen_data.get("punishment", 0))  
@@ -957,6 +969,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 'current_enemy_charge': current_enemy_charge,
                                 'previous_inputs': previous_inputs_tensor,
                                 'health_memory': health_memory_tensor,  # Add health_memory
+                                'current_player_chip': current_player_chip,
+                                'current_enemy_chip': current_enemy_chip,
                                 'action': None  # Will be updated after sending the command
                             }
                             if not game_instance.get('is_player', False) and not is_replay:
@@ -972,7 +986,9 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                     current_player_charge,
                                     current_enemy_charge,
                                     previous_inputs_tensor,
-                                    health_memory_tensor
+                                    health_memory_tensor,
+                                    current_player_chip,
+                                    current_enemy_chip
                                 )
                                 #final check to make sure the action doesn't contain the pause button while outside the window
                                 if current_inside_window == 0 and command['key'][15 - KEY_BIT_POSITIONS['RETURN']] == '1': 
@@ -1029,6 +1045,12 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 # Reset rewards
                                 current_reward = 0
                                 current_punishment = 0
+                            else:
+                                if current_player_charge != 0:# or current_punishment == 0:
+                                    print(f"Port {port}: Assigning reward: {0.1}")
+                                    # Train on the current frame (data_point)
+                                    if current_player_charge != 0:
+                                        data_point['reward'] = 0.1
 
                             # Pruning Logic Starts Here
                             # Remove data points older than window_size that have no reward assigned
@@ -1043,6 +1065,9 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                         pruned_count += 1
                                     else:
                                         i += 1
+
+                            
+
                                 # if pruned_count > 0:
                                 #     print(f"Port {port}: Pruned {pruned_count} data points from data_buffers.")
                             # else:
@@ -1053,14 +1078,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             #     data_buffers[port].append(data_point)
 
                                 
-                            # else:
-                            # if current_player_charge != 0:# or current_punishment == 0:
-                            #     # print(f"Port {port}: Assigning reward: {0.1}")
-                            #     # Train on the current frame (data_point)
-                            #     if current_player_charge != 0:
-                            #         data_point['reward'] = 0.001
-                            #     # else:
-                            #     #     data_point['reward'] = 0.001
+                                    # else:
+                                    #     data_point['reward'] = 0.001
 
                             #     asyncio.create_task(asyncio.to_thread(
                             #         train_model_online,
@@ -1105,7 +1124,9 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         # Reset additional fields after processing
                         if current_inside_window == 1.0:
                             # Append data_point to planning_data_buffers
-                            planning_data_buffers[port].append(data_point)
+                            #only append if the action is not all 0s, unless the current is all 0s and the previous is not (to signify release)
+                            if data_point['action'] != '0000000000000000' or (data_point['action'] == '0000000000000000' and planning_data_buffers[port] and planning_data_buffers[port][-1]['action'] != '0000000000000000'):
+                                planning_data_buffers[port].append(data_point)
                             # print(f"Port {port}: Appended data_point to planning_data_buffers. {current_input}. {len(planning_data_buffers[port])}")
                         current_player_health = None
                         current_enemy_health = None
@@ -1117,8 +1138,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
 
                         
 
-                    else:
-                        print(f"Port {port}: Not enough frames for exponential sampling. Required: {minimum_required_frames}, Available: {len(frame_buffers[port])}")
+                    # else:
+                    #     print(f"Port {port}: Not enough frames for exponential sampling. Required: {minimum_required_frames}, Available: {len(frame_buffers[port])}")
 
 
 
@@ -1244,21 +1265,6 @@ def training_thread_function(batch_size=48, max_wait_time=1.0):
         if all(len(buffer) == 0 for buffer in data_buffers.values()):
             break
 
-def train_model_online_batch(batch):
-    """
-    Processes a batch of training data.
-    
-    Args:
-        batch (list): List of training data tuples.
-    """
-    # Aggregate data from the batch
-    aggregated_data = []
-    for training_data in batch:
-        port, data_buffer, model_type, log = training_data
-        aggregated_data.extend(data_buffer)  # Assuming data_buffer is a list
-    
-    # Perform the training with the aggregated data
-    train_model_online(port, aggregated_data, model_type, log)
 
 
 def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
@@ -1295,6 +1301,9 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
         rewards_batch = []
         previous_inputs_batch = []
         health_memory_batch = []
+        player_chip_batch = []
+        enemy_chip_batch = []
+
 
 
         for data_point in data_buffer:
@@ -1306,6 +1315,21 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
                 preprocessed_frames.append(img)
             stacked_frames = torch.stack(preprocessed_frames, dim=2).squeeze(0)
             frames_batch.append(stacked_frames)
+
+            # Process player_chip
+            if data_point.get('player_chip') is not None:
+                player_chip_tensor = process_chip(data_point['player_chip'])
+                player_chip_batch.append(player_chip_tensor.squeeze(0))  # Remove batch dimension
+            else:
+                player_chip_batch.append(torch.zeros(400, device=device))
+
+            # Process enemy_chip
+            if data_point.get('enemy_chip') is not None:
+                enemy_chip_tensor = process_chip(data_point['enemy_chip'])
+                enemy_chip_batch.append(enemy_chip_tensor.squeeze(0))  # Remove batch dimension
+            else:
+                enemy_chip_batch.append(torch.zeros(400, device=device))
+
 
             # Positions
             if data_point['position_tensor'] is not None:
@@ -1372,6 +1396,17 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
 
         # Stack batches
         frames_batch = torch.stack(frames_batch)  # Shape: (batch_size, 3, D, H, W)
+
+        if player_chip_batch:
+            player_chip_batch = torch.stack(player_chip_batch)  # Shape: (batch_size, 400)
+        else:
+            player_chip_batch = None
+
+        if enemy_chip_batch:
+            enemy_chip_batch = torch.stack(enemy_chip_batch)  # Shape: (batch_size, 400)
+        else:
+            enemy_chip_batch = None
+
         if position_batch:
             position_batch = torch.stack(position_batch)  # Shape: (batch_size, position_dim)
         else:
@@ -1444,6 +1479,8 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
             'enemy_charge': enemy_charge_batch,  # Shape: (batch_size,)
             'previous_inputs': previous_inputs_batch,  # Shape: (batch_size, input_memory_size * 16) or None
             'health_memory': health_memory_batch,  # Shape: (batch_size, 2 * health_memory_size) or None
+            'player_chip': player_chip_batch,  # Shape: (batch_size, 400) or None
+            'enemy_chip': enemy_chip_batch,  # Shape: (batch_size, 400) or None
             'actions': targets_batch,  # Shape: (batch_size, num_actions)
             'rewards': rewards_batch   # Shape: (batch_size,)
         }
@@ -1468,9 +1505,12 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
             enemy_charge=enemy_charge_batch,
             player_charge_temporal=player_charge_seq_batch,
             enemy_charge_temporal=enemy_charge_seq_batch,
-            previous_inputs = previous_inputs_batch,
-            health_memory = health_memory_batch
-        )  # Shape: (batch_size, num_actions)
+            previous_inputs=previous_inputs_batch,
+            health_memory=health_memory_batch,
+            player_chip=player_chip_batch,
+            enemy_chip=enemy_chip_batch
+        )
+
 
 
         # Compute log probabilities directly
@@ -1912,7 +1952,7 @@ async def main():
     training_thread = threading.Thread(target=training_thread_function, daemon=True)
     training_thread.start()
 
-    # At the end, before exiting, signal the training thread to stop
+    # # At the end, before exiting, signal the training thread to stop
     training_queue.put(None)  # Sentinel value to stop the thread
     training_thread.join() # Wait for the thread to finish
     
@@ -1924,48 +1964,6 @@ async def main():
     except asyncio.CancelledError:
         print("Mouse monitoring task cancelled.")
 
-    # Perform Final Training Epoch to Prevent Catastrophic Forgetting
-    print("Starting final training epoch on all accumulated data.")
-
-    # # Clear all data from memory and GPU
-    # clear_memory()# After deleting variables and before starting final training
-    # gc.collect()
-    # torch.cuda.empty_cache()
-
-    # # Train on Battle Data
-    # if os.path.exists(battle_data_dir) and os.listdir(battle_data_dir):
-    #     try:
-    #         final_training_epoch(
-    #             model=training_battle_model,
-    #             optimizer=optimizer_battle,
-    #             training_data_dir=battle_data_dir,
-    #             model_type='Battle_Model',
-    #             batch_size=1,  # Adjust based on your system
-    #             num_workers=0
-    #         )
-    #     except Exception as e:
-    #         print(f"Failed to train Battle_Model: {e}")
-    #         traceback.print_exc()
-    # else:
-    #     print("No Battle data available for final training.")
-
-    # # Train on Planning Data
-    # if os.path.exists(planning_data_dir) and os.listdir(planning_data_dir):
-    #     try:
-    #         final_training_epoch(
-    #             model=training_planning_model,
-    #             optimizer=optimizer_planning,
-    #             training_data_dir=planning_data_dir,
-    #             model_type='Planning_Model',
-    #             batch_size=1,  # Adjust based on your system
-    #             num_workers=0
-    #         )
-    #     except Exception as e:
-    #         print(f"Failed to train Planning_Model: {e}")
-    #         traceback.print_exc()
-    # else:
-    #     print("No Planning data available for final training.")
-    
 
     # Save the models
     save_models()
@@ -1973,148 +1971,6 @@ async def main():
 import h5py
 import numpy as np
 import torch
-
-def load_hdf5_data(file_path):
-    """
-    Loads data from an HDF5 file.
-
-    Args:
-        file_path (str): Path to the HDF5 file.
-
-    Returns:
-        dict: Dictionary containing loaded data.
-    """
-    data = {}
-    with h5py.File(file_path, 'r') as hf:
-        for key in hf.keys():
-            data[key] = hf[key][:]
-        # Load metadata if needed
-        metadata = dict(hf.attrs)
-    return data, metadata
-
-def aggregate_data_from_dir(directory, model_type='Battle_Model'):
-    """
-    Aggregates data from all HDF5 files in a directory.
-
-    Args:
-        directory (str): Path to the directory containing HDF5 files.
-        model_type (str): Type of model ('Battle_Model' or 'Planning_Model').
-
-    Returns:
-        dict: Aggregated data ready for training.
-    """
-    aggregated_data = {
-        'frames': [],
-        'position': [],
-        'player_charge_seq': [],
-        'enemy_charge_seq': [],
-        'player_charge': [],
-        'enemy_charge': [],
-        'previous_inputs': [],
-        'health_memory': [],
-        'actions': [],
-        'rewards': []
-    }
-
-    for root, _, files in os.walk(directory):
-        for file in files:
-            if file.endswith('.h5') and file.startswith(model_type):
-                file_path = os.path.join(root, file)
-                data, metadata = load_hdf5_data(file_path)
-
-                aggregated_data['frames'].append(torch.tensor(data['frames'], dtype=torch.float32))
-                aggregated_data['position'].append(torch.tensor(data.get('position', np.zeros((data['frames'].shape[0], 4))), dtype=torch.float32))
-                aggregated_data['player_charge_seq'].append(torch.tensor(data.get('player_charge_seq', np.zeros((data['frames'].shape[0], TEMPORAL_CHARGE))), dtype=torch.float32))
-                aggregated_data['enemy_charge_seq'].append(torch.tensor(data.get('enemy_charge_seq', np.zeros((data['frames'].shape[0], TEMPORAL_CHARGE))), dtype=torch.float32))
-                aggregated_data['player_charge'].append(torch.tensor(data.get('player_charge', np.zeros(data['frames'].shape[0])), dtype=torch.float32))
-                aggregated_data['enemy_charge'].append(torch.tensor(data.get('enemy_charge', np.zeros(data['frames'].shape[0])), dtype=torch.float32))
-                aggregated_data['previous_inputs'].append(torch.tensor(data.get('previous_inputs', np.zeros((data['frames'].shape[0], input_memory_size * 16))), dtype=torch.float32))
-                aggregated_data['health_memory'].append(torch.tensor(data.get('health_memory', np.zeros((data['frames'].shape[0], 2 * health_memory_size))), dtype=torch.float32))
-                aggregated_data['actions'].append(torch.tensor(data['actions'], dtype=torch.float32))
-                aggregated_data['rewards'].append(torch.tensor(data['rewards'], dtype=torch.float32))
-
-    # Concatenate all data
-    for key in aggregated_data:
-        if aggregated_data[key]:
-            aggregated_data[key] = torch.cat(aggregated_data[key], dim=0)
-        else:
-            aggregated_data[key] = None
-
-    return aggregated_data
-
-from torch.utils.data import TensorDataset, DataLoader
-from tqdm import tqdm
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-import torch.nn.functional as F
-import traceback
-
-import h5py
-import os
-from datetime import datetime
-
-import h5py
-import os
-from datetime import datetime
-import numpy as np
-import h5py
-import torch
-from torch.utils.data import IterableDataset
-import os
-import random
-
-class HDF5IterableDataset(IterableDataset):
-    def __init__(self, directory, model_type='Battle_Model'):
-        """
-        Initializes the dataset by listing all relevant HDF5 files.
-
-        Args:
-            directory (str): Directory containing HDF5 files.
-            model_type (str): Type of model ('Battle_Model' or 'Planning_Model').
-        """
-        self.directory = directory
-        self.model_type = model_type
-        self.files = [
-            os.path.join(root, file)
-            for root, _, files in os.walk(directory)
-            for file in files
-            if file.endswith('.h5') and file.startswith(model_type)
-        ]
-        if not self.files:
-            raise FileNotFoundError(f"No HDF5 files found for model type '{model_type}' in directory '{directory}'.")
-
-    def __iter__(self):
-        """
-        Yields data points one by one from the HDF5 files.
-        """
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is None:
-            # Single-process data loading
-            files = self.files
-        else:
-            # In a worker process
-            per_worker = int(np.ceil(len(self.files) / float(worker_info.num_workers)))
-            worker_id = worker_info.id
-            files = self.files[worker_id * per_worker : (worker_id + 1) * per_worker]
-
-        for file_path in files:
-            try:
-                with h5py.File(file_path, 'r') as hf:
-                    # Assume all datasets have the same length
-                    num_samples = hf['actions'].shape[0]
-                    for i in range(num_samples):
-                        data_point = {}
-                        for key in hf.keys():
-                            data_point[key] = torch.tensor(hf[key][i], dtype=torch.float32)
-                        data_point['reward'] = torch.tensor(hf['rewards'][i], dtype=torch.float32)
-                        yield data_point
-            except Exception as e:
-                print(f"Failed to read {file_path}: {e}")
-                continue
 
 def save_batch_to_hdf5(batch_data, training_data_dir, port, model_type):
     """
@@ -2225,6 +2081,8 @@ def save_data_point(data_point, training_data_dir, port):
         'current_enemy_charge': data_point['current_enemy_charge'],
         'previous_inputs': data_point['previous_inputs'].cpu().numpy().tolist() if data_point['previous_inputs'] is not None else None,
         'health_memory': data_point['health_memory'].cpu().numpy().tolist() if data_point['health_memory'] is not None else None,
+        'player_chip': data_point['player_chip'].cpu().numpy().tolist() if data_point['player_chip'] is not None else None,
+        'enemy_chip': data_point['enemy_chip'].cpu().numpy().tolist() if data_point['enemy_chip'] is not None else None,
         'action': data_point['action'],
         'reward': data_point.get('reward', 0.0)
     }

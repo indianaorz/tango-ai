@@ -70,6 +70,8 @@ def final_training_epoch(model, optimizer, training_data_dir, model_type='Battle
             enemy_charge = batch['enemy_charge'].to(device) if 'enemy_charge' in batch else None
             previous_inputs = batch['previous_inputs'].to(device) if 'previous_inputs' in batch else None
             health_memory = batch['health_memory'].to(device) if 'health_memory' in batch else None
+            player_chip = batch['player_chip'].to(device) if 'player_chip' in batch else None
+            enemy_chip = batch['enemy_chip'].to(device) if 'enemy_chip' in batch else None
             actions = batch['actions'].to(device)  # Shape: (batch_size, num_actions)
             rewards = batch['rewards'].to(device)  # Shape: (batch_size,)
 
@@ -85,10 +87,12 @@ def final_training_epoch(model, optimizer, training_data_dir, model_type='Battle
                 player_charge_temporal=player_charge_seq,
                 enemy_charge_temporal=enemy_charge_seq,
                 previous_inputs=previous_inputs,
-                health_memory=health_memory
+                health_memory=health_memory,
+                player_chip=player_chip,
+                enemy_chip=enemy_chip
             )  # Shape: (batch_size, num_actions)
 
-              # Compute log probabilities directly
+            # Compute log probabilities directly
             probs = torch.sigmoid(outputs)
             epsilon = 1e-6  # For numerical stability
             probs = torch.clamp(probs, epsilon, 1 - epsilon)

@@ -15,5 +15,7 @@ input_features:
   temporal_charge: 20  # amount of previous frames for the charge state
   input_memory: 20  # number of previous inputs to include
   health_memory: 20  # number of previous health states to include
+  include_player_chip: true  
+  include_enemy_chip: true
 
 

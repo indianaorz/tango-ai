@@ -8,7 +8,11 @@ def get_root_dir():
     return '../TANGO'#'/home/lee/tango' #'../TANGO'#'/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO'
 
 def get_image_memory():
-    return 3
+    return 10
+
+def get_exponental_amount():
+    return 2
+
 
 def get_threshold():
     return 0.5
@@ -29,6 +33,26 @@ def get_checkpoint_dir(model_type='planning', image_memory=1):
     checkpoint_dir = os.path.join(root_dir, 'checkpoints', model_type, str(image_memory))
     os.makedirs(checkpoint_dir, exist_ok=True)
     return checkpoint_dir
+
+
+def one_hot_encode_chip(value, size=400):
+    """
+    One-hot encodes a chip value. If the value is out of range, returns a zero tensor.
+    
+    Args:
+        value (int): The chip value to encode.
+        size (int): The size of the one-hot vector.
+    
+    Returns:
+        torch.Tensor: One-hot encoded tensor of shape (size,).
+    """
+    if 0 <= value < size:
+        one_hot = torch.zeros(size, dtype=torch.float32, device=device)
+        one_hot[value] = 1.0
+    else:
+        one_hot = torch.zeros(size, dtype=torch.float32, device=device)
+    return one_hot
+
 
 def extract_number_from_checkpoint(checkpoint_path):
     """
@@ -66,9 +90,6 @@ def get_new_checkpoint_path(model_type='planning', image_memory=1):
     return checkpoint_path
 
 
-def get_exponental_amount():
-    return 2
-
 # utils.py
 
 def get_exponential_sample(indices_list, current_idx, image_memory):
@@ -103,7 +124,7 @@ def get_exponential_sample(indices_list, current_idx, image_memory):
         sampled_indices.append(current)
         # print(f"get_exponential_sample: Appending index {current}")
         current -= step
-        step *= get_exponental_amount()  # Exponentially increase the step (1, 2, 4, 8, ...)
+        step = 1#get_exponental_amount()  # Exponentially increase the step (1, 2, 4, 8, ...)
 
     # Remove any excess frames
     if len(sampled_indices) > image_memory:

@@ -43,8 +43,8 @@ lazy_static! {
     pub static ref IS_PLAYER_INSIDE_WINDOW: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None)); // New flag
 
     //player and enemy health
-    pub static ref PLAYER_HEALTH: Arc<Mutex<u16>> = Arc::new(Mutex::new(100));
-    pub static ref ENEMY_HEALTH: Arc<Mutex<u16>> = Arc::new(Mutex::new(100));
+    pub static ref PLAYER_HEALTH: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+    pub static ref ENEMY_HEALTH: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
 
     //player health index
     pub static ref PLAYER_HEALTH_INDEX: Arc<Mutex<u16>> = Arc::new(Mutex::new(2));
@@ -57,8 +57,35 @@ lazy_static! {
 
     //enemy charge
     pub static ref ENEMY_CHARGE: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    //player selected chip number
+    pub static ref PLAYER_SELECTED_CHIP: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    //enemy selected chip number
+    pub static ref ENEMY_SELECTED_CHIP: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
 }
 
+//function to set player selected chip
+pub fn set_player_selected_chip(chip: u16) {
+    let mut player_selected_chip = PLAYER_SELECTED_CHIP.lock();
+    *player_selected_chip = chip;
+}
+
+pub fn get_player_selected_chip() -> u16 {
+    let player_selected_chip = PLAYER_SELECTED_CHIP.lock();
+    *player_selected_chip
+}
+
+//function to set enemy selected chip
+pub fn set_enemy_selected_chip(chip: u16) {
+    let mut enemy_selected_chip = ENEMY_SELECTED_CHIP.lock();
+    *enemy_selected_chip = chip;
+}
+
+pub fn get_enemy_selected_chip() -> u16 {
+    let enemy_selected_chip = ENEMY_SELECTED_CHIP.lock();
+    *enemy_selected_chip
+}
 
 // Function to set the player charge
 pub fn set_player_charge(charge: u16) {
