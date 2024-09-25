@@ -75,7 +75,7 @@ latest_checkpoint_number = {'planning': 0, 'battle': 0}
 training_queue = queue.Queue()
 
 # Timer duration in seconds (can be set via environment variable or config)
-CHIP_WINDOW_TIMER = float(os.getenv("CHIP_WINDOW_TIMER", 30.0))  # Default is 5 seconds
+CHIP_WINDOW_TIMER = float(os.getenv("CHIP_WINDOW_TIMER", 10.0))  # Default is 5 seconds
 REPLAYS_DIR = '/home/lee/Documents/Tango/replaysOrig'
 
 
@@ -97,8 +97,8 @@ learning_rate = 5e-5
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
-replay_count = 18
-battle_count = 9
+replay_count = 8
+battle_count = 4
 include_orig = False
 do_replays = True
 
@@ -1283,6 +1283,7 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
         raise ValueError(f"Unknown model_type: {model_type}")
 
     with selected_lock:
+        selected_model = selected_model.float()
         selected_model.train()  # Switch to train mode
 
         batch_size = len(data_buffer)
