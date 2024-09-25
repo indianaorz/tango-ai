@@ -1201,7 +1201,7 @@ impl Session {
                                 *addresses_set = true;
                             }
                         } else {
-                            println!("Could not determine opponent's health address.");
+                            // println!("Could not determine opponent's health address.");
                             return;
                         }
                     }

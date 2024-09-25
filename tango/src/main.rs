@@ -605,9 +605,9 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                     event: "local_input".to_string(),
                     details: format!("{:?}", input),
                 };
-                if let Err(e) = output_tx.send(input_message) {
-                    println!("Failed to send local inputs: {}", e);
-                }
+                // if let Err(e) = output_tx.send(input_message) {
+                //     println!("Failed to send local inputs: {}", e);
+                // }
                 // clear_local_input(); // Clear inputs after sending
             }
         }

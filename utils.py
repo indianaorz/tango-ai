@@ -8,7 +8,7 @@ def get_root_dir():
     return '../TANGO'#'/home/lee/tango' #'../TANGO'#'/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO'
 
 def get_image_memory():
-    return 10
+    return 5
 
 def get_exponental_amount():
     return 2

@@ -91,7 +91,7 @@ env_common = os.environ.copy()
 env_common["INIT_LINK_CODE"] = "valuesearch"
 env_common["AI_MODEL_PATH"] = "ai_model"
 GAMMA = float(os.getenv("GAMMA", 0.1))  # Default gamma is 0.05
-learning_rate = 5e-5
+learning_rate = 1e-4
 
 # Initialize maximum health values
 max_player_health = 1.0  # Start with a default value to avoid division by zero
@@ -525,14 +525,14 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
         
         #check if planning_data_buffers has content
         if planning_data_buffers[port]:
-            print(f"Port {port}: Entering planning window. Training Planning Model.")
+            # print(f"Port {port}: Entering planning window. Training Planning Model.")
             max_round_damage[port] = 500#max(max_round_damage[port], current_round_damage[port])
             # Normalize the damage
             if max_round_damage[port] > 0:
                 normalized_damage = current_round_damage[port] / max_round_damage[port]
             else:
                 normalized_damage = 0.0
-            print(f"Port {port}: Normalized Damage = {normalized_damage}")
+            # print(f"Port {port}: Normalized Damage = {normalized_damage}")
             
             # Assign the normalized damage as the reward to all collected data points
             # with training_planning_lock:
@@ -540,7 +540,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
                 if not data_point.get('assigned_reward', False):
                     data_point['reward'] = normalized_damage  # Assign positive reward
                     # Train the Planning Model with the collected data points
-                    if planning_data_buffers[port]:
+                    # if planning_data_buffers[port]:
                         # asyncio.create_task(asyncio.to_thread(
                         #     train_model_online,
                         #     port,
@@ -548,7 +548,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
                         #     model_type="Planning_Model"
                         # ))
                         # training_queue.put((port, list(data_buffers[port]), "Planning_Model", True))
-                        print(f"Port {port}: Submitted {len(planning_data_buffers[port])} data points for Planning Model training.")
+                        # print(f"Port {port}: Submitted {len(planning_data_buffers[port])} data points for Planning Model training.")
                     # Clear the buffer after training
                     # planning_data_buffers[port].clear()
                     data_point['assigned_reward']=True
@@ -560,7 +560,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
         # Ensure the planning data buffer is empty
         # planning_data_buffers[port].clear()
         # data_point['assigned_reward']=True
-        print(f"Port {port}: Entered window. Timer started.")
+        # print(f"Port {port}: Entered window. Timer started.")
 
     # If inside the window, check if the timer has expired
     elif inside_window.item() == 1.0:
@@ -1011,7 +1011,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             if current_reward != 0 or current_punishment != 0:
                                 # Compute reward for the data_point
                                 reward_value = (current_reward / max_reward) - (current_punishment / max_punishment)
-                                print(f"Port {port}: Assigning reward: {reward_value}")
+                                # print(f"Port {port}: Assigning reward: {reward_value}")
 
                                 #assign datapoint if not assigned
                                 if 'reward' not in data_buffers[port][-1]:
@@ -1047,7 +1047,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 current_punishment = 0
                             else:
                                 if current_player_charge != 0:# or current_punishment == 0:
-                                    print(f"Port {port}: Assigning reward: {0.1}")
+                                    # print(f"Port {port}: Assigning reward: {0.1}")
                                     # Train on the current frame (data_point)
                                     if current_player_charge != 0:
                                         data_point['reward'] = 0.1
@@ -1526,7 +1526,7 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
         # Compute entropy
         entropy = -(probs * torch.log(probs) + (1 - probs) * torch.log(1 - probs)).sum(dim=1)
 
-        entropy_coefficient = 0.01
+        entropy_coefficient = 0.05
         total_loss = policy_loss - entropy_coefficient * entropy.mean()
 
         # Backward pass
@@ -1691,7 +1691,7 @@ def process_position(player_position, enemy_position, config):
                 float(enemy_position[1])
             ]
         else:
-            print(f"Invalid positions: player_position={player_position}, enemy_position={enemy_position}. Using zeros.")
+            # print(f"Invalid positions: player_position={player_position}, enemy_position={enemy_position}. Using zeros.")
             position = [0.0, 0.0, 0.0, 0.0]
 
         position_tensor = torch.tensor([position], dtype=torch.float32, device=device)  # Shape: (1, 4)
