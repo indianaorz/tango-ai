@@ -104,7 +104,7 @@ def final_training_epoch(model, optimizer, training_data_dir, model_type='Battle
             # Compute entropy
             entropy = -(probs * torch.log(probs) + (1 - probs) * torch.log(1 - probs)).sum(dim=1)
 
-            entropy_coefficient = 0.01
+            entropy_coefficient = 0.05
             total_loss = policy_loss - entropy_coefficient * entropy.mean()
 
             # Backward pass

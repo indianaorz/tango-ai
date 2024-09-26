@@ -215,6 +215,28 @@ async def main():
         else:
             print("No Battle data available for final training.")
 
+
+        # Step 6: Save the models
+        save_models(
+            None, 
+            training_battle_model, 
+            None, 
+            optimizer_battle, 
+            get_checkpoint_dir, 
+            get_latest_checkpoint, 
+            MAX_CHECKPOINTS=config.get('MAX_CHECKPOINTS', 5), 
+            IMAGE_MEMORY=get_image_memory()
+        )
+
+
+        #clear
+        del training_battle_model
+        del optimizer_battle
+        # Clear CUDA cache
+        torch.cuda.empty_cache()
+        gc.collect()
+
+
         # Train on Planning Data
         if os.path.exists(planning_data_dir) and os.listdir(planning_data_dir):
             try:
@@ -237,9 +259,9 @@ async def main():
         # Step 6: Save the models
         save_models(
             training_planning_model, 
-            training_battle_model, 
+            None, 
             optimizer_planning, 
-            optimizer_battle, 
+            None, 
             get_checkpoint_dir, 
             get_latest_checkpoint, 
             MAX_CHECKPOINTS=config.get('MAX_CHECKPOINTS', 5), 
@@ -248,10 +270,7 @@ async def main():
 
         # Clear memory
         del training_planning_model
-        del training_battle_model
         del optimizer_planning
-        del optimizer_battle
-
         # Clear CUDA cache
         torch.cuda.empty_cache()
         gc.collect()

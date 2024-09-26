@@ -75,7 +75,7 @@ class BilinearAttention(nn.Module):
     
     
 class GameInputPredictor(nn.Module):
-    def __init__(self, image_memory=1, config=None, scale = 4):
+    def __init__(self, image_memory=1, config=None, scale = 2):
         super(GameInputPredictor, self).__init__()
         self.image_memory = image_memory
         
