@@ -63,6 +63,25 @@ lazy_static! {
 
     //enemy selected chip number
     pub static ref ENEMY_SELECTED_CHIP: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+
+    pub static ref PLAYER_EMOTION_STATE: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    pub static ref ENEMY_EMOTION_STATE: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    pub static ref SELECTED_MENU_INDEX: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    pub static ref SELECTED_CROSS_INDEX: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    pub static ref CHIP_SELECTED_COUNT: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    
+    pub static ref CHIP_SLOTS: Vec<Arc<Mutex<u16>>> = (0..8).map(|_| Arc::new(Mutex::new(0))).collect();
+    pub static ref CHIP_CODES: Vec<Arc<Mutex<u16>>> = (0..8).map(|_| Arc::new(Mutex::new(0))).collect();
+
+    //5 possible ids for selected chips
+    pub static ref SELECTED_CHIP_INDICES: Vec<Arc<Mutex<u16>>> = (0..5).map(|_| Arc::new(Mutex::new(0))).collect();
+
 }
 
 //function to set player selected chip

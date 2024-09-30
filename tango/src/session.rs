@@ -578,6 +578,10 @@ impl Session {
                 //set enemy and player charge globally
                 set_player_charge(core.raw_read_8(0x02036948, -1) as u16);
                 set_enemy_charge(core.raw_read_8(0x02036A10, -1) as u16);
+
+
+                set_player_state(core.raw_read_8(0x020352CC, -1) as u16);
+
                 if completion_token.is_complete() {
                     thread_handle.pause();
                     //close application

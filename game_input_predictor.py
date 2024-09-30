@@ -48,30 +48,20 @@ class SpatialAttention(nn.Module):
         return out
 
 class BilinearAttention(nn.Module):
-    """
-    Bilinear Attention Module to model interactions between two sets of embeddings.
-    """
     def __init__(self, embed_dim1, embed_dim2, attention_dim):
         super(BilinearAttention, self).__init__()
         self.attention = nn.Bilinear(embed_dim1, embed_dim2, attention_dim)
         self.context_vector = nn.Parameter(torch.randn(attention_dim))
     
     def forward(self, x1, x2):
-        """
-        Forward pass for Bilinear Attention.
-        
-        Args:
-            x1 (Tensor): Tensor of shape (batch_size, embed_dim1)
-            x2 (Tensor): Tensor of shape (batch_size, embed_dim2)
-        
-        Returns:
-            Tensor: Attention weights of shape (batch_size, 1)
-        """
         combined = self.attention(x1, x2)  # (batch_size, attention_dim)
         scores = torch.matmul(combined, self.context_vector)  # (batch_size)
-        scores = scores.unsqueeze(1)  # (batch_size, 1)
-        attention_weights = F.softmax(scores, dim=1)  # (batch_size, 1)
-        return attention_weights  # (batch_size, 1)
+        # If you have multiple attention "slots", adjust scores accordingly
+        # For single scalar attention per example, consider using sigmoid
+        attention_weights = torch.sigmoid(scores)  # (batch_size)
+        attention_weights = attention_weights.unsqueeze(1)  # (batch_size, 1)
+        return attention_weights
+
     
     
 class GameInputPredictor(nn.Module):
@@ -114,6 +104,9 @@ class GameInputPredictor(nn.Module):
                 nn.InstanceNorm3d(1024* scale, affine=True),
                 nn.ReLU(),
             )
+
+            self.positional_encoding = nn.Parameter(torch.randn(1, image_memory, 512 * scale))
+
 
             self.spatial_attention = SpatialAttention(1024* scale)  # Correct in_channels
             self._to_linear = None
@@ -311,6 +304,9 @@ class GameInputPredictor(nn.Module):
             # Project to lower dimensions before Transformer
             x = self.transformer_input_projection(x)  # Shape: (batch_size, temporal, 256)
             # print(f"[Image Processing] After transformer_input_projection: {x.shape}")
+            
+              # Add positional encoding
+            x = x + self.positional_encoding[:, :x.size(1), :]  # Ensure matching temporal length
             
             # Pass through Transformer Encoder for temporal attention
             # print(f"[Image Processing] Before permute for Transformer: {x.shape}")

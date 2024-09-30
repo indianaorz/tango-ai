@@ -15,10 +15,10 @@ def get_exponental_amount():
 
 
 def get_threshold():
-    return 0.5
+    return 0.25
 
 def get_threshold_plan():
-    return 0.3
+    return 0.25
 
 def inference_fps():
     return 60

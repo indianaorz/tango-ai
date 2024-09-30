@@ -91,16 +91,16 @@ env_common = os.environ.copy()
 env_common["INIT_LINK_CODE"] = "valuesearch"
 env_common["AI_MODEL_PATH"] = "ai_model"
 GAMMA = float(os.getenv("GAMMA", 0.1))  # Default gamma is 0.05
-learning_rate = 1e-4
+learning_rate = 1e-5
 
 # Initialize maximum health values
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
-replay_count = 8
-battle_count = 4
-include_orig = False
-do_replays = True
+replay_count = 0
+battle_count = 0
+include_orig = True
+do_replays = False
 
 INSTANCES = []
 # Define the server addresses and ports for each instance
@@ -251,6 +251,9 @@ KEY_BIT_POSITIONS = {
 }
 
 
+# Initialize the input tally dictionary with all keys set to 0
+input_tally = {key: 0 for key in KEY_BIT_POSITIONS.keys()}
+input_tally_lock = Lock()  # Lock for thread-safe updates
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -515,7 +518,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
     Returns:
         dict: Command dictionary to send to the game instance.
     """
-    global inference_planning_model, inference_battle_model
+    global inference_planning_model, inference_battle_model, input_tally, input_tally_lock
     global window_entry_time, previous_sent_dict, previous_inside_window_dict
 
     current_time = time.time()
@@ -642,6 +645,8 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
         if inside_window.item() == 0.0 and random_command[15 - KEY_BIT_POSITIONS['RETURN']] == '1':
             random_command = '0000000000000000'
         return {'type': 'key_press', 'key': random_command}
+    
+    max_prob = 0
 
     # Acquire the appropriate lock before performing model inference
     with selected_lock:
@@ -707,11 +712,36 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
                     # Convert probabilities to binary input string based on threshold
                     predicted_inputs = (probs >= command_threshold).astype(int)
                     predicted_input_str = ''.join(map(str, predicted_inputs))
+                    # Convert probabilities to binary input string based on threshold
+                    # Determine the number of actions to select
+                    # This could be a fixed number or dynamically determined
+                    # For example, selecting at least one action
+                    # k = max(1, int(np.sum(probs > command_threshold)))  # Adjust based on your needs
+
+                    # Select top K probabilities
+                    # predicted_inputs = select_top_k(probs, k=2)
+                    # predicted_input_str = ''.join(map(str, predicted_inputs))
+                    # Usage within your code
+                    max_prob = np.max(probs)
+                    # threshold = adaptive_threshold(probs, percentile=85)
+                    # predicted_inputs = (probs >= threshold).astype(int)
+                    # predicted_input_str = ''.join(map(str, predicted_inputs))
+
+                    # if max_prob < command_threshold:
+                    #     predicted_input_str = '0000000000000000'
+                    
         except Exception as e:
             print(f"Error during inference with {model_type}: {e}")
             return {'type': 'key_press', 'key': '0000000000000000'}  # Return no key press on failure
 
-    print(f"{predicted_input_str} from {model_type}")
+    print(f"{predicted_input_str} from {model_type} | {max_prob:.3f}")
+
+    # --- Start of Tally Update ---
+    with input_tally_lock:
+        for key, bit_pos in KEY_BIT_POSITIONS.items():
+            if predicted_inputs[15 - bit_pos] == 1:
+                input_tally[key] += 1
+
     #never allow sending the pause command when out of the window
     if inside_window.item() == 0.0 and predicted_input_str[15 - KEY_BIT_POSITIONS['RETURN']] == '1':
         predicted_input_str = '0000000000000000'
@@ -734,6 +764,42 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
         return {'type': 'key_press', 'key': predicted_input_str}
     
 
+def adaptive_threshold(probs, percentile=75):
+    """
+    Determine a threshold based on the given percentile of probabilities.
+
+    Args:
+        probs (np.ndarray): Array of probabilities.
+        percentile (float): Percentile to determine the threshold.
+
+    Returns:
+        float: The threshold value.
+    """
+    return np.percentile(probs, percentile)
+
+
+# Define a function to select top K probabilities
+def select_top_k(probs, k=2):
+    """
+    Select the top K probabilities and set them to 1, others to 0.
+
+    Args:
+        probs (np.ndarray): Array of probabilities.
+        k (int): Number of top probabilities to select.
+
+    Returns:
+        np.ndarray: Binary array with top K probabilities set to 1.
+    """
+    # Initialize a binary array of zeros
+    binary_inputs = np.zeros_like(probs, dtype=int)
+    
+    if k > 0:
+        # Get the indices of the top K probabilities
+        top_k_indices = probs.argsort()[-k:]
+        # Set the top K indices to 1
+        binary_inputs[top_k_indices] = 1
+    
+    return binary_inputs
 
 max_reward = 1
 max_punishment = 1
@@ -914,6 +980,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         if not sampled_indices:
                             continue
 
+                        #clamp sampled indices to the available indices
+                        # sampled_indices = [min(max(0, idx), len(frame_buffers[port]) - 1) for idx in sampled_indices]
                         # Fetch the corresponding frames based on sampled indices
                         sampled_frames = []
                         index_set = set(sampled_indices)  # For faster lookup
@@ -1045,12 +1113,12 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 # Reset rewards
                                 current_reward = 0
                                 current_punishment = 0
-                            else:
-                                if current_player_charge != 0:# or current_punishment == 0:
-                                    # print(f"Port {port}: Assigning reward: {0.1}")
-                                    # Train on the current frame (data_point)
-                                    if current_player_charge != 0:
-                                        data_point['reward'] = 0.1
+                            # else:
+                            #     if current_player_charge != 0:# or current_punishment == 0:
+                            #         # print(f"Port {port}: Assigning reward: {0.1}")
+                            #         # Train on the current frame (data_point)
+                            #         if current_player_charge != 0:
+                            #             data_point['reward'] = 0.1
 
                             # Pruning Logic Starts Here
                             # Remove data points older than window_size that have no reward assigned
@@ -1566,6 +1634,7 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
         total_loss_value = total_loss.item()
         policy_loss_value = policy_loss.item()
         entropy_value = entropy.mean().item()
+        print(f"{model_type} learning from Port {port}:\nLoss: {total_loss_value}")
         # wandb.log({
         #     f"{model_type}/total_loss": total_loss_value,
         #     f"{model_type}/policy_loss": policy_loss_value,
@@ -1956,7 +2025,14 @@ async def main():
     # # At the end, before exiting, signal the training thread to stop
     training_queue.put(None)  # Sentinel value to stop the thread
     training_thread.join() # Wait for the thread to finish
-    
+
+    # --- Start of Tally Display ---
+    print("\n--- Input Tally ---")
+    with input_tally_lock:
+        for key, count in input_tally.items():
+            print(f"{key} - {count}")
+    print("-------------------\n")
+    # --- End of Tally Display ---
 
     # Cancel the monitor task gracefully
     monitor_task.cancel()

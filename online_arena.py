@@ -145,7 +145,106 @@ def load_trained_models(get_checkpoint_dir, get_latest_checkpoint, image_memory=
 
     return training_planning_model, training_battle_model, optimizer_planning, optimizer_battle
 
-# Main function to run the entire process with cosine annealing for GAMMA
+# Function to perform final training steps
+def perform_final_training():
+    """
+    Performs the final training steps including loading models, training on battle and planning data,
+    saving models, and clearing memory.
+    """
+    try:
+        # Step 4: Load trained models for final training
+        training_planning_model, training_battle_model, optimizer_planning, optimizer_battle = load_trained_models(
+            get_checkpoint_dir, 
+            get_latest_checkpoint, 
+            image_memory=get_image_memory(), 
+            device='cuda'
+        )
+    except Exception as e:
+        print(f"Failed to load trained models: {e}")
+        traceback.print_exc()
+        return  # Exit the function if models cannot be loaded
+
+    # Step 5: Perform Final Training Epoch
+    print("Starting final training epoch on accumulated data.")
+    battle_data_dir = os.path.join(get_root_dir(), "data", "battle_data")
+    planning_data_dir = os.path.join(get_root_dir(), "data", "planning_data")
+
+    # Train on Battle Data
+    if os.path.exists(battle_data_dir) and os.listdir(battle_data_dir):
+        try:
+            final_training_epoch(
+                model=training_battle_model,
+                optimizer=optimizer_battle,
+                training_data_dir=battle_data_dir,
+                model_type='Battle_Model',
+                batch_size=64,  # Adjust based on your system
+                num_workers=4,  # Increased workers for faster data loading
+                device='cuda',
+                max_batches=500
+            )
+        except Exception as e:
+            print(f"Failed to train Battle_Model: {e}")
+            traceback.print_exc()
+    else:
+        print("No Battle data available for final training.")
+
+    # Step 6: Save the Battle Model
+    save_models(
+        None, 
+        training_battle_model, 
+        None, 
+        optimizer_battle, 
+        get_checkpoint_dir, 
+        get_latest_checkpoint, 
+        MAX_CHECKPOINTS=config.get('MAX_CHECKPOINTS', 5), 
+        IMAGE_MEMORY=get_image_memory()
+    )
+
+    # Clear Battle Model memory
+    del training_battle_model
+    del optimizer_battle
+    # Clear CUDA cache
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    # Train on Planning Data
+    if os.path.exists(planning_data_dir) and os.listdir(planning_data_dir):
+        try:
+            final_training_epoch(
+                model=training_planning_model,
+                optimizer=optimizer_planning,
+                training_data_dir=planning_data_dir,
+                model_type='Planning_Model',
+                batch_size=64,  # Adjust based on your system
+                num_workers=4,  # Increased workers for faster data loading
+                device='cuda',
+                max_batches=500
+            )
+        except Exception as e:
+            print(f"Failed to train Planning_Model: {e}")
+            traceback.print_exc()
+    else:
+        print("No Planning data available for final training.")
+
+    # Step 6: Save the Planning Model
+    save_models(
+        training_planning_model, 
+        None, 
+        optimizer_planning, 
+        None, 
+        get_checkpoint_dir, 
+        get_latest_checkpoint, 
+        MAX_CHECKPOINTS=config.get('MAX_CHECKPOINTS', 5), 
+        IMAGE_MEMORY=get_image_memory()
+    )
+
+    # Clear Planning Model memory
+    del training_planning_model
+    del optimizer_planning
+    # Clear CUDA cache
+    torch.cuda.empty_cache()
+    gc.collect()
+
 async def main():
     # Load or set initial GAMMA parameters
     initial_gamma = config.get('gamma', {}).get('initial', 0.25)
@@ -158,6 +257,10 @@ async def main():
         if current_step >= total_steps:
             # Reset or stop annealing if desired
             print("Completed all annealing steps. Resetting current_step.")
+            
+            # Perform final training when resetting the annealing steps
+            perform_final_training()
+            
             current_step = 0  # Or break if you want to stop
             # Optionally, you can set GAMMA back to initial_gamma or keep it at min_gamma
             # break
@@ -176,104 +279,6 @@ async def main():
         # # Step 3: Move old replays to a new folder
         # print("Moving replays to a new folder...")
         move_replays()
-
-        # # Step 4: Load trained models for final training
-        try:
-            training_planning_model, training_battle_model, optimizer_planning, optimizer_battle = load_trained_models(
-                get_checkpoint_dir, 
-                get_latest_checkpoint, 
-                image_memory=get_image_memory(), 
-                device='cuda'
-            )
-        except Exception as e:
-            print(f"Failed to load trained models: {e}")
-            traceback.print_exc()
-            # Optionally, handle the error (e.g., skip training, retry, etc.)
-            continue
-
-        # Step 5: Perform Final Training Epoch
-        print("Starting final training epoch on 100 batches of accumulated data.")
-        battle_data_dir = os.path.join(get_root_dir(), "data", "battle_data")
-        planning_data_dir = os.path.join(get_root_dir(), "data", "planning_data")
-
-        # Train on Battle Data
-        if os.path.exists(battle_data_dir) and os.listdir(battle_data_dir):
-            try:
-                final_training_epoch(
-                    model=training_battle_model,
-                    optimizer=optimizer_battle,
-                    training_data_dir=battle_data_dir,
-                    model_type='Battle_Model',
-                    batch_size=64,  # Adjust based on your system
-                    num_workers=4,  # Increased workers for faster data loading
-                    device='cuda',
-                    max_batches=500
-                )
-            except Exception as e:
-                print(f"Failed to train Battle_Model: {e}")
-                traceback.print_exc()
-        else:
-            print("No Battle data available for final training.")
-
-
-        # Step 6: Save the models
-        save_models(
-            None, 
-            training_battle_model, 
-            None, 
-            optimizer_battle, 
-            get_checkpoint_dir, 
-            get_latest_checkpoint, 
-            MAX_CHECKPOINTS=config.get('MAX_CHECKPOINTS', 5), 
-            IMAGE_MEMORY=get_image_memory()
-        )
-
-
-        #clear
-        del training_battle_model
-        del optimizer_battle
-        # Clear CUDA cache
-        torch.cuda.empty_cache()
-        gc.collect()
-
-
-        # Train on Planning Data
-        if os.path.exists(planning_data_dir) and os.listdir(planning_data_dir):
-            try:
-                final_training_epoch(
-                    model=training_planning_model,
-                    optimizer=optimizer_planning,
-                    training_data_dir=planning_data_dir,
-                    model_type='Planning_Model',
-                    batch_size=64,  # Adjust based on your system
-                    num_workers=4,  # Increased workers for faster data loading
-                    device='cuda',
-                    max_batches=500
-                )
-            except Exception as e:
-                print(f"Failed to train Planning_Model: {e}")
-                traceback.print_exc()
-        else:
-            print("No Planning data available for final training.")
-
-        # Step 6: Save the models
-        save_models(
-            training_planning_model, 
-            None, 
-            optimizer_planning, 
-            None, 
-            get_checkpoint_dir, 
-            get_latest_checkpoint, 
-            MAX_CHECKPOINTS=config.get('MAX_CHECKPOINTS', 5), 
-            IMAGE_MEMORY=get_image_memory()
-        )
-
-        # Clear memory
-        del training_planning_model
-        del optimizer_planning
-        # Clear CUDA cache
-        torch.cuda.empty_cache()
-        gc.collect()
 
         # Step 7: Increment the step and wait before the next cycle
         current_step += 1
