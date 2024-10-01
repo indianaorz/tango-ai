@@ -113,6 +113,8 @@ INSTANCES = [
         'name': 'Instance 1',
         # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
         # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-IndianaOrz-round1-p2.tangoreplay',
+        # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006015542-lunazoe-bn6-vs-IndianaOrz-round3-p2.tangoreplay',#player 2 cross change emotion state check fix needed
+        # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006020253-lunazoe-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
         'init_link_code': 'arena1',
         'is_player': True  # Set to True if you don't want this instance to send inputs
     },
@@ -1937,7 +1939,7 @@ async def main():
     connection_tasks = [asyncio.create_task(handle_connection(instance, config)) for instance in INSTANCES]
 
     # Start mouse monitoring task
-    monitor_task = asyncio.create_task(monitor_mouse_over_instances(INSTANCES))
+    # monitor_task = asyncio.create_task(monitor_mouse_over_instances(INSTANCES))
 
 
 
@@ -2019,22 +2021,23 @@ async def main():
     # print("Data points saved to disk.")
 
      # Start the training thread... testing to see if we can do this after the instances have been closed
-    training_thread = threading.Thread(target=training_thread_function, daemon=True)
-    training_thread.start()
+    
+    # training_thread = threading.Thread(target=training_thread_function, daemon=True)
+    # training_thread.start()
 
-    # # At the end, before exiting, signal the training thread to stop
-    training_queue.put(None)  # Sentinel value to stop the thread
-    training_thread.join() # Wait for the thread to finish
+    # # # At the end, before exiting, signal the training thread to stop
+    # training_queue.put(None)  # Sentinel value to stop the thread
+    # training_thread.join() # Wait for the thread to finish
 
-    # --- Start of Tally Display ---
-    print("\n--- Input Tally ---")
-    with input_tally_lock:
-        for key, count in input_tally.items():
-            print(f"{key} - {count}")
-    print("-------------------\n")
-    # --- End of Tally Display ---
+    # # --- Start of Tally Display ---
+    # print("\n--- Input Tally ---")
+    # with input_tally_lock:
+    #     for key, count in input_tally.items():
+    #         print(f"{key} - {count}")
+    # print("-------------------\n")
+    # # --- End of Tally Display ---
 
-    # Cancel the monitor task gracefully
+    # # Cancel the monitor task gracefully
     monitor_task.cancel()
     try:
         await monitor_task
@@ -2042,8 +2045,8 @@ async def main():
         print("Mouse monitoring task cancelled.")
 
 
-    # Save the models
-    save_models()
+    # # Save the models
+    # save_models()
 
 import h5py
 import numpy as np

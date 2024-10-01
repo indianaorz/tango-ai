@@ -1,3 +1,4 @@
+use crate::global::{set_chip_code, set_chip_selected_count, set_chip_slot, set_enemy_game_emotion_state, set_player_emotion_state, set_player_game_emotion_state, set_selected_chip_index, set_selected_cross_index, set_selected_menu_index};
 use crate::{audio, config, game, net, rom, stats, video};
 use egui::debug_text::print;
 use parking_lot::Mutex;
@@ -393,11 +394,11 @@ impl Session {
 
             // Define the memory range to search - adjust based on your game's addressable space
             let start_address = 0x02000000; // Start of EWRAM, commonly used in GBA games
-            let end_address = 0x02040000; // End of EWRAM
+            let end_address = 0x02050000; // End of EWRAM
 
             // Search through the address range for the value 1800
-            for address in (start_address..end_address).step_by(4) {
-                let current_value = core.raw_read_16(address, segment);
+            for address in (start_address..end_address).step_by(1) {
+                let current_value = core.raw_read_8(address, segment);
                 // if current_value == 0 || current_value == 1{
                 found_addresses.push(address);
                 // }
@@ -497,7 +498,7 @@ impl Session {
         }
 
         // Shared storage for initial boolean states
-        static INITIAL_BOOLEAN_STATES: LazyLock<Mutex<HashMap<u32, u16>>> =
+        static INITIAL_BOOLEAN_STATES: LazyLock<Mutex<HashMap<u32, u8>>> =
             LazyLock::new(|| Mutex::new(HashMap::new()));
 
         // Initialize the log file with thread-safe access
@@ -580,7 +581,53 @@ impl Session {
                 set_enemy_charge(core.raw_read_8(0x02036A10, -1) as u16);
 
 
-                set_player_state(core.raw_read_8(0x020352CC, -1) as u16);
+
+                set_player_emotion_state(core.raw_read_8(0x020352CC, -1) as u16);
+                // println!("Player emotion state: {}", core.raw_read_8(0x020352CC, -1) as u16);
+
+                set_player_game_emotion_state(core.raw_read_8(0x02035290, -1) as u16);
+                set_enemy_game_emotion_state(core.raw_read_8(0x0203CE2C, -1) as u16);
+                println!("Player game emotion state: {}", core.raw_read_8(0x02035290, -1) as u16);
+                println!("Enemy game emotion state: {}", core.raw_read_8(0x0203CE2C, -1) as u16);
+                //set enemy emotion state
+
+                set_selected_menu_index(core.raw_read_8(0x020364C7, -1) as u16);
+                // println!("Selected menu index: {}", core.raw_read_8(0x020364C7, -1) as u16);
+
+                set_selected_cross_index(core.raw_read_8(0x020364DB, -1) as u16);
+                // println!("Selected cross index: {}", core.raw_read_8(0x020364DB, -1) as u16);
+
+                for i in 0..16 {
+                    let address = 0x0203CDB0 + i as u32;
+                    if i % 2 == 0 {
+                        match set_chip_slot(i / 2, core.raw_read_8(address as u32, -1) as u16) {
+                            Ok(_) => {
+                                // println!("Chip slot {}: {}", i / 2, core.raw_read_8(address as u32, -1) as u16);
+                            },
+                            Err(e) => eprintln!("Failed to set chip slot {}: {:?}", i / 2, e),
+                        }
+                    } else {
+                        match set_chip_code(i / 2, core.raw_read_8(address as u32, -1) as u16) {
+                            Ok(_) => {
+                                // println!("Chip code {}: {}", i / 2, core.raw_read_8(address as u32, -1) as u16);
+                            },
+                            Err(e) => eprintln!("Failed to set chip code {}: {:?}", i / 2, e),
+                        }
+                    }
+                }
+
+                set_chip_selected_count(core.raw_read_8(0x020364C8, -1) as u16);
+                // println!("Chip selected count: {}", core.raw_read_8(0x020364C8, -1) as u16);
+                //from 036508 through 03650C set the chip index selected
+                for i in 0..5 {
+                    let address = 0x02036508 + i as u32;
+                    match set_selected_chip_index(i, core.raw_read_8(address as u32, -1) as u16) {
+                        Ok(_) => {
+                            // println!("Selected chip index {}: {}", i, core.raw_read_8(address as u32, -1) as u16);
+                        },
+                        Err(e) => eprintln!("Failed to set selected chip index {}: {:?}", i, e),
+                    }
+                }
 
                 if completion_token.is_complete() {
                     thread_handle.pause();
@@ -643,8 +690,12 @@ impl Session {
 
                     //     // Store the initial values of those addresses in INITIAL_BOOLEAN_STATES
                     //     for &address in addresses.iter() {
-                    //         let current_value = core_ref.raw_read_16(address, -1);
-                    //         initial_states.insert(address, current_value);
+                    //         //only get values that are 0
+
+                    //         let current_value = core_ref.raw_read_8(address, -1);
+                    //         if current_value == 0 {
+                    //             initial_states.insert(address, current_value);
+                    //         }
                     //         println!("Captured Address: 0x{:08X}, Initial Value: {}", address, current_value);
                     //     }
 
@@ -657,7 +708,7 @@ impl Session {
                     //     let mut addresses = boolean_addresses.lock();
                     //     let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
                     //     addresses.retain(|&address| {
-                    //         let current_value = core_ref.raw_read_16(address, -1);
+                    //         let current_value = core_ref.raw_read_8(address, -1);
                     //         if let Some(&initial_value) = initial_states.get(&address) {
                     //             if current_value != initial_value {
                     //                 // Value has changed, prune it from the list
@@ -680,7 +731,7 @@ impl Session {
                     //     let mut addresses = boolean_addresses.lock();
                     //     let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
                     //     addresses.retain(|&address| {
-                    //         let current_value = core_ref.raw_read_16(address, -1);
+                    //         let current_value = core_ref.raw_read_8(address, -1);
                     //         if let Some(&initial_value) = initial_states.get(&address) {
                     //             if current_value == initial_value {
                     //                 // Value has changed, prune it from the list
@@ -701,19 +752,23 @@ impl Session {
                     // if joyflags_val & 0x00000008 != 0 {
                     //     println!("Compare Command - Checking different current values");
                     //     let addresses = boolean_addresses.lock();
-                    //     let initial_states = INITIAL_BOOLEAN_STATES.lock();
+                    //     let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
 
                     //     for &address in addresses.iter() {
-                    //         let current_value = core_ref.raw_read_16(address, -1);
-                    //         if let Some(&initial_value) = initial_states.get(&address) {
-                    //             // Only display if the current value has changed compared to the initial value
-                    //             if current_value != initial_value {
-                    //                 println!(
-                    //                     "Compare Command - Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
-                    //                     address, initial_value, current_value
-                    //                 );
-                    //             }
+                    //         let current_value = core_ref.raw_read_8(address, -1);
+                    //         //update initial value to the current value
+                    //         if let Some(initial_value) = initial_states.get_mut(&address) {
+                    //             *initial_value = current_value;
                     //         }
+                    //         // if let Some(&initial_value) = initial_states.get(&address) {
+                    //         //     // Only display if the current value has changed compared to the initial value
+                    //         //     if current_value != initial_value {
+                    //         //         println!(
+                    //         //             "Compare Command - Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
+                    //         //             address, initial_value, current_value
+                    //         //         );
+                    //         //     }
+                    //         // }
                     //     }
                     // }
                     // // Command 3 (Compare the current values, triggered by 0x00000008)
@@ -1084,17 +1139,17 @@ impl Session {
         }
 
         // Function to search for all potential health addresses
-        fn search_all_health_values(core: &mut CoreMutRef, value_to_find: u16) -> Vec<u32> {
+        fn search_all_health_values(core: &mut CoreMutRef, value_to_find: u8) -> Vec<u32> {
             let segment = -1; // Default segment, adjust as necessary
             let mut found_addresses = Vec::new();
 
             // Define the memory range to search - adjust based on your game's addressable space
             let start_address = 0x02000000; // Start of EWRAM, commonly used in GBA games
-            let end_address = 0x03007FFF; // End of EWRAM
+            let end_address = 0x02080000; // End of EWRAM
 
             // Search through the address range for the specified value
             for address in (start_address..end_address).step_by(4) {
-                let current_value = core.raw_read_16(address, segment);
+                let current_value = core.raw_read_8(address, segment);
                 if current_value == value_to_find {
                     found_addresses.push(address);
                 }
@@ -1219,6 +1274,76 @@ impl Session {
                     let opponent_health_addr = *OPPONENT_HEALTH_ADDRESS.lock();
                     set_player_charge(core_ref.raw_read_8(0x02036948, -1) as u16);
                     set_enemy_charge(core_ref.raw_read_8(0x02036A10, -1) as u16);
+                    
+                    set_player_emotion_state(core_ref.raw_read_8(0x020352CC, -1) as u16);
+                    // println!("Player window emotion state: {}", core_ref.raw_read_8(0x020352CC, -1) as u16);
+
+                    set_player_game_emotion_state(core_ref.raw_read_8(0x02035290, -1) as u16);
+                    println!("Player game emotion state: {}", core_ref.raw_read_8(0x02035290, -1) as u16);
+
+                    set_enemy_game_emotion_state(core_ref.raw_read_8(0x02035291, -1) as u16);
+
+                    //search for values that are equal to 9
+                    // let possible_addresses = search_all_health_values(core_ref, 19);
+                    // //output addresses as hex
+                    // for address in &possible_addresses {
+                    //     println!("0x{:08X},", address);
+                    // }
+                    // let addresses = [
+
+                    // 0x02010B1C,
+                    // 0x0203EAF4,
+                    // 0x02050B1C,
+                    // 0x0207EAF4,
+                    
+                    // ];
+
+                    // //display values of addresses 8
+                    // for address in &addresses {
+                    //     let current_value = core_ref.raw_read_8(*address, -1);
+                    //     println!("0x{:08X},{}", address, current_value);
+                    // }                    
+
+    
+                    //set enemy emotion state
+    
+                    set_selected_menu_index(core_ref.raw_read_8(0x020364C7, -1) as u16);
+                    // println!("Selected menu index: {}", core_ref.raw_read_8(0x020364C7, -1) as u16);
+    
+                    set_selected_cross_index(core_ref.raw_read_8(0x020364DB, -1) as u16);
+                    // println!("Selected cross index: {}", core_ref.raw_read_8(0x020364DB, -1) as u16);
+    
+                    for i in 0..16 {
+                        let address = 0x0203CDB0 + i as u32;
+                        if i % 2 == 0 {
+                            match set_chip_slot(i / 2, core_ref.raw_read_8(address as u32, -1) as u16) {
+                                Ok(_) => {
+                                    // println!("Chip slot {}: {}", i / 2, core_ref.raw_read_8(address as u32, -1) as u16);
+                                },
+                                Err(e) => eprintln!("Failed to set chip slot {}: {:?}", i / 2, e),
+                            }
+                        } else {
+                            match set_chip_code(i / 2, core_ref.raw_read_8(address as u32, -1) as u16) {
+                                Ok(_) => {
+                                    // println!("Chip code {}: {}", i / 2, core_ref.raw_read_8(address as u32, -1) as u16);
+                                },
+                                Err(e) => eprintln!("Failed to set chip code {}: {:?}", i / 2, e),
+                            }
+                        }
+                    }
+    
+                    set_chip_selected_count(core_ref.raw_read_8(0x020364C8, -1) as u16);
+                    // println!("Chip selected count: {}", core_ref.raw_read_8(0x020364C8, -1) as u16);
+                    //from 036508 through 03650C set the chip index selected
+                    for i in 0..5 {
+                        let address = 0x02036508 + i as u32;
+                        match set_selected_chip_index(i, core_ref.raw_read_8(address as u32, -1) as u16) {
+                            Ok(_) => {
+                                // println!("Selected chip index {}: {}", i, core_ref.raw_read_8(address as u32, -1) as u16);
+                            },
+                            Err(e) => eprintln!("Failed to set selected chip index {}: {:?}", i, e),
+                        }
+                    }
 
                     // Ensure the addresses are set before calling `display_health_state`
                     if let (Some(player_addr), Some(opponent_addr)) = (player_health_addr, opponent_health_addr) {
