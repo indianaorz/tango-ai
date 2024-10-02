@@ -255,6 +255,7 @@ async def main():
     current_step = 0
     # perform_final_training()
     while True:
+        perform_final_training()
         if current_step >= total_steps:
             # Reset or stop annealing if desired
             print("Completed all annealing steps. Resetting current_step.")
@@ -271,7 +272,7 @@ async def main():
         print(f"Cycle {current_step + 1}/{total_steps}: GAMMA={gamma:.4f}")
         
         # Step 1: Run the battle instances with the current GAMMA
-        run_battle_instances(gamma)
+        # run_battle_instances(gamma)
 
         # # Step 2: Optionally, run data capture on completed battles
         # print("Running data capture on replays...")
@@ -279,12 +280,13 @@ async def main():
 
         # # Step 3: Move old replays to a new folder
         # print("Moving replays to a new folder...")
-        move_replays()
+        # move_replays()
 
         # Step 7: Increment the step and wait before the next cycle
         current_step += 1
         print("Cycle completed. Waiting for the next cycle...")
-        await asyncio.sleep(5)  # Adjust the delay time as needed
+        # await asyncio.sleep(5)  # Adjust the delay time as needed
+        
 
 if __name__ == '__main__':
     try:

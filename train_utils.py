@@ -149,10 +149,10 @@ def final_training_epoch(model, optimizer, training_data_dir, model_type='Battle
                 optimizer.zero_grad()
 
                 # Forward pass through the PlanningModel
-                cross_logits, chip_logits_list = model(inputs)  # cross_logits: (1, 26), chip_logits_list: list of 5 tensors each (1, 10)
+                cross_logits, chip_logits_list = model(inputs)  # cross_logits: (1, 6), chip_logits_list: list of 5 tensors each (1, 10)
 
                 # Compute log probabilities for cross_selection
-                cross_log_probs = F.log_softmax(cross_logits, dim=-1)  # Shape: (1, 26)
+                cross_log_probs = F.log_softmax(cross_logits, dim=-1)  # Shape: (1, 6)
                 cross_selected_log_probs = cross_log_probs[torch.arange(1), cross_target_tensor]  # Shape: (1,)
 
                 # Compute log probabilities for chip_selections

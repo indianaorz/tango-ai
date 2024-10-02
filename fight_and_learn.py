@@ -96,7 +96,7 @@ learning_rate = 1e-5
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
-replay_count = 1
+replay_count = 32
 battle_count = 0
 include_orig = False
 do_replays = True
@@ -104,21 +104,21 @@ do_replays = True
 INSTANCES = []
 # Define the server addresses and ports for each instance
 INSTANCES = [
-    {
-        'address': '127.0.0.1',
-        'port': 12344,
-        # 'rom_path': 'bn6,0',
-        'rom_path': 'bn6,1',
-        # 'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar 1.sav',
-        'name': 'Instance 1',
-        # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
-        # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-IndianaOrz-round1-p2.tangoreplay',
-        # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006015542-lunazoe-bn6-vs-IndianaOrz-round3-p2.tangoreplay',#player 2 cross change emotion state check fix needed
-        'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006020253-lunazoe-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
-        'init_link_code': 'arena1',
-        'is_player': True  # Set to True if you don't want this instance to send inputs
-    },
+    # {
+    #     'address': '127.0.0.1',
+    #     'port': 12344,
+    #     # 'rom_path': 'bn6,0',
+    #     'rom_path': 'bn6,1',
+    #     # 'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
+    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar 1.sav',
+    #     'name': 'Instance 1',
+    #     # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
+    #     # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-IndianaOrz-round1-p2.tangoreplay',
+    #     # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006015542-lunazoe-bn6-vs-IndianaOrz-round3-p2.tangoreplay',#player 2 cross change emotion state check fix needed
+    #     'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006020253-lunazoe-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
+    #     'init_link_code': 'arena1',
+    #     'is_player': True  # Set to True if you don't want this instance to send inputs
+    # },
     # {
     #     'address': '127.0.0.1',
     #     'port': 12345,
@@ -618,7 +618,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
     global window_entry_time, previous_sent_dict, previous_inside_window_dict, INSTANCES
 
     current_time = time.time()
-
+    
     
     
     # Detect entering or exiting the window
@@ -662,7 +662,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
         #log the inputs and outputs to the port for training
         data_point = {
             'inputs': inputs,
-            'cross_target': cross_target + 1,
+            'cross_target': cross_target,
             'target_list': target_list_input
         }
         planning_data_buffers[port].append(data_point)
@@ -1339,7 +1339,11 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             #remove the selected cross from the available crosses
                             game_instance['player_available_crosses'].remove(selected_cross_form['type'])
                             print(f"Port {port}: Selected Cross Form: {selected_cross_form['type']}, Removing from available crosses. {game_instance['player_available_crosses']}")
-
+                    
+                    #set the player available crosses to the index from the game instance using the type for matching on current value
+                    available_cross_indicies = [cross for cross in FORM_MAPPING if cross['type'] in game_instance['player_available_crosses']]
+                    game_instance['player_available_crosses'] = available_cross_indicies
+                    
 
                     #same for opponent cross
                     if 'enemy_available_crosses' not in game_instance:
@@ -1360,6 +1364,10 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             #remove the selected cross from the available crosses
                             game_instance['enemy_available_crosses'].remove(selected_cross_form['type'])
                             print(f"Port {port}: Selected Cross Form: {selected_cross_form['type']}, Removing from available crosses. {game_instance['enemy_available_crosses']}")
+                    
+                    #set the player available crosses to the index from the game instance using the type for matching on current value
+                    available_cross_indicies = [cross for cross in FORM_MAPPING if cross['type'] in game_instance['enemy_available_crosses']]
+                    game_instance['enemy_available_crosses'] = available_cross_indicies
                     
                     #print emotions and indicies
                     # print(f"Port {port}: Player Emotion: {current_player_emotion}, Enemy Emotion: {current_enemy_emotion}")
@@ -1610,6 +1618,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                             'cross_target': cross_target,
                                             'target_list': target_list_input
                                         }
+                                        print(f"Port {port}: Appending planning data to buffer.")
                                         planning_data_buffers[port].append(data_point)
                                         
                                 previous_inside_window_dict[port] = 0.0
@@ -2249,12 +2258,15 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
             batched_inputs['health'] = torch.cat(batched_inputs['health'], dim=0)  # Shape: (batch_size, 2)
             batched_inputs['current_crosses'] = torch.cat(batched_inputs['current_crosses'], dim=0)  # Shape: (batch_size, 52)
             batched_inputs['available_crosses'] = torch.cat(batched_inputs['available_crosses'], dim=0)  # Shape: (batch_size, 60)
-            batched_inputs['beast_flags'] = torch.cat(batched_inputs['beast_flags'], dim=0)  # Shape: (batch_size, 6)
+            batched_inputs['beast_flags'] = torch.cat(batched_inputs['beast_flags'], dim=0)  # Shape: (batch_size, 4)
 
             # Convert targets and rewards to tensors
             cross_targets = torch.tensor(cross_targets, dtype=torch.long, device=device)  # Shape: (batch_size,)
-            target_lists = torch.tensor(target_lists, dtype=torch.long, device=device)    # Shape: (batch_size, 5)
+            target_lists = torch.tensor(target_lists, dtype=torch.long, device=device)    # Shape: (batch_size, 6)
             rewards_batch = torch.tensor(rewards_batch, dtype=torch.float32, device=device)  # Shape: (batch_size,)
+            
+            cross_targets = cross_targets.clamp(max=6)
+            target_lists = target_lists.clamp(max=9)
 
             # Zero gradients
             selected_optimizer.zero_grad()
@@ -2272,11 +2284,11 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
                     assert not torch.isinf(tensor).any(), f"{key} contains Inf"
 
             # Forward pass through the PlanningModel
-            cross_logits, chip_logits_list = selected_model(batched_inputs)  # cross_logits: (batch_size, 26), chip_logits_list: list of 5 tensors each (batch_size, 10)
+            cross_logits, chip_logits_list = selected_model(batched_inputs)  # cross_logits: (batch_size, 6), chip_logits_list: list of 5 tensors each (batch_size, 10)
 
                 
             # Compute log probabilities for cross_selection
-            cross_log_probs = F.log_softmax(cross_logits, dim=-1)  # Shape: (batch_size, 26)
+            cross_log_probs = F.log_softmax(cross_logits, dim=-1)  # Shape: (batch_size, 6)
             cross_selected_log_probs = cross_log_probs[torch.arange(batch_size), cross_targets]  # Shape: (batch_size,)
 
             # Compute log probabilities for chip_selections
