@@ -65,9 +65,13 @@ class BilinearAttention(nn.Module):
     
     
 class GameInputPredictor(nn.Module):
-    def __init__(self, image_memory=1, config=None, scale = 2):
+    def __init__(self, image_memory=1, config=None, scale = 0.25):
         super(GameInputPredictor, self).__init__()
         self.image_memory = image_memory
+        
+        # Helper function to ensure dimensions are integers
+        def scaled_int(x):
+            return int(round(x * scale))
         
         # Extract configuration for input features
         input_features = config.get('input_features', {})
@@ -88,41 +92,41 @@ class GameInputPredictor(nn.Module):
         # Image processing layers with Spatial Attention and Transformer Encoder
         if self.include_image:
             self.conv_layers = nn.Sequential(
-                nn.Conv3d(3, 64 * scale, kernel_size=(3, 5, 5), stride=(1, 2, 2), padding=(1, 2, 2)),
-                nn.InstanceNorm3d(64* scale, affine=True),
+                nn.Conv3d(3, scaled_int(64), kernel_size=(3, 5, 5), stride=(1, 2, 2), padding=(1, 2, 2)),
+                nn.InstanceNorm3d(scaled_int(64), affine=True),
                 nn.ReLU(),
-                nn.Conv3d(64* scale, 128* scale, kernel_size=(3, 5, 5), stride=(1, 2, 2), padding=(1, 2, 2)),
-                nn.InstanceNorm3d(128* scale, affine=True),
+                nn.Conv3d(scaled_int(64), scaled_int(128), kernel_size=(3, 5, 5), stride=(1, 2, 2), padding=(1, 2, 2)),
+                nn.InstanceNorm3d(scaled_int(128), affine=True),
                 nn.ReLU(),
-                nn.Conv3d(128* scale, 256* scale, kernel_size=(3, 5, 5), stride=(1, 2, 2), padding=(1, 2, 2)),
-                nn.InstanceNorm3d(256* scale, affine=True),
+                nn.Conv3d(scaled_int(128), scaled_int(256), kernel_size=(3, 5, 5), stride=(1, 2, 2), padding=(1, 2, 2)),
+                nn.InstanceNorm3d(scaled_int(256), affine=True),
                 nn.ReLU(),
-                nn.Conv3d(256* scale, 512* scale, kernel_size=(3, 3, 3), stride=(1, 2, 2), padding=(1, 1, 1)),
-                nn.InstanceNorm3d(512* scale, affine=True),
+                nn.Conv3d(scaled_int(256), scaled_int(512), kernel_size=(3, 3, 3), stride=(1, 2, 2), padding=(1, 1, 1)),
+                nn.InstanceNorm3d(scaled_int(512), affine=True),
                 nn.ReLU(),
-                nn.Conv3d(512* scale, 1024* scale, kernel_size=(3, 3, 3), stride=(1, 2, 2), padding=(1, 1, 1)),
-                nn.InstanceNorm3d(1024* scale, affine=True),
+                nn.Conv3d(scaled_int(512), scaled_int(1024), kernel_size=(3, 3, 3), stride=(1, 2, 2), padding=(1, 1, 1)),
+                nn.InstanceNorm3d(scaled_int(1024), affine=True),
                 nn.ReLU(),
             )
 
-            self.positional_encoding = nn.Parameter(torch.randn(1, image_memory, 512 * scale))
+            self.positional_encoding = nn.Parameter(torch.randn(1, image_memory, scaled_int(512 )))
 
 
-            self.spatial_attention = SpatialAttention(1024* scale)  # Correct in_channels
+            self.spatial_attention = SpatialAttention(scaled_int(1024))  # Correct in_channels
             self._to_linear = None
             self._get_conv_output_shape((3, image_memory, 160, 240))  # Adjust the input size as needed
             
             # Linear projection to reduce feature dimensions before Transformer
-            self.transformer_input_projection = nn.Linear(self._to_linear, 512* scale)
+            self.transformer_input_projection = nn.Linear(self._to_linear, scaled_int(512))
             
             # Transformer Encoder for image features
-            encoder_layers = nn.TransformerEncoderLayer(d_model=512* scale, nhead=16, dim_feedforward=4096)
+            encoder_layers = nn.TransformerEncoderLayer(d_model=scaled_int(512), nhead=16, dim_feedforward=4096)
             self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=12)
 
             
             # Fully connected layers for image features
             self.image_fc = nn.Sequential(
-                nn.Linear(512* scale, 512* scale),
+                nn.Linear(scaled_int(512), scaled_int(512)),
                 nn.ReLU(),
                 nn.Dropout(p=0.5)
             )
@@ -218,25 +222,25 @@ class GameInputPredictor(nn.Module):
         # Fully connected layers for additional inputs
         # Define additional_fc correctly
         self.additional_fc = nn.Sequential(
-            nn.Linear(328, 512* scale),
+            nn.Linear(328, scaled_int(512)),
             nn.ReLU(),
             nn.Dropout(p=0.5),
-            nn.Linear(512* scale, 256* scale),
+            nn.Linear(scaled_int(512), scaled_int(256)),
             nn.ReLU(),
             nn.Dropout(p=0.5)
         )
 
         # Update final_input_size accordingly if `additional_fc` output changes
-        final_input_size = 768* scale # Example: 256 from image features + 256 from additional features
+        final_input_size = scaled_int(768) # Example: 256 from image features + 256 from additional features
 
         self.fc_layers = nn.Sequential(
-            nn.Linear(final_input_size, 512* scale),
+            nn.Linear(final_input_size, scaled_int(512)),
             nn.ReLU(),
             nn.Dropout(p=0.5),
-            nn.Linear(512* scale, 256* scale),
+            nn.Linear(scaled_int(512), scaled_int(256)),
             nn.ReLU(),
             nn.Dropout(p=0.5),
-            nn.Linear(256* scale, 16),  # Final output layer
+            nn.Linear(scaled_int(256), 16),  # Final output layer
         )
 
         print(f"Final input size: {final_input_size}")

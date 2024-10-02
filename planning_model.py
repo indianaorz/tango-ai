@@ -23,38 +23,64 @@ CROSS_CLASSES = [
     "Dust",
     # Additional classes can be added here if needed
 ]  # Total 11 classes, but FORM_MAPPING includes up to 22 forms
-
 class PlanningModel(nn.Module):
-    def __init__(self, hidden_size=64, dropout_rate=0.3):
+    def __init__(self, hidden_size=64, dropout_rate=0.3, scale=10):
+        """
+        Initializes the PlanningModel with the ability to scale its hidden layers.
+
+        Args:
+            hidden_size (int): Base size for hidden layers.
+            dropout_rate (float): Dropout rate for regularization.
+            scale (float): Scaling factor to increase/decrease model size.
+        """
         super(PlanningModel, self).__init__()
-        self.hidden_size = hidden_size
+        
+        # Apply scaling to hidden_size and other layer dimensions
+        scaled_hidden_size = int(hidden_size * scale)
+        scaled_health_size = int(16 * scale)
+        scaled_cross_size = int(32 * scale)
+        scaled_available_crosses_size = int(16 * scale)
+        scaled_beast_flags_size = int(16 * scale)
+        scaled_fc1_size = int(128 * scale)
+        scaled_fc2_size = int(128 * scale)
+        scaled_fc3_size = int(64 * scale)
+        scaled_fc4_size = int(64 * scale)
+        scaled_output_size = int(64 * scale)  # For cross_output and chip_outputs
+
+        self.hidden_size = scaled_hidden_size
         
         # Folder chip encoder
-        self.folder_chip_fc = nn.Linear(430, hidden_size)  # From one-hot encoded chip and code + flags
+        self.folder_chip_fc = nn.Linear(430, scaled_hidden_size)  # From one-hot encoded chip and code + flags
         
         # Visible chip encoder
-        self.visible_chip_fc = nn.Linear(427, hidden_size)  # From one-hot encoded chip and code
+        self.visible_chip_fc = nn.Linear(427, scaled_hidden_size)  # From one-hot encoded chip and code
         
         # Other feature encoders
-        self.health_fc = nn.Linear(2, 16)  # Player and enemy health
-        self.cross_fc = nn.Linear(52, 32)  # Player and enemy current cross (each 26 one-hot)
-        self.available_crosses_fc = nn.Linear(20, 16)  # Player and enemy available crosses (each 10 bits, total 20)
-        self.beast_flags_fc = nn.Linear(4, 16)  # Beast out flags for player and enemy
+        self.health_fc = nn.Linear(2, scaled_health_size)  # Player and enemy health
+        self.cross_fc = nn.Linear(52, scaled_cross_size)  # Player and enemy current cross (each 26 one-hot)
+        self.available_crosses_fc = nn.Linear(20, scaled_available_crosses_size)  # Player and enemy available crosses (each 10 bits, total 20)
+        self.beast_flags_fc = nn.Linear(4, scaled_beast_flags_size)  # Beast out flags for player and enemy
         
         # Fully connected layers
-        total_features = hidden_size * 3 + 16 + 32 + 16 + 16  # From processed inputs
-        self.fc1 = nn.Linear(total_features, 128)
+        total_features = (
+            scaled_hidden_size * 3 + 
+            scaled_health_size + 
+            scaled_cross_size + 
+            scaled_available_crosses_size + 
+            scaled_beast_flags_size
+        )  # From processed inputs
+        self.fc1 = nn.Linear(total_features, scaled_fc1_size)
         self.dropout1 = nn.Dropout(dropout_rate)
-        self.fc2 = nn.Linear(128, 128)
+        self.fc2 = nn.Linear(scaled_fc1_size, scaled_fc2_size)
         self.dropout2 = nn.Dropout(dropout_rate)
-        self.fc3 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(scaled_fc2_size, scaled_fc3_size)
         self.dropout3 = nn.Dropout(dropout_rate)
-        self.fc4 = nn.Linear(64, 64)
+        self.fc4 = nn.Linear(scaled_fc3_size, scaled_fc4_size)
         self.dropout4 = nn.Dropout(dropout_rate)
         
         # Output layers
-        self.cross_output = nn.Linear(64, 6)  # 6 possible crosses including 'None' and 5 available crosses
-        self.chip_outputs = nn.ModuleList([nn.Linear(64, 12) for _ in range(5)])  # Five chip selections (12 classes each)
+        self.cross_output = nn.Linear(scaled_fc4_size, 6)  # 6 possible crosses including 'None' and 5 available crosses
+        self.chip_outputs = nn.ModuleList([nn.Linear(scaled_fc4_size, 12) for _ in range(5)])  # Five chip selections (12 classes each)
     
     def forward(self, inputs):
         # Process player and enemy folders
@@ -65,10 +91,10 @@ class PlanningModel(nn.Module):
         visible_chips_embeds = self.process_visible_chips(inputs['visible_chips'])  # (batch_size, hidden_size)
         
         # Process other features
-        health_feat = F.relu(self.health_fc(inputs['health']))  # (batch_size, 16)
-        cross_feat = F.relu(self.cross_fc(inputs['current_crosses']))  # (batch_size, 32)
-        available_crosses_feat = F.relu(self.available_crosses_fc(inputs['available_crosses']))  # (batch_size, 16)
-        beast_flags_feat = F.relu(self.beast_flags_fc(inputs['beast_flags']))  # (batch_size, 16)
+        health_feat = F.relu(self.health_fc(inputs['health']))  # (batch_size, scaled_health_size)
+        cross_feat = F.relu(self.cross_fc(inputs['current_crosses']))  # (batch_size, scaled_cross_size)
+        available_crosses_feat = F.relu(self.available_crosses_fc(inputs['available_crosses']))  # (batch_size, scaled_available_crosses_size)
+        beast_flags_feat = F.relu(self.beast_flags_fc(inputs['beast_flags']))  # (batch_size, scaled_beast_flags_size)
         
         # Concatenate all features
         x = torch.cat([
@@ -403,6 +429,10 @@ def get_planning_input_from_instance(inference_planning_model, instance, GAMMA, 
         cross_probabilities = F.softmax(cross_selection_logits, dim=-1)
         cross_selection = cross_probabilities.argmax(dim=-1).item()  # Value from 0 to 5
         
+        #log cross_probabilities
+        # print(f"Port {instance.get('port', 'N/A')}: Planning Output - cross_probabilities: {cross_probabilities}")
+        
+        
         # Assign cross_target
         cross_target = cross_selection  # Value from 0 to 5
         
@@ -412,6 +442,9 @@ def get_planning_input_from_instance(inference_planning_model, instance, GAMMA, 
             chip_prob = F.softmax(chip_logits, dim=-1)
             chip_selection = chip_prob.argmax(dim=-1).item()  # Value from 0 to 11
             target_list.append(chip_selection)
+            
+            #log chip selection
+            # print(f"Port {instance.get('port', 'N/A')}: Planning Output - chip_selection_logits: {chip_prob}")
         
         # Ensure the selected cross is within the range of available crosses
         # 'None' is considered as the first cross (index 0), so available_crosses_count = len - 1
@@ -428,7 +461,7 @@ def get_planning_input_from_instance(inference_planning_model, instance, GAMMA, 
         instance['cross_target'] = cross_target - 1  # Adjusting as per original logic
         instance['target_list'] = target_list
     
-    print(f"Port {instance.get('port', 'N/A')}: Planning Output - cross_target: {cross_target}, target_list: {target_list}")
+    # print(f"Port {instance.get('port', 'N/A')}: Planning Output - cross_target: {cross_target}, target_list: {target_list}")
     
     # Epsilon-Greedy Strategy: With probability GAMMA, select a random action
     if random.random() < GAMMA:
@@ -612,3 +645,5 @@ def get_planning_input_from_replay(instance, GAMMA, device):
         print(f"Port {instance.get('port', 'N/A')}: Gamma applied. Random cross_target: {cross_target}, target_list: {target_list}")
     
     return inputs, instance['cross_target'], instance['target_list']
+
+

@@ -14,7 +14,7 @@ import gc
 import wandb  # Import wandb
 
 # Import necessary functions from training_utils.py
-from train_utils import final_training_epoch, save_models,clear_dataset_and_loader
+from train_utils import final_training_epoch, save_models
 from utils import get_checkpoint_dir, get_latest_checkpoint, get_latest_checkpoint_plus1, get_new_checkpoint_path, get_root_dir, get_image_memory  # Ensure these are accessible
 
 # Paths
@@ -146,7 +146,29 @@ def load_trained_models(get_checkpoint_dir, get_latest_checkpoint, image_memory=
     optimizer_battle = optim.Adam(training_battle_model.parameters(), lr=learning_rate)
 
     return training_planning_model, training_battle_model, optimizer_planning, optimizer_battle
-
+training_planning_model = None
+training_battle_model = None
+optimizer_planning = None
+optimizer_battle = None
+try:
+    # Step 4: Load trained models for final training
+    training_planning_model, training_battle_model, optimizer_planning, optimizer_battle = load_trained_models(
+        get_checkpoint_dir, 
+        get_latest_checkpoint, 
+        image_memory=get_image_memory(), 
+        device='cuda'
+    )
+    
+    # set the learning rate of the planning optimizer
+    # learning_rate = 1e-4
+    # for param_group in optimizer_planning.param_groups:
+    #     param_group['lr'] = learning_rate
+    # print(f"Set learning rate of the planning optimizer to {learning_rate}")
+    
+except Exception as e:
+    print(f"Failed to load trained models: {e}")
+    traceback.print_exc()
+    # return  # Exit the function if models cannot be loaded
 # Function to perform final training steps
 def perform_final_training(wandb_run, save = True):
     """
@@ -156,79 +178,16 @@ def perform_final_training(wandb_run, save = True):
     Args:
         wandb_run: The wandb run object for logging.
     """
-    try:
-        # Step 4: Load trained models for final training
-        training_planning_model, training_battle_model, optimizer_planning, optimizer_battle = load_trained_models(
-            get_checkpoint_dir, 
-            get_latest_checkpoint, 
-            image_memory=get_image_memory(), 
-            device='cuda'
-        )
-        
-        # set the learning rate of the planning optimizer
-        learning_rate = 1e-4
-        for param_group in optimizer_planning.param_groups:
-            param_group['lr'] = learning_rate
-        print(f"Set learning rate of the planning optimizer to {learning_rate}")
-        
-    except Exception as e:
-        print(f"Failed to load trained models: {e}")
-        traceback.print_exc()
-    # return  # Exit the function if models cannot be loaded
+    global training_planning_model, training_battle_model, optimizer_planning, optimizer_battle
 
     # Step 5: Perform Final Training Epoch
     print("Starting final training epoch on accumulated data.")
     battle_data_dir = os.path.join(get_root_dir(), "data", "battle_data")
     planning_data_dir = os.path.join(get_root_dir(), "data", "planning_data")
 
-     # Train on Planning Data
-    if os.path.exists(planning_data_dir) and os.listdir(planning_data_dir):
-        try:
-            clear_dataset_and_loader()
-            average_loss = final_training_epoch(
-                model=training_planning_model,
-                optimizer=optimizer_planning,
-                training_data_dir=planning_data_dir,
-                model_type='Planning_Model',
-                batch_size=64,  # Adjust based on your system
-                num_workers=4,  # Increased workers for faster data loading
-                device='cuda',
-                max_batches=500000
-            )
-            # Log the average_loss to wandb
-            wandb_run.log({"average_loss": average_loss})
-            print(f"Logged average_loss: {average_loss}")
-        except Exception as e:
-            print(f"Failed to train Planning_Model: {e}")
-            traceback.print_exc()
-    else:
-        print("No Planning data available for final training.")
-    if save:
-        # Step 6: Save the Planning Model
-        save_models(
-            training_planning_model, 
-            None, 
-            optimizer_planning, 
-            None, 
-            get_checkpoint_dir, 
-            get_latest_checkpoint_plus1, 
-            MAX_CHECKPOINTS=config.get('MAX_CHECKPOINTS', 5), 
-            IMAGE_MEMORY=get_image_memory(),
-            append = 1
-        )
-
-    # Clear Planning Model memory
-    del training_planning_model
-    del optimizer_planning
-    # Clear CUDA cache
-    torch.cuda.empty_cache()
-    gc.collect()
-
-
     # # Train on Battle Data
     if os.path.exists(battle_data_dir) and os.listdir(battle_data_dir):
         try:
-            clear_dataset_and_loader()
             final_training_epoch(
                 model=training_battle_model,
                 optimizer=optimizer_battle,
@@ -237,7 +196,7 @@ def perform_final_training(wandb_run, save = True):
                 batch_size=512,  # Adjust based on your system
                 num_workers=8,  # Increased workers for faster data loading
                 device='cuda',
-                max_batches=50000000
+                max_batches=500000
             )
         except Exception as e:
             print(f"Failed to train Battle_Model: {e}")
@@ -257,12 +216,54 @@ def perform_final_training(wandb_run, save = True):
         IMAGE_MEMORY=get_image_memory()
     )
 
-    # Clear Battle Model memory
-    del training_battle_model
-    del optimizer_battle
+    # # Clear Battle Model memory
+    # del training_battle_model
+    # del optimizer_battle
+    # # Clear CUDA cache
+    # torch.cuda.empty_cache()
+    # gc.collect()
+
+    # Train on Planning Data
+    # if os.path.exists(planning_data_dir) and os.listdir(planning_data_dir):
+    #     try:
+    #         average_loss = final_training_epoch(
+    #             model=training_planning_model,
+    #             optimizer=optimizer_planning,
+    #             training_data_dir=planning_data_dir,
+    #             model_type='Planning_Model',
+    #             batch_size=64,  # Adjust based on your system
+    #             num_workers=4,  # Increased workers for faster data loading
+    #             device='cuda',
+    #             max_batches=500000
+    #         )
+    #         # Log the average_loss to wandb
+    #         wandb_run.log({"average_loss": average_loss})
+    #         print(f"Logged average_loss: {average_loss}")
+    #     except Exception as e:
+    #         print(f"Failed to train Planning_Model: {e}")
+    #         traceback.print_exc()
+    # else:
+    #     print("No Planning data available for final training.")
+    # if save:
+    #     # Step 6: Save the Planning Model
+    #     save_models(
+    #         training_planning_model, 
+    #         None, 
+    #         optimizer_planning, 
+    #         None, 
+    #         get_checkpoint_dir, 
+    #         get_latest_checkpoint_plus1, 
+    #         MAX_CHECKPOINTS=config.get('MAX_CHECKPOINTS', 5), 
+    #         IMAGE_MEMORY=get_image_memory(),
+    #         append = 1
+    #     )
+
+    # Clear Planning Model memory
+    # del training_planning_model
+    # del optimizer_planning
     # Clear CUDA cache
-    torch.cuda.empty_cache()
-    gc.collect()
+    # torch.cuda.empty_cache()
+    # gc.collect()
 
 async def main():
     # Initialize wandb
@@ -282,6 +283,7 @@ async def main():
 
     current_step = 0
     while True:
+        perform_final_training(wandb_run, True)
         if current_step >= total_steps:
             # Reset or stop annealing if desired
             print("Completed all annealing steps. Resetting current_step.")
@@ -299,7 +301,7 @@ async def main():
         print(f"Cycle {current_step + 1}/{total_steps}: GAMMA={gamma:.4f}")
         
         # Step 1: Run the battle instances with the current GAMMA
-        run_battle_instances(gamma)
+        # run_battle_instances(gamma)
 
         # # Step 2: Optionally, run data capture on completed battles
         # print("Running data capture on replays...")
@@ -307,15 +309,12 @@ async def main():
 
         # # Step 3: Move old replays to a new folder
         # print("Moving replays to a new folder...")
-        move_replays()
+        # move_replays()
 
         # Step 7: Increment the step and wait before the next cycle
         current_step += 1
-        
-        
-        perform_final_training(wandb_run, True)
         print("Cycle completed. Waiting for the next cycle...")
-        await asyncio.sleep(1)  # Adjust the delay time as needed
+        # await asyncio.sleep(1)  # Adjust the delay time as needed
 
     # Optionally, finish the wandb run when the loop ends
     wandb.finish()

@@ -66,7 +66,7 @@ def extract_number_from_checkpoint(checkpoint_path):
     else:
         raise ValueError(f"Invalid checkpoint filename: {checkpoint_path}")
     
-def get_latest_checkpoint(model_type='planning', image_memory=1):
+def get_latest_checkpoint(model_type='planning', image_memory=1, append = 0):
     """
     Returns the path to the latest checkpoint for the specified model type and image memory.
     If no checkpoint exists, returns None.
@@ -77,7 +77,16 @@ def get_latest_checkpoint(model_type='planning', image_memory=1):
         print(f"No checkpoint files found in {checkpoint_dir}")
         return None
     latest_checkpoint = max(checkpoint_files, key=os.path.getctime)
+    #get the number at the end of the checkpoint and add append to it
+    number = extract_number_from_checkpoint(latest_checkpoint) + append
+    latest_checkpoint = latest_checkpoint.replace(str(extract_number_from_checkpoint(latest_checkpoint)), str(number))
     return latest_checkpoint
+
+def get_latest_checkpoint_plus1(model_type='planning', image_memory=1):
+    return get_latest_checkpoint(model_type, image_memory, 10)
+
+def get_latest_checkpoint_plus10(model_type='planning', image_memory=1):
+    return get_latest_checkpoint(model_type, image_memory, 10)
 
 def get_new_checkpoint_path(model_type='planning', image_memory=1):
     """

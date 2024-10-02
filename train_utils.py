@@ -9,7 +9,19 @@ import json
 from datetime import datetime
 import math
 
+import torch
+import torch.nn as nn
+
+import traceback
+
 # training_utils.py
+dataset = None
+dataloader = None
+
+def clear_dataset_and_loader():
+    global dataset, dataloader
+    dataset = None
+    dataloader = None
 
 def final_training_epoch(model, optimizer, training_data_dir, model_type='Battle_Model', batch_size=64, num_workers=4, device='cuda', max_batches=100):
     """
@@ -25,20 +37,37 @@ def final_training_epoch(model, optimizer, training_data_dir, model_type='Battle
         device (str): Device to run the training on ('cuda' or 'cpu').
         max_batches (int): Maximum number of batches to process.
     """
+    
+    global dataset, dataloader
+    
     model.train()  # Ensure the model is in training mode
 
     # Initialize the updated Dataset
-    dataset = HDF5Dataset(directory=training_data_dir, model_type=model_type)
+    if dataset is None:
+        dataset = HDF5Dataset(directory=training_data_dir, model_type=model_type)
+    if dataloader is None:
+        if model_type == "Battle_Model":
+            # Initialize DataLoader with the updated Dataset
+            dataloader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=True,  # Now effective with the standard Dataset
+                num_workers=num_workers,
+                pin_memory=True,
+                drop_last=True  # Ensures consistent batch sizes
+            )
+        elif model_type == "Planning_Model":
+            dataloader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=num_workers,
+                pin_memory=True,
+                drop_last=True,
+                collate_fn=custom_collate_fn  # Use the custom collate function
+            )
 
-    # Initialize DataLoader with the updated Dataset
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,  # Now effective with the standard Dataset
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True  # Ensures consistent batch sizes
-    )
+
 
     # Initialize variables to track loss
     total_loss = 0.0
@@ -51,6 +80,9 @@ def final_training_epoch(model, optimizer, training_data_dir, model_type='Battle
     # Initialize tqdm progress bar with total number of batches
     progress_bar = tqdm(dataloader, desc=f"Final Training Epoch [{model_type}]", unit="batch", total=length)
 
+    # Define the loss function
+    criterion_cross = nn.CrossEntropyLoss()
+    criterion_chip = nn.CrossEntropyLoss()
     for batch in progress_bar:
         if batch_count >= max_batches:
             break
@@ -106,10 +138,10 @@ def final_training_epoch(model, optimizer, training_data_dir, model_type='Battle
                 entropy = -(probs * torch.log(probs) + (1 - probs) * torch.log(1 - probs)).sum(dim=1)
 
                 entropy_coefficient = 0.05
-                total_loss_batch = policy_loss - entropy_coefficient * entropy.mean()
+                total_loss = policy_loss - entropy_coefficient * entropy.mean()
 
                 # Backward pass
-                total_loss_batch.backward()
+                total_loss.backward()
 
                 # Gradient clipping
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -118,22 +150,21 @@ def final_training_epoch(model, optimizer, training_data_dir, model_type='Battle
                 optimizer.step()
 
                 # Update loss and batch count
-                total_loss += total_loss_batch.item()
+                #total_loss += total_epoch_loss.item()
                 batch_count += 1
 
                 # Update progress bar with current loss
-                progress_bar.set_postfix({"Batch Loss": total_loss_batch.item()})
+                progress_bar.set_postfix({"Batch Loss": total_loss.item()})
 
             elif model_type == "Planning_Model":
                 # Unpack batch data
-                # Since Planning_Model batch size is 1, handle accordingly
-                # If batch_size >1 in future, this can be vectorized
                 inputs = batch['inputs']
-                cross_target = batch['cross_target']
-                target_list = batch['target_list']
-                reward = batch['reward']
-
-                # Move all tensors to device
+                cross_target = batch['cross_target'].to(device)    # Shape: (batch_size, 6)
+                target_list = batch['target_list'].to(device)      # Shape: (batch_size, 5, 12)
+                reward = batch['reward'].to(device)                # Shape: (batch_size,)
+                #assign 1 reward to everything
+                # reward = torch.ones_like(reward)
+                # Move inputs to device
                 for key in inputs:
                     if isinstance(inputs[key], dict):
                         for subkey in inputs[key]:
@@ -141,44 +172,30 @@ def final_training_epoch(model, optimizer, training_data_dir, model_type='Battle
                     else:
                         inputs[key] = inputs[key].to(device)
 
-                cross_target_tensor = torch.tensor([cross_target], dtype=torch.long, device=device)  # Shape: (1,)
-                target_list_tensor = torch.tensor([target_list], dtype=torch.long, device=device)    # Shape: (1, 5)
-                reward_tensor = torch.tensor([reward], dtype=torch.float32, device=device)          # Shape: (1,)
-
                 # Zero gradients
                 optimizer.zero_grad()
 
                 # Forward pass through the PlanningModel
-                cross_logits, chip_logits_list = model(inputs)  # cross_logits: (1, 6), chip_logits_list: list of 5 tensors each (1, 10)
+                cross_logits, chip_logits_list = model(inputs)  # cross_logits: (batch_size, 6), chip_logits_list: list of 5 tensors each (batch_size, 12)
 
-                # Compute log probabilities for cross_selection
-                cross_log_probs = F.log_softmax(cross_logits, dim=-1)  # Shape: (1, 6)
-                cross_selected_log_probs = cross_log_probs[torch.arange(1), cross_target_tensor]  # Shape: (1,)
+                # Compute cross loss
+                cross_loss = criterion_cross(cross_logits, cross_target)  # Shape: ()
 
-                # Compute log probabilities for chip_selections
-                chip_log_probs = [F.log_softmax(chip_logits, dim=-1) for chip_logits in chip_logits_list]  # List of 5 tensors each (1, 10)
-                chip_selected_log_probs = torch.stack([
-                    chip_log_probs[i][torch.arange(1), target_list_tensor[:, i]]
-                    for i in range(5)
-                ], dim=1)  # Shape: (1, 5)
+                # Compute chip losses
+                chip_losses = 0
+                for i, chip_logit in enumerate(chip_logits_list):
+                    chip_target = target_list[:, i, :]  # Shape: (batch_size, 12)
+                    chip_loss = criterion_chip(chip_logit, chip_target)  # Shape: ()
+                    chip_losses += chip_loss
 
-                # Sum log_probs across all actions
-                total_log_probs = cross_selected_log_probs + chip_selected_log_probs.sum(dim=1)  # Shape: (1,)
+                # Total policy loss
+                policy_loss = cross_loss + chip_losses  # Scalar
 
-                # Compute policy loss
-                policy_loss = - (total_log_probs * reward_tensor).mean()
-
-                # Compute entropy for regularization
-                cross_entropy = -(F.softmax(cross_logits, dim=-1) * F.log_softmax(cross_logits, dim=-1)).sum(dim=1)  # Shape: (1,)
-                chip_entropy = [-(F.softmax(chip_logits, dim=-1) * F.log_softmax(chip_logits, dim=-1)).sum(dim=-1) for chip_logits in chip_logits_list]  # List of 5 tensors each (1,)
-                chip_entropy = torch.stack(chip_entropy, dim=1).sum(dim=1)  # Shape: (1,)
-                total_entropy = cross_entropy + chip_entropy  # Shape: (1,)
-
-                entropy_coefficient = 0.05
-                total_loss_batch = policy_loss - entropy_coefficient * total_entropy.mean()
+                # Optionally weight the loss with reward
+                weighted_loss = policy_loss * reward.mean()  # Adjust based on your requirements
 
                 # Backward pass
-                total_loss_batch.backward()
+                weighted_loss.backward()
 
                 # Gradient clipping
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -187,14 +204,16 @@ def final_training_epoch(model, optimizer, training_data_dir, model_type='Battle
                 optimizer.step()
 
                 # Update loss and batch count
-                total_loss += total_loss_batch.item()
+                total_loss += weighted_loss.item()
                 batch_count += 1
 
                 # Update progress bar with current loss
-                progress_bar.set_postfix({"Batch Loss": total_loss_batch.item()})
+                progress_bar.set_postfix({"Batch Loss": weighted_loss.item()})
 
         except Exception as e:
             print(f"Error during training on batch {batch_count}: {e}")
+            #traceback
+            print(traceback.format_exc())
             continue  # Skip this batch and continue
 
     if batch_count > 0:
@@ -202,8 +221,9 @@ def final_training_epoch(model, optimizer, training_data_dir, model_type='Battle
     else:
         average_loss = 0.0
     print(f"{model_type} Final Training Epoch - Average Loss: {average_loss:.4f}")
+    return average_loss
 
-def save_models(training_planning_model, training_battle_model, optimizer_planning, optimizer_battle, get_checkpoint_dir, get_new_checkpoint_path, MAX_CHECKPOINTS=5, IMAGE_MEMORY=1):
+def save_models(training_planning_model, training_battle_model, optimizer_planning, optimizer_battle, get_checkpoint_dir, get_new_checkpoint_path, MAX_CHECKPOINTS=5, IMAGE_MEMORY=1, append=0):
     """
     Saves the Training Planning and Training Battle models to their respective checkpoint directories.
     Utilizes unique checkpoint paths to prevent overwriting and maintains a maximum of MAX_CHECKPOINTS.
@@ -247,6 +267,66 @@ def save_models(training_planning_model, training_battle_model, optimizer_planni
     else:
         print("Training Battle Model is not loaded. Skipping save.")
 
+# Add this custom collate function
+# training_utils.py
+
+# training_utils.py
+
+def custom_collate_fn(batch):
+    """
+    Custom collate function to handle nested dictionaries in batch data.
+    """
+    # Initialize batched data structures
+    batched_inputs = {}
+    batched_cross_target = []
+    batched_target_list = []
+    batched_reward = []
+
+    # Iterate over the batch and collect data
+    for data_point in batch:
+        inputs = data_point['inputs']
+        cross_target = data_point['cross_target']
+        target_list = data_point['target_list']
+        reward = data_point['reward']
+
+        # For inputs, collect and batch the tensors
+        for key in inputs:
+            if key not in batched_inputs:
+                if isinstance(inputs[key], dict):
+                    batched_inputs[key] = {}
+                else:
+                    batched_inputs[key] = []
+            if isinstance(inputs[key], dict):
+                for subkey in inputs[key]:
+                    if subkey not in batched_inputs[key]:
+                        batched_inputs[key][subkey] = []
+                    batched_inputs[key][subkey].append(inputs[key][subkey])
+            else:
+                batched_inputs[key].append(inputs[key])
+
+        batched_cross_target.append(cross_target)
+        batched_target_list.append(target_list)
+        batched_reward.append(reward)
+
+    # Now, stack the tensors
+    for key in batched_inputs:
+        if isinstance(batched_inputs[key], dict):
+            for subkey in batched_inputs[key]:
+                batched_inputs[key][subkey] = torch.stack(batched_inputs[key][subkey], dim=0)
+        else:
+            batched_inputs[key] = torch.stack(batched_inputs[key], dim=0)
+
+    batched_cross_target = torch.stack(batched_cross_target, dim=0).float()  # Shape: (batch_size, 6)
+    batched_target_list = torch.stack(batched_target_list, dim=0).float()    # Shape: (batch_size, 5, 12)
+    batched_reward = torch.tensor(batched_reward, dtype=torch.float32)      # Shape: (batch_size,)
+
+    # Return the batched data
+    return {
+        'inputs': batched_inputs,
+        'cross_target': batched_cross_target,
+        'target_list': batched_target_list,
+        'reward': batched_reward
+    }
 
 # training_utils.py
 
@@ -277,11 +357,16 @@ def unflatten_dict(d, sep='_'):
             d_ref = d_ref[key]
         d_ref[keys[-1]] = value
     return result_dict
+import os
+import h5py
+import torch
+from torch.utils.data import Dataset
 
 class HDF5Dataset(Dataset):
-    def __init__(self, directory, model_type='Battle_Model'):
+    def __init__(self, directory, model_type='Battle_Model', device='cuda'):
         """
-        Initializes the dataset by listing all relevant HDF5 files.
+        Initializes the dataset by listing all relevant HDF5 files and 
+        creating an index mapping for quick access.
 
         Args:
             directory (str): Directory containing HDF5 files.
@@ -289,6 +374,7 @@ class HDF5Dataset(Dataset):
         """
         self.directory = directory
         self.model_type = model_type
+        self.device = device
         self.files = [
             os.path.join(root, file)
             for root, _, files in os.walk(directory)
@@ -296,46 +382,71 @@ class HDF5Dataset(Dataset):
             if file.endswith('.h5') and file.startswith(model_type)
         ]
         if not self.files:
-            raise FileNotFoundError(f"No HDF5 files found for model type '{model_type}' in directory '{directory}'.")
+            raise FileNotFoundError(
+                f"No HDF5 files found for model type '{model_type}' in directory '{directory}'."
+            )
 
-        # Precompute the total number of samples
+        # Precompute the total number of samples by creating an index mapping
         self.index_mapping = []
         for file_path in self.files:
             try:
                 with h5py.File(file_path, 'r') as hf:
                     if self.model_type == 'Battle_Model':
-                        # For Battle_Model, assume 'input' dataset exists
-                        num_samples = hf['input'].shape[0]
+                        # For Battle_Model, use 'actions' dataset to determine number of samples
+                        if 'actions' not in hf:
+                            raise KeyError(f"'actions' dataset not found in {file_path} for Battle_Model.")
+                        num_samples = hf['actions'].shape[0]
                     elif self.model_type == 'Planning_Model':
                         # For Planning_Model, use 'cross_target' to determine number of samples
-                        if 'cross_target' in hf:
-                            num_samples = hf['cross_target'].shape[0]
-                        else:
+                        if 'cross_target' not in hf:
                             raise KeyError(f"'cross_target' dataset not found in {file_path} for Planning_Model.")
                         if 'target_list' not in hf:
                             raise KeyError(f"'target_list' dataset not found in {file_path} for Planning_Model.")
+                        num_samples = hf['cross_target'].shape[0]
                     else:
                         raise ValueError(f"Unsupported model_type: {self.model_type}")
-                    
+
                     for i in range(num_samples):
-                        # print(f"\n\n\nReading {file_path} sample {i}")
                         self.index_mapping.append((file_path, i))
             except Exception as e:
                 print(f"Failed to read {file_path}: {e}")
                 continue
-            
-        
 
         self.total_samples = len(self.index_mapping)
         if self.total_samples == 0:
-            raise ValueError(f"No samples found in the HDF5 files for model type '{model_type}'.")
+            raise ValueError(
+                f"No samples found in the HDF5 files for model type '{model_type}'."
+            )
+            
+         # Preload all data into GPU memory
+        # self.data = []
+        # print(f"Preloading {self.total_samples} samples to GPU...")
+        # for idx, (file_path, sample_idx) in enumerate(tqdm(self.index_mapping, desc="Loading Data")):
+        #     try:
+        #         with h5py.File(file_path, 'r') as hf:
+        #             if self.model_type == "Battle_Model":
+        #                 data_point = self._get_battle_model_data(hf, sample_idx)
+        #             elif self.model_type == "Planning_Model":
+        #                 data_point = self._get_planning_model_data(hf, sample_idx)
+                    
+        #             # Move tensors to GPU
+        #             for key in data_point:
+        #                 if isinstance(data_point[key], dict):
+        #                     for subkey in data_point[key]:
+        #                         data_point[key][subkey] = data_point[key][subkey].to(self.device, non_blocking=True)
+        #                 elif isinstance(data_point[key], torch.Tensor):
+        #                     data_point[key] = data_point[key].to(self.device, non_blocking=True)
+        #             self.data.append(data_point)
+        #     except Exception as e:
+        #         print(f"Failed to load sample {sample_idx} from {file_path}: {e}")
+        #         self.data.append(None)  # Placeholder for failed samples
 
     def __len__(self):
         return self.total_samples
 
     def __getitem__(self, idx):
         """
-        Retrieves a single data point.
+        Retrieves a single data point based on the index.
 
         Args:
             idx (int): Index of the data point.
@@ -346,60 +457,144 @@ class HDF5Dataset(Dataset):
         file_path, sample_idx = self.index_mapping[idx]
         try:
             with h5py.File(file_path, 'r') as hf:
-                data_point = {}
                 if self.model_type == "Battle_Model":
-                    # Initialize dictionary to hold data
-                    for key in hf.keys():
-                        if key in ['input', 'images', 'positions', 'player_charges', 'enemy_charges', 'net_rewards']:
-                            data_point[key] = torch.tensor(hf[key][sample_idx], dtype=torch.float32)
-                    # Ensure all required keys are present
-                    required_keys = ['input', 'net_rewards']
-                    if 'images' in data_point:
-                        required_keys.append('images')
-                    if 'positions' in data_point:
-                        required_keys.append('positions')
-                    if 'player_charges' in data_point:
-                        required_keys.append('player_charges')
-                    if 'enemy_charges' in data_point:
-                        required_keys.append('enemy_charges')
-                    for rk in required_keys:
-                        assert rk in data_point, f"Missing required key '{rk}' in Battle_Model data."
+                    return self._get_battle_model_data(hf, sample_idx)
                 elif self.model_type == "Planning_Model":
-                    # Initialize nested inputs
-                    inputs = {
-                        'player_folder': {
-                            'chips_onehot': torch.tensor(hf['inputs_player_folder_chips_onehot'][sample_idx], dtype=torch.float32),
-                            'codes_onehot': torch.tensor(hf['inputs_player_folder_codes_onehot'][sample_idx], dtype=torch.float32),
-                            'flags': torch.tensor(hf['inputs_player_folder_flags'][sample_idx], dtype=torch.float32)
-                        },
-                        'enemy_folder': {
-                            'chips_onehot': torch.tensor(hf['inputs_enemy_folder_chips_onehot'][sample_idx], dtype=torch.float32),
-                            'codes_onehot': torch.tensor(hf['inputs_enemy_folder_codes_onehot'][sample_idx], dtype=torch.float32),
-                            'flags': torch.tensor(hf['inputs_enemy_folder_flags'][sample_idx], dtype=torch.float32)
-                        },
-                        'visible_chips': {
-                            'chips_onehot': torch.tensor(hf['inputs_visible_chips_chips_onehot'][sample_idx], dtype=torch.float32),
-                            'codes_onehot': torch.tensor(hf['inputs_visible_chips_codes_onehot'][sample_idx], dtype=torch.float32)
-                        },
-                        'health': torch.tensor(hf['health'][sample_idx], dtype=torch.float32),
-                        'current_crosses': torch.tensor(hf['current_crosses'][sample_idx], dtype=torch.float32),
-                        'available_crosses': torch.tensor(hf['available_crosses'][sample_idx], dtype=torch.float32),
-                        'beast_flags': torch.tensor(hf['beast_flags'][sample_idx], dtype=torch.float32)
-                    }
-                    # Extract targets and reward
-                    cross_target = int(hf['cross_target'][sample_idx])
-                    target_list = hf['target_list'][sample_idx].tolist()
-                    reward = float(hf['reward'][sample_idx])
-                    
-                    # Structure the data_point
-                    data_point = {
-                        'inputs': inputs,
-                        'cross_target': cross_target,
-                        'target_list': target_list,
-                        'reward': reward
-                    }
-                return data_point
+                    return self._get_planning_model_data(hf, sample_idx)
+                else:
+                    raise ValueError(f"Unsupported model_type: {self.model_type}")
         except Exception as e:
             print(f"Failed to read sample {sample_idx} from {file_path}: {e}")
-            # Optionally, you can raise the exception or handle it as needed
+            # Depending on your use case, you can either raise the exception
+            # or return a dummy data point. Here, we'll raise the exception.
             raise e
+
+    def _get_battle_model_data(self, hf, sample_idx):
+        """
+        Extracts data for the Battle_Model.
+
+        Args:
+            hf (h5py.File): Opened HDF5 file.
+            sample_idx (int): Index of the sample within the file.
+
+        Returns:
+            dict: A dictionary containing Battle_Model data tensors.
+        """
+        data_point = {}
+        # Define all the keys you want to extract for Battle_Model
+        battle_keys = [
+            'actions', 'rewards', 'frames', 'position', 'player_charge_seq',
+            'enemy_charge_seq', 'player_charge', 'enemy_charge', 'previous_inputs',
+            'health_memory', 'player_chip', 'enemy_chip'
+        ]
+
+        for key in battle_keys:
+            if key in hf:
+                # Handle different data types if necessary
+                if key in ['frames', 'previous_inputs', 'position', 'player_charge_seq', 'enemy_charge_seq', 'player_charge', 'enemy_charge', 'health_memory', 'player_chip', 'enemy_chip']:
+                    # Assuming these are numerical tensors
+                    data_point[key] = torch.tensor(hf[key][sample_idx], dtype=torch.float32)
+                elif key == 'actions':
+                    # If 'actions' are categorical or require a different dtype
+                    data_point[key] = torch.tensor(hf[key][sample_idx], dtype=torch.long)
+                elif key == 'rewards':
+                    data_point[key] = torch.tensor(hf[key][sample_idx], dtype=torch.float32)
+                else:
+                    # Default handling
+                    data_point[key] = torch.tensor(hf[key][sample_idx], dtype=torch.float32)
+            else:
+                raise KeyError(f"Missing required key '{key}' in Battle_Model data.")
+
+        return data_point
+
+
+    def _get_planning_model_data(self, hf, sample_idx):
+        """
+        Extracts data for the Planning_Model.
+
+        Args:
+            hf (h5py.File): Opened HDF5 file.
+            sample_idx (int): Index of the sample within the file.
+
+        Returns:
+            dict: A dictionary containing Planning_Model data tensors.
+        """
+        # Initialize nested inputs
+        inputs = {
+            'player_folder': {
+                'chips_onehot': torch.tensor(
+                    hf['inputs_player_folder_chips_onehot'][sample_idx], dtype=torch.float32
+                ),
+                'codes_onehot': torch.tensor(
+                    hf['inputs_player_folder_codes_onehot'][sample_idx], dtype=torch.float32
+                ),
+                'flags': torch.tensor(
+                    hf['inputs_player_folder_flags'][sample_idx], dtype=torch.float32
+                )
+            },
+            'enemy_folder': {
+                'chips_onehot': torch.tensor(
+                    hf['inputs_enemy_folder_chips_onehot'][sample_idx], dtype=torch.float32
+                ),
+                'codes_onehot': torch.tensor(
+                    hf['inputs_enemy_folder_codes_onehot'][sample_idx], dtype=torch.float32
+                ),
+                'flags': torch.tensor(
+                    hf['inputs_enemy_folder_flags'][sample_idx], dtype=torch.float32
+                )
+            },
+            'visible_chips': {
+                'chips_onehot': torch.tensor(
+                    hf['inputs_visible_chips_chips_onehot'][sample_idx], dtype=torch.float32
+                ),
+                'codes_onehot': torch.tensor(
+                    hf['inputs_visible_chips_codes_onehot'][sample_idx], dtype=torch.float32
+                )
+            },
+            'health': torch.tensor(hf['health'][sample_idx], dtype=torch.float32),
+            'current_crosses': torch.tensor(hf['current_crosses'][sample_idx], dtype=torch.float32),
+            'available_crosses': torch.tensor(hf['available_crosses'][sample_idx], dtype=torch.float32),
+            'beast_flags': torch.tensor(hf['beast_flags'][sample_idx], dtype=torch.float32)
+        }
+
+        # Extract and process targets
+        cross_target = int(hf['cross_target'][sample_idx])
+        target_list = hf['target_list'][sample_idx].tolist()
+
+        # Convert cross_target into one-hot encoded tensor (6 possible values)
+        cross_target_onehot = torch.tensor(
+            [1.0 if i == cross_target else 0.0 for i in range(6)], dtype=torch.float32
+        )
+
+        # Convert target_list into a 2D one-hot encoded tensor (5 targets, 12 possible values each)
+        target_list_onehot = torch.tensor(
+            [
+                [1.0 if i == target else 0.0 for i in range(12)]
+                for target in target_list
+            ],
+            dtype=torch.float32
+        )
+
+        # Extract reward
+        reward = float(hf['reward'][sample_idx])
+
+        # Structure the data_point
+        data_point = {
+            'inputs': inputs,
+            'cross_target': cross_target_onehot,
+            'target_list': target_list_onehot,
+            'reward': reward
+        }
+
+        return data_point
+
+# cross_target: 0
+# target_list: [5, 7, 1, 2, 0]
+# lh cross_target: tensor([1., 0., 0., 0., 0., 0.])
+# lh target_list: 
+# tensor([
+    #     [0., 0., 0., 0., 0., 1., 0., 0., 0., 0., 0., 0.],
+#         [0., 0., 0., 0., 0., 0., 0., 1., 0., 0., 0., 0.],
+#         [0., 1., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.],
+#         [0., 0., 1., 0., 0., 0., 0., 0., 0., 0., 0., 0.],
+#         [1., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.]])

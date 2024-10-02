@@ -684,6 +684,42 @@ impl Session {
                 set_selected_cross_index(core.raw_read_8(0x020364DB, -1) as u16);
                 // println!("Selected cross index: {}", core.raw_read_8(0x020364DB, -1) as u16);
 
+
+                //assign to 3x6 grid
+                let grid_addresses = [
+                    0x02039C06, 0x02039C26, 0x02039C46, 0x02039C66, 0x02039C86, 0x02039CA6,
+                    0x02039D06, 0x02039D26, 0x02039D46, 0x02039D66, 0x02039D86, 0x02039DA6,
+                    0x02039E06, 0x02039E26, 0x02039E46, 0x02039E66, 0x02039E86, 0x02039EA6,
+                ];
+                let grid_owner_addresses = [
+                    0x02039C07, 0x02039C27, 0x02039C47, 0x02039C67, 0x02039C87, 0x02039CA7,
+                    0x02039D07, 0x02039D27, 0x02039D47, 0x02039D67, 0x02039D87, 0x02039DA7,
+                    0x02039E07, 0x02039E27, 0x02039E47, 0x02039E67, 0x02039E87, 0x02039EA7,
+                ];
+
+                //display values of grid
+                for address in &grid_addresses {
+                    let current_value = core.raw_read_8(*address, -1);
+                    // println!("0x{:08X},{}", address, current_value);
+                }
+
+                //display values of grid
+                for address in &grid_owner_addresses {
+                    let current_value = core.raw_read_8(*address, -1);
+                    // println!("0x{:08X},{}", address, current_value);
+                }
+
+                //position of player 1
+                let player_grid_positionX1 = core.raw_read_8(0x0203AA9C, -1);
+                let player_grid_positionY1 = core.raw_read_8(0x0203AA9D, -1);
+                // println!("Player grid position1: {}, {}", player_grid_positionX1, player_grid_positionY1);
+
+
+                //position of player 2
+                let player_grid_positionX2 = core.raw_read_8(0x020384FA, -1);
+                let player_grid_positionY2 = core.raw_read_8(0x020384FB, -1);
+                // println!("Player grid position2: {}, {}", player_grid_positionX2, player_grid_positionY2);
+
                 for i in 0..16 {
                     let address = 0x0203CDB0 + i as u32;
                     if i % 2 == 0 {
@@ -788,9 +824,9 @@ impl Session {
                     //         //only get values that are 0
 
                     //         let current_value = core_ref.raw_read_8(address, -1);
-                    //         if current_value == 0 {
+                    //         // if current_value == 0 {
                     //             initial_states.insert(address, current_value);
-                    //         }
+                    //         // }
                     //         println!("Captured Address: 0x{:08X}, Initial Value: {}", address, current_value);
                     //     }
 
@@ -1490,6 +1526,37 @@ impl Session {
                     // );
 
                     set_enemy_game_emotion_state(core_ref.raw_read_8(0x02035291, -1) as u16);
+
+
+                    //values for the grid state (3x6) 8bit
+                    //0x02039C06	0x02039C26	0x02039C46	0x02039C66	0x02039C86	0x02039CA6
+                    //0x02039D06	0x02039D26	0x02039D46	0x02039D66	0x02039D86	0x02039DA6
+                    //0x02039E06	0x02039E26	0x02039E46	0x02039E66	0x02039E86	0x02039EA6
+
+                    //assign to 3x6 grid
+                    let grid_addresses = [
+                        0x02039C06, 0x02039C26, 0x02039C46, 0x02039C66, 0x02039C86, 0x02039CA6,
+                        0x02039D06, 0x02039D26, 0x02039D46, 0x02039D66, 0x02039D86, 0x02039DA6,
+                        0x02039E06, 0x02039E26, 0x02039E46, 0x02039E66, 0x02039E86, 0x02039EA6,
+                    ];
+                    let grid_owner_addresses = [
+                        0x02039C07, 0x02039C27, 0x02039C47, 0x02039C67, 0x02039C87, 0x02039CA7,
+                        0x02039D07, 0x02039D27, 0x02039D47, 0x02039D67, 0x02039D87, 0x02039DA7,
+                        0x02039E07, 0x02039E27, 0x02039E47, 0x02039E67, 0x02039E87, 0x02039EA7,
+                    ];
+
+                    //display values of grid
+                    for address in &grid_addresses {
+                        let current_value = core_ref.raw_read_8(*address, -1);
+                        println!("0x{:08X},{}", address, current_value);
+                    }
+
+                    //display values of grid
+                    for address in &grid_owner_addresses {
+                        let current_value = core_ref.raw_read_8(*address, -1);
+                        println!("0x{:08X},{}", address, current_value);
+                    }
+
 
                     //search for values that are equal to 9
                     // let possible_addresses = search_all_health_values(core_ref, 19);

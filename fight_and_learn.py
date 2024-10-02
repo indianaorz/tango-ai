@@ -96,10 +96,10 @@ learning_rate = 1e-5
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
-replay_count = 1
-battle_count = 0
+replay_count = 0
+battle_count = 4
 include_orig = False
-do_replays = True
+do_replays = False
 
 INSTANCES = []
 # Define the server addresses and ports for each instance
@@ -667,10 +667,21 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
         }
         planning_data_buffers[port].append(data_point)
         
+        #set values higher than chip visible to 0
+        for i in range(len(target_list)):
+            if target_list[i] >= chips_visible:
+                target_list[i] = 0
+        
         #remove all 0 values from the target_list
         target_list = list(filter(lambda a: a != 0, target_list))
         #subtract 1 from all values from the target list
         target_list = list(map(lambda a: a - 1, target_list))
+        
+        
+        current_instance['target_list'] = target_list
+        print(f"Port {port}: Cross Target: {cross_target}")
+        print(f"Port {port}: Target List: {target_list}")
+        
 
 
         #randomly select value for cross_target
@@ -1625,7 +1636,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 previous_sent_dict[port] = 0
                                 if previous_inside_window_dict[port] == 1.0:
                                     #if exiting the window and the game is a replay
-                                    if is_replay:
+                                    if is_replay or game_instance.get('is_player', True):
                                         inputs, cross_target, target_list_input = get_planning_input_from_replay(game_instance, GAMMA, device)
                                         #append the selected data to the planning data buffer
                                         data_point = {
@@ -1846,31 +1857,31 @@ def training_thread_function(batch_size=48, max_wait_time=1.0):
         start_time = time.time()
         any_data_processed = False
         
-        #train battle model
-        # for port, buffer in data_buffers.items():
-        #     lock = data_buffers_locks[port]
-        #     with lock:
-        #         if len(buffer) == 0:
-        #             continue  # No data to process for this port
+        # train battle model
+        for port, buffer in data_buffers.items():
+            lock = data_buffers_locks[port]
+            with lock:
+                if len(buffer) == 0:
+                    continue  # No data to process for this port
                 
-        #         # Determine the number of data points to process
-        #         current_batch_size = min(batch_size, len(buffer))
-        #         batch_data = buffer[:current_batch_size]
+                # Determine the number of data points to process
+                current_batch_size = min(batch_size, len(buffer))
+                batch_data = buffer[:current_batch_size]
                 
-        #         # Remove the processed data points from the buffer
-        #         del buffer[:current_batch_size]
+                # Remove the processed data points from the buffer
+                del buffer[:current_batch_size]
             
-        #     if batch_data:
-        #         any_data_processed = True
-        #         # Perform training on the batch_data
-        #         train_model_online(port, batch_data, model_type="Battle_Model", log=True)
-        #         progress_bar.update(1)
+            if batch_data:
+                any_data_processed = True
+                # Perform training on the batch_data
+                train_model_online(port, batch_data, model_type="Battle_Model", log=True)
+                progress_bar.update(1)
             
-        # #remove all battle data from memory
-        # for port, buffer in data_buffers.items():
-        #     lock = data_buffers_locks[port]
-        #     with lock:
-        #         buffer.clear()
+        #remove all battle data from memory
+        for port, buffer in data_buffers.items():
+            lock = data_buffers_locks[port]
+            with lock:
+                buffer.clear()
 
         #train planning model
         batch_size = 1
@@ -2702,7 +2713,7 @@ async def main():
     connection_tasks = [asyncio.create_task(handle_connection(instance, config)) for instance in INSTANCES]
 
     # Start mouse monitoring task
-    # monitor_task = asyncio.create_task(monitor_mouse_over_instances(INSTANCES))
+    monitor_task = asyncio.create_task(monitor_mouse_over_instances(INSTANCES))
 
 
 
@@ -2801,11 +2812,11 @@ async def main():
     # # --- End of Tally Display ---
 
     # # Cancel the monitor task gracefully
-    # monitor_task.cancel()
-    # try:
-    #     await monitor_task
-    # except asyncio.CancelledError:
-    #     print("Mouse monitoring task cancelled.")
+    monitor_task.cancel()
+    try:
+        await monitor_task
+    except asyncio.CancelledError:
+        print("Mouse monitoring task cancelled.")
 
     #log all the data from the planning buffers
     # for port, buffer in planning_data_buffers.items():
@@ -3031,15 +3042,15 @@ def save_models():
         print("Training Planning Model is not loaded. Skipping save.")
 
     # Save Training Battle Model
-    # if 'training_battle_model' in globals() and training_battle_model is not None:
-    #     battle_checkpoint_path = get_new_checkpoint_path(model_type='battle', image_memory=IMAGE_MEMORY, battle_count=battle_count)
-    #     torch.save({'model_state_dict': training_battle_model.state_dict()}, battle_checkpoint_path)
-    #     print(f"Training Battle Model saved to {battle_checkpoint_path}")
-    #     # Manage checkpoints
-    #     battle_checkpoint_dir = get_checkpoint_dir(model_type='battle', image_memory=IMAGE_MEMORY)
-    #     manage_checkpoints(battle_checkpoint_dir)
-    # else:
-    #     print("Training Battle Model is not loaded. Skipping save.")
+    if 'training_battle_model' in globals() and training_battle_model is not None:
+        battle_checkpoint_path = get_new_checkpoint_path(model_type='battle', image_memory=IMAGE_MEMORY, battle_count=battle_count)
+        torch.save({'model_state_dict': training_battle_model.state_dict()}, battle_checkpoint_path)
+        print(f"Training Battle Model saved to {battle_checkpoint_path}")
+        # Manage checkpoints
+        battle_checkpoint_dir = get_checkpoint_dir(model_type='battle', image_memory=IMAGE_MEMORY)
+        manage_checkpoints(battle_checkpoint_dir)
+    else:
+        print("Training Battle Model is not loaded. Skipping save.")
 
 
 import gc
