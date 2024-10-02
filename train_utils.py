@@ -318,7 +318,7 @@ class HDF5Dataset(Dataset):
                         raise ValueError(f"Unsupported model_type: {self.model_type}")
                     
                     for i in range(num_samples):
-                        print(f"\n\n\nReading {file_path} sample {i}")
+                        # print(f"\n\n\nReading {file_path} sample {i}")
                         self.index_mapping.append((file_path, i))
             except Exception as e:
                 print(f"Failed to read {file_path}: {e}")

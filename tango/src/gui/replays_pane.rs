@@ -443,6 +443,23 @@ pub fn show(
                             .button(format!("▶️ {}", i18n::LOCALES.lookup(language, "replays-play").unwrap()))
                             .clicked()
                         {
+                            // Extract necessary data from shared_root_state
+                            // Extract and clone the ROMs
+                            let roms_scanner = shared_root_state.roms_scanner.clone();
+                            let roms_original = roms_scanner.read().clone();
+
+                            // Create a new HashMap with keys of type (String, u8)
+                            let roms: std::collections::HashMap<(String, u8), Vec<u8>> = roms_original.iter().map(|(game, rom)| {
+                                (
+                                    (
+                                        game.gamedb_entry().family_and_variant.0.to_string(),
+                                        game.gamedb_entry().family_and_variant.1,
+                                    ),
+                                    rom.clone(),
+                                )
+                            }).collect();
+                            
+
                             tokio::task::spawn_blocking({
                                 let egui_ctx = ui.ctx().clone();
                                 let audio_binder = shared_root_state.audio_binder.clone();
@@ -462,6 +479,7 @@ pub fn show(
                                             &rom,
                                             emu_tps_counter,
                                             &replay,
+                                            roms
                                         )
                                         .unwrap(),
                                     ); // TODO: Don't unwrap maybe
@@ -659,6 +677,22 @@ if !state.replay_loaded {
                                                             let emu_tps_counter = shared_root_state.emu_tps_counter.clone();
                                                             let session = shared_root_state.session.clone();
 
+                                                            // Extract and clone the ROMs
+                                                            let roms_scanner = shared_root_state.roms_scanner.clone();
+                                                            let roms_original = roms_scanner.read().clone();
+
+                                                            // Create a new HashMap with keys of type (String, u8)
+                                                            let roms: std::collections::HashMap<(String, u8), Vec<u8>> = roms_original.iter().map(|(game, rom)| {
+                                                                (
+                                                                    (
+                                                                        game.gamedb_entry().family_and_variant.0.to_string(),
+                                                                        game.gamedb_entry().family_and_variant.1,
+                                                                    ),
+                                                                    rom.clone(),
+                                                                )
+                                                            }).collect();
+
+
                                                             tokio::task::spawn_blocking({
                                                                 let replay = replay.clone();
                                                                 let local_rom = local_rom.unwrap_or_default();
@@ -675,6 +709,8 @@ if !state.replay_loaded {
                                                                         &local_rom,
                                                                         emu_tps_counter,
                                                                         &replay,
+                                                                        roms
+
                                                                     ) {
                                                                         Ok(new_session) => {
                                                                             *session.lock() = Some(new_session);

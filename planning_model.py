@@ -38,7 +38,7 @@ class PlanningModel(nn.Module):
         # Other feature encoders
         self.health_fc = nn.Linear(2, 16)  # Player and enemy health
         self.cross_fc = nn.Linear(52, 32)  # Player and enemy current cross (each 26 one-hot)
-        self.available_crosses_fc = nn.Linear(10, 16)  # Player and enemy available crosses (each 5 bits, total 10)
+        self.available_crosses_fc = nn.Linear(20, 16)  # Player and enemy available crosses (each 10 bits, total 20)
         self.beast_flags_fc = nn.Linear(4, 16)  # Beast out flags for player and enemy
         
         # Fully connected layers
@@ -238,15 +238,15 @@ def encode_visible_chips(chips, visible_count):
 
 def encode_available_crosses(available_crosses):
     """
-    Encodes available crosses into a 5-bit binary tensor.
+    Encodes available crosses into a 10-bit binary tensor.
 
     Args:
-        available_crosses (list): List of available cross indices (integers from 0 to 4).
+        available_crosses (list): List of available cross indices (integers from 0 to 9).
 
     Returns:
-        torch.Tensor: Binary tensor of shape (1,5), where each bit represents the availability of a cross.
+        torch.Tensor: Binary tensor of shape (1,10), where each bit represents the availability of a cross.
     """
-    num_crosses = 5
+    num_crosses = 10
     binary_vector = [0] * num_crosses
     for cross_index in available_crosses:
         if 0 <= cross_index < num_crosses:
@@ -254,8 +254,9 @@ def encode_available_crosses(available_crosses):
         else:
             print(f"Warning: Cross index {cross_index} is out of bounds [0, {num_crosses-1}]. Ignored.")
     
-    binary_tensor = torch.tensor([binary_vector], dtype=torch.float32, device=device)  # Shape: (1,5)
-    return binary_tensor  # Shape: (1,5)
+    binary_tensor = torch.tensor([binary_vector], dtype=torch.float32, device=device)  # Shape: (1,10)
+    return binary_tensor  # Shape: (1,10)
+
 
 def encode_current_cross(cross):
     """
@@ -345,11 +346,11 @@ def get_planning_input_from_instance(inference_planning_model, instance, GAMMA, 
     health_tensor = torch.tensor([[player_health, enemy_health]], dtype=torch.float32, device=device)  # Shape: (1, 2)
 
     # Encode available crosses for player and enemy
-    player_available_crosses_encoded = encode_available_crosses(player_available_crosses)  # Shape: (1,5)
-    enemy_available_crosses_encoded = encode_available_crosses(enemy_available_crosses)    # Shape: (1,5)
-    
-    # Concatenate player and enemy available crosses to form a 10-bit vector
-    available_crosses_tensor = torch.cat([player_available_crosses_encoded, enemy_available_crosses_encoded], dim=1)  # Shape: (1,10)
+    player_available_crosses_encoded = encode_available_crosses(player_available_crosses)  # Shape: (1,10)
+    enemy_available_crosses_encoded = encode_available_crosses(enemy_available_crosses)    # Shape: (1,10)
+
+    # Concatenate player and enemy available crosses to form a 20-bit vector
+    available_crosses_tensor = torch.cat([player_available_crosses_encoded, enemy_available_crosses_encoded], dim=1)  # Shape: (1,20)
 
     # Encode current crosses for player and enemy
     player_current_cross_encoded = encode_current_cross(player_cross)      # Shape: (1,26)
@@ -415,6 +416,7 @@ def get_planning_input_from_instance(inference_planning_model, instance, GAMMA, 
         # Ensure the selected cross is within the range of available crosses
         # 'None' is considered as the first cross (index 0), so available_crosses_count = len - 1
         available_crosses = len(instance['player_available_crosses'])  # Number of available crosses
+        print(f"-------------------{len(instance['player_available_crosses'])}:")
         cross_target = min(cross_target, available_crosses)  # Ensures cross_target does not exceed available crosses
         
         # Ensure the selected chips are within the range of visible chips

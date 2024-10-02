@@ -96,7 +96,7 @@ learning_rate = 1e-5
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
-replay_count = 32
+replay_count = 1
 battle_count = 0
 include_orig = False
 do_replays = True
@@ -115,7 +115,7 @@ INSTANCES = [
     #     # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
     #     # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-IndianaOrz-round1-p2.tangoreplay',
     #     # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006015542-lunazoe-bn6-vs-IndianaOrz-round3-p2.tangoreplay',#player 2 cross change emotion state check fix needed
-    #     'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006020253-lunazoe-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
+    #     # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006020253-lunazoe-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
     #     'init_link_code': 'arena1',
     #     'is_player': True  # Set to True if you don't want this instance to send inputs
     # },
@@ -662,7 +662,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
         #log the inputs and outputs to the port for training
         data_point = {
             'inputs': inputs,
-            'cross_target': cross_target,
+            'cross_target': cross_target + 1,
             'target_list': target_list_input
         }
         planning_data_buffers[port].append(data_point)
@@ -750,7 +750,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
                 if previous_sent_dict[port] == 0:
                     previous_sent_dict[port] = 1
                     # print(f"Port {port}: Sending first key in sequence.")
-                    return {'type': 'key_press', 'key': '0000000001000000'}
+                    return {'type': 'key_press', 'key': '0000000000001000'}
                 elif previous_sent_dict[port] == 1:
                     previous_sent_dict[port] = 2
                     # print(f"Port {port}: Sending second key in sequence.")
@@ -1326,10 +1326,17 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         if game_instance['rom_path'] == 'bn6,0':
                             #clone gregar forms list
                             game_instance['player_available_crosses'] = GREGAR_CROSSES.copy()
+                            print(f"Port {port}: Player Available Crosses: {game_instance['player_available_crosses']}")
                         elif game_instance['rom_path'] == 'bn6,1':
                             #clone falzar forms list
                             game_instance['player_available_crosses'] = FALZAR_CROSSES.copy()
+                            print(f"Port {port}: Player Available Crosses: {game_instance['player_available_crosses']}")
                             
+                    #set the player available crosses back to the string values from the indicies from the previous frame
+                    available_cross_indicies = [cross['type'] for cross in FORM_MAPPING if cross['normal'] in game_instance['player_available_crosses']]
+                    if len(available_cross_indicies) > 0:
+                        game_instance['player_available_crosses'] = available_cross_indicies
+                    # print(f"Port {port}: Player Available Crosses: {game_instance['player_available_crosses']}")
                     #get the current selected cross from the player_game_emotion, check form mapping.normal and beast out to match current_player_emotion
                     #simiar to .where in c#
                     selected_cross_form = next((cross for cross in FORM_MAPPING if cross['normal'] == current_player_game_emotion or cross['beast'] == current_player_game_emotion), None)
@@ -1338,13 +1345,16 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         if selected_cross_form['type'] in game_instance['player_available_crosses']:
                             #remove the selected cross from the available crosses
                             game_instance['player_available_crosses'].remove(selected_cross_form['type'])
-                            print(f"Port {port}: Selected Cross Form: {selected_cross_form['type']}, Removing from available crosses. {game_instance['player_available_crosses']}")
+                            # print(f"Port {port}: Selected Cross Form: {selected_cross_form['type']}, Removing from available crosses. {game_instance['player_available_crosses']}")
                     
+                    # print(f"Port {port}: Player Available Crosses: {game_instance['player_available_crosses']}")
                     #set the player available crosses to the index from the game instance using the type for matching on current value
-                    available_cross_indicies = [cross for cross in FORM_MAPPING if cross['type'] in game_instance['player_available_crosses']]
+                    available_cross_indicies = [cross['normal'] for cross in FORM_MAPPING if cross['type'] in game_instance['player_available_crosses']]
+                    # print(f"Port {port}: Player Available Crosses: {available_cross_indicies}")
                     game_instance['player_available_crosses'] = available_cross_indicies
                     
-
+                    # print(f"Port {port}: Player Available Crosses: {game_instance['player_available_crosses']}")
+                    
                     #same for opponent cross
                     if 'enemy_available_crosses' not in game_instance:
                         #initialize available crosses to include all
@@ -1355,6 +1365,9 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             #clone falzar forms list
                             game_instance['enemy_available_crosses'] = FALZAR_CROSSES.copy()
                             
+                    available_cross_indicies = [cross['type'] for cross in FORM_MAPPING if cross['normal'] in game_instance['enemy_available_crosses']]
+                    if len(available_cross_indicies) > 0:
+                        game_instance['enemy_available_crosses'] = available_cross_indicies
                     #get the current selected cross from the player_game_emotion, check form mapping.normal and beast out to match current_player_emotion
                     #simiar to .where in c#
                     selected_cross_form = next((cross for cross in FORM_MAPPING if cross['normal'] == current_enemy_game_emotion or cross['beast'] == current_enemy_game_emotion), None)
@@ -1366,8 +1379,10 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             print(f"Port {port}: Selected Cross Form: {selected_cross_form['type']}, Removing from available crosses. {game_instance['enemy_available_crosses']}")
                     
                     #set the player available crosses to the index from the game instance using the type for matching on current value
-                    available_cross_indicies = [cross for cross in FORM_MAPPING if cross['type'] in game_instance['enemy_available_crosses']]
+                    available_cross_indicies = [cross['normal'] for cross in FORM_MAPPING if cross['type'] in game_instance['enemy_available_crosses']]
                     game_instance['enemy_available_crosses'] = available_cross_indicies
+                    
+                    # print(f"Port {port}: Enemy Available Crosses: {game_instance['enemy_available_crosses']}")
                     
                     #print emotions and indicies
                     # print(f"Port {port}: Player Emotion: {current_player_emotion}, Enemy Emotion: {current_enemy_emotion}")

@@ -3,7 +3,7 @@ use crate::global::{
     set_enemy_game_emotion_state, set_inside_cross_window, set_player_chip_folder, set_player_emotion_state,
     set_player_game_emotion_state, set_selected_chip_index, set_selected_cross_index, set_selected_menu_index,
 };
-use crate::{audio, config, game, net, rom, stats, video};
+use crate::{audio, config, game, gui, net, rom, stats, video};
 use egui::debug_text::print;
 use parking_lot::Mutex;
 use rand::SeedableRng;
@@ -927,6 +927,7 @@ impl Session {
             }
         });
 
+
         let own_setup = {
             let assets = local_game.load_rom_assets(local_rom, &local_save.as_raw_wram(), local_patch_overrides)?;
             Some(Setup {
@@ -1166,6 +1167,9 @@ impl Session {
         rom: &[u8],
         emu_tps_counter: Arc<Mutex<stats::Counter>>,
         replay: &tango_pvp::replay::Replay,
+        roms: HashMap<(String, u8), Vec<u8>>, // Update the type here
+        // patches: HashMap<String, Patch>,
+        // patches_path: std::path::PathBuf,
     ) -> Result<Self, anyhow::Error> {
         let mut core = mgba::core::Core::new_gba("tango")?;
         core.enable_video_buffer();
@@ -1238,10 +1242,17 @@ impl Session {
         ))))?;
 
         let local_state = replay.local_state.clone();
+        let remote_state = replay.remote_state.clone();
+        let local_player_index = replay.local_player_index;
+
+        
+
         thread.handle().run_on_core(move |mut core| {
             core.load_state(&local_state).expect("load state");
         });
         thread.handle().unpause();
+
+
 
         let pause_on_next_frame = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let vbuf = Arc::new(Mutex::new(vec![
@@ -1369,6 +1380,7 @@ impl Session {
 
                 //get frame count
                 let currentFrame = get_frame_count();
+                // println!("Replayer created, loading setup data");
 
                 set_frame_count(currentFrame + 1);
 
@@ -1660,6 +1672,188 @@ impl Session {
                 }
             }
         });
+        println!("Replayer created, loading setup data");
+        // Load own setup
+        let own_wram_data = replay.local_state.wram();
+        let own_save = match game.save_from_wram(own_wram_data) {
+            Ok(save) => save,
+            Err(e) => {
+                log::error!("failed to load save from wram: {:?}", e);
+                return Err(e.into());
+            }
+        };
+
+        let own_assets = game.load_rom_assets(
+            rom,
+            own_wram_data,
+            &rom::Overrides::default(),
+        )?;
+
+        let own_setup = Some(Setup {
+            game_lang: crate::game::region_to_language(game.gamedb_entry().region),
+            save: own_save,
+            assets: own_assets,
+        });
+
+        // Load opponent setup
+        let opponent_setup = if let Some(remote_side) = replay.metadata.remote_side.as_ref() {
+            if let Some(remote_game_info) = remote_side.game_info.as_ref() {
+                if let Some(remote_game) = game::find_by_family_and_variant(
+                    remote_game_info.rom_family.as_str(),
+                    remote_game_info.rom_variant as u8,
+                ) {
+                    // Construct the key for roms
+                    let key = (remote_game_info.rom_family.clone(), remote_game_info.rom_variant as u8);
+
+                    // Load the remote ROM
+                    let remote_rom = roms.get(&key).cloned().ok_or_else(|| {
+                        anyhow::anyhow!("Remote ROM not found for game {:?}", remote_game_info)
+                    })?;
+
+                    // Proceed with loading the opponent's save and assets
+                    let opponent_wram_data = replay.remote_state.wram();
+                    let opponent_save = remote_game.save_from_wram(opponent_wram_data)?;
+
+                    let opponent_assets = remote_game.load_rom_assets(
+                        &remote_rom,
+                        opponent_wram_data,
+                        &rom::Overrides::default(),
+                    )?;
+
+                    Some(Setup {
+                        game_lang: crate::game::region_to_language(remote_game.gamedb_entry().region),
+                        save: opponent_save,
+                        assets: opponent_assets,
+                    })
+                } else {
+                    log::error!("Could not find remote game");
+                    None
+                }
+            } else {
+                log::error!("No remote game info");
+                None
+            }
+        } else {
+            log::error!("No remote side info");
+            None
+        };
+
+
+        //get setups and set the global chip folder and print navi cust data
+        // After initializing `own_setup` and `opponent_setup`
+        let own_navi_cust_ids = if let Some(ref setup) = own_setup {
+            extract_navi_cust_ids(&*setup.save, setup.assets.as_ref())
+        } else {
+            Vec::new()
+        };
+
+        let opponent_navi_cust_ids = if let Some(ref setup) = opponent_setup {
+            extract_navi_cust_ids(&*setup.save, setup.assets.as_ref())
+        } else {
+            Vec::new()
+        };
+
+        // Log the Navi Cust IDs
+        println!("Local Player Navi Cust IDs: {:?}", own_navi_cust_ids);
+        println!("Opponent Player Navi Cust IDs: {:?}", opponent_navi_cust_ids);
+
+        // **Extract and Print Chips**
+        let own_chips = if let Some(ref setup) = own_setup {
+            extract_chips(&*setup.save, setup.assets.as_ref())
+        } else {
+            Ok(Vec::new())
+        };
+
+        let opponent_chips = if let Some(ref setup) = opponent_setup {
+            extract_chips(&*setup.save, setup.assets.as_ref())
+        } else {
+            Ok(Vec::new())
+        };
+
+        // **Extract and Print Chips**
+        let own_tag_chips = if let Some(ref setup) = own_setup {
+            extract_tag_indices(&*setup.save, setup.assets.as_ref())
+        } else {
+            Ok(Vec::new())
+        };
+
+        let opponent_tag_chips = if let Some(ref setup) = opponent_setup {
+            extract_tag_indices(&*setup.save, setup.assets.as_ref())
+        } else {
+            Ok(Vec::new())
+        };
+
+        // Extract regular chip index
+        let own_reg_chip_index = if let Some(ref setup) = own_setup {
+            extract_reg_index(&*setup.save, setup.assets.as_ref())
+        } else {
+            Ok(60)
+        };
+
+        let opponent_reg_chip_index = if let Some(ref setup) = opponent_setup {
+            extract_reg_index(&*setup.save, setup.assets.as_ref())
+        } else {
+            Ok(60)
+        };
+
+        let own_reg_chip_index = own_reg_chip_index.unwrap_or(60);
+        set_player_reg_chip(own_reg_chip_index as u16);
+        let opponent_reg_chip_index = opponent_reg_chip_index.unwrap_or(60);
+        set_enemy_reg_chip(opponent_reg_chip_index as u16);
+
+        // Log the Chips
+        println!("Local Player Chips:");
+        if let Ok(chips) = own_chips {
+            let mut index = 0;
+            for chip in chips {
+                // println!("  ID: {}, Code: {}", chip.id, chip.code);
+                if let Err(e) = set_player_chip_folder(index, chip.id as u16) {
+                    eprintln!("Failed to set player chip folder: {:?}", e);
+                }
+                match set_player_code_folder(index, chip.code as u16) {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("Failed to set player code folder: {:?}", e),
+                }
+                index += 1;
+            }
+        }
+
+        println!("Opponent Player Chips:");
+        if let Ok(chips) = opponent_chips {
+            let mut index = 0;
+            for chip in chips {
+                if let Err(e) = set_enemy_chip_folder(index, chip.id as u16) {
+                    eprintln!("Failed to set enemy chip folder: {:?}", e);
+                }
+                if let Err(e) = set_enemy_code_folder(index, chip.code as u16) {
+                    eprintln!("Failed to set enemy code folder: {:?}", e);
+                }
+                // println!("  ID: {}, Code: {}", chip.id, chip.code);
+                index += 1;
+            }
+        }
+
+        // Log the Tag Chips
+        println!("Local Player Tag Chips:");
+        if let Ok(tag_chips) = own_tag_chips {
+            let mut index = 0;
+            for tag_chip in tag_chips {
+                // println!("Tag Chip: {}", tag_chip);
+                set_player_tag_folder(index,tag_chip as u16);
+                index += 1;
+            }
+        }
+        println!("Opponent Player Tag Chips:");
+        if let Ok(tag_chips) = opponent_tag_chips {
+            let mut index = 0;
+            for tag_chip in tag_chips {
+                // println!("Tag Chip: {}", tag_chip);
+                set_enemy_tag_folder(index,tag_chip as u16);
+                index += 1;
+            }
+        }
+        //opponent_setup = None;
+
 
         Ok(Session {
             start_time: std::time::SystemTime::now(),
