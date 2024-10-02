@@ -1,8 +1,13 @@
-use crate::global::{set_chip_code, set_chip_selected_count, set_chip_slot, set_enemy_game_emotion_state, set_player_emotion_state, set_player_game_emotion_state, set_selected_chip_index, set_selected_cross_index, set_selected_menu_index};
+use crate::global::{
+    set_beast_out_selectable, set_chip_code, set_chip_count_visible, set_chip_selected_count, set_chip_slot,
+    set_enemy_game_emotion_state, set_inside_cross_window, set_player_chip_folder, set_player_emotion_state,
+    set_player_game_emotion_state, set_selected_chip_index, set_selected_cross_index, set_selected_menu_index,
+};
 use crate::{audio, config, game, net, rom, stats, video};
 use egui::debug_text::print;
 use parking_lot::Mutex;
 use rand::SeedableRng;
+use sha2::digest::consts::True;
 use std::sync::Arc;
 
 use std::collections::HashMap;
@@ -15,15 +20,16 @@ use std::fs::File;
 
 use std::sync::LazyLock;
 
-
-pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0); //* 2.0;
+pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0) * 8.0;
 
 // session.rs
 use crate::global::{
     add_punishment, add_reward, clear_punishments, clear_rewards, get_frame_count, get_player_health_index,
-    set_enemy_charge, set_enemy_health, set_enemy_position, set_enemy_selected_chip, set_frame_count,
-    set_is_player_inside_window, set_local_input, set_player_charge, set_player_health, set_player_health_index,
-    set_player_position, set_player_selected_chip, set_winner, RewardPunishment,
+    set_enemy_charge, set_enemy_chip_folder, set_enemy_code_folder, set_enemy_health, set_enemy_position,
+    set_enemy_reg_chip, set_enemy_selected_chip, set_enemy_tag_folder, set_frame_count, set_is_player_inside_window,
+    set_local_input, set_player_charge, set_player_code_folder, set_player_health, set_player_health_index,
+    set_player_position, set_player_reg_chip, set_player_selected_chip, set_player_tag_folder, set_winner,
+    RewardPunishment,
 };
 use crate::global::{PUNISHMENTS, REWARDS}; // Import the global variables
 
@@ -81,11 +87,10 @@ pub enum Mode {
 
 use mgba::core::CoreMutRef;
 
-
+use tango_dataview::rom::Assets;
 use tango_dataview::rom::NavicustPart;
 use tango_dataview::save::NaviView;
 use tango_dataview::save::Save;
-use tango_dataview::rom::Assets;
 
 /// Extracts Navi Cust IDs from the save data.
 ///
@@ -112,15 +117,90 @@ fn extract_navi_cust_ids(save: &dyn Save, assets: &dyn Assets) -> Vec<usize> {
                 }
 
                 navi_cust_ids
-            },
+            }
             NaviView::LinkNavi(_) => {
                 // Handle LinkNavi if necessary, or ignore
                 Vec::new()
-            },
+            }
         }
     } else {
         Vec::new()
     }
+}
+
+use std::error::Error;
+use tango_dataview::save::Chip;
+
+/// Extracts all chips from the equipped folder in the save data.
+///
+/// # Arguments
+///
+/// * `save` - A reference to the game's save data.
+/// * `assets` - A reference to the game's assets.
+///
+/// # Returns
+///
+/// A vector containing all the chips from the equipped folder.
+fn extract_chips(save: &dyn Save, assets: &dyn Assets) -> Result<Vec<Chip>, Box<dyn Error>> {
+    let mut chips = Vec::new();
+
+    if let Some(chips_view) = save.view_chips() {
+        // Get the index of the currently equipped folder
+        let equipped_folder_index = chips_view.equipped_folder_index();
+
+        // Iterate through chip indices 0 to 29 in the equipped folder
+        for chip_index in 0..30 {
+            if let Some(chip) = chips_view.chip(equipped_folder_index, chip_index) {
+                chips.push(chip);
+            }
+        }
+    }
+
+    Ok(chips)
+}
+
+/// Extracts the indices of the tag chips from the equipped folder in the save data.
+///
+/// # Arguments
+///
+/// * `save` - A reference to the game's save data.
+/// * `assets` - A reference to the game's assets.
+///
+/// # Returns
+///
+/// A vector containing the indices of all tag chips in the equipped folder.
+fn extract_tag_indices(save: &dyn Save, assets: &dyn Assets) -> Result<Vec<usize>, Box<dyn Error>> {
+    let mut tag_chip_indices = Vec::new();
+
+    if let Some(chips_view) = save.view_chips() {
+        // Get the index of the currently equipped folder
+        let equipped_folder_index = chips_view.equipped_folder_index();
+
+        // Retrieve the tag chip indices for the equipped folder
+        if let Some(tag_indices) = chips_view.tag_chip_indexes(equipped_folder_index) {
+            for &chip_index in &tag_indices {
+                tag_chip_indices.push(chip_index);
+            }
+        }
+    }
+
+    Ok(tag_chip_indices)
+}
+
+fn extract_reg_index(save: &dyn Save, assets: &dyn Assets) -> Result<usize, Box<dyn Error>> {
+    let mut reg_index = 0;
+
+    if let Some(chips_view) = save.view_chips() {
+        // Get the index of the currently equipped folder
+        let equipped_folder_index = chips_view.equipped_folder_index();
+
+        // Retrieve the regular chip index for the equipped folder
+        if let Some(index) = chips_view.regular_chip_index(equipped_folder_index) {
+            reg_index = index;
+        }
+    }
+
+    Ok(reg_index)
 }
 
 impl Session {
@@ -498,8 +578,7 @@ impl Session {
         }
 
         // Shared storage for initial boolean states
-        static INITIAL_BOOLEAN_STATES: LazyLock<Mutex<HashMap<u32, u8>>> =
-            LazyLock::new(|| Mutex::new(HashMap::new()));
+        static INITIAL_BOOLEAN_STATES: LazyLock<Mutex<HashMap<u32, u8>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
         // Initialize the log file with thread-safe access
         let log_file = Arc::new(Mutex::new(
@@ -580,15 +659,23 @@ impl Session {
                 set_player_charge(core.raw_read_8(0x02036948, -1) as u16);
                 set_enemy_charge(core.raw_read_8(0x02036A10, -1) as u16);
 
-
-
                 set_player_emotion_state(core.raw_read_8(0x020352CC, -1) as u16);
                 // println!("Player emotion state: {}", core.raw_read_8(0x020352CC, -1) as u16);
 
-                set_player_game_emotion_state(core.raw_read_8(0x02035290, -1) as u16);
-                set_enemy_game_emotion_state(core.raw_read_8(0x0203CE2C, -1) as u16);
-                println!("Player game emotion state: {}", core.raw_read_8(0x02035290, -1) as u16);
-                println!("Enemy game emotion state: {}", core.raw_read_8(0x0203CE2C, -1) as u16);
+                // set_player_game_emotion_state(core.raw_read_8(0x02035290, -1) as u16);
+                if (is_offerer) {
+                    set_player_game_emotion_state(core.raw_read_8(0x0203CE90, -1) as u16);
+                    set_enemy_game_emotion_state(core.raw_read_8(0x0203CE2C, -1) as u16);
+                    // println!("Player game emotion state: {}", core.raw_read_8(0x0203CE90, -1) as u16);
+                    // println!("P2 emotion state: {}", core.raw_read_8(0x0203CE2C, -1) as u16);
+                } else {
+                    set_player_game_emotion_state(core.raw_read_8(0x0203CE2C, -1) as u16);
+                    set_enemy_game_emotion_state(core.raw_read_8(0x0203CE90, -1) as u16);
+                    // println!("Player game emotion state: {}", core.raw_read_8(0x0203CE2C, -1) as u16);
+                    // println!("P2 emotion state: {}", core.raw_read_8(0x0203CE90, -1) as u16);
+                }
+                // println!("Player game emotion state: {}", core.raw_read_8(0x02035290, -1) as u16);
+                // println!("P2 emotion state: {}", core.raw_read_8(0x0203CE2C, -1) as u16);
                 //set enemy emotion state
 
                 set_selected_menu_index(core.raw_read_8(0x020364C7, -1) as u16);
@@ -603,14 +690,14 @@ impl Session {
                         match set_chip_slot(i / 2, core.raw_read_8(address as u32, -1) as u16) {
                             Ok(_) => {
                                 // println!("Chip slot {}: {}", i / 2, core.raw_read_8(address as u32, -1) as u16);
-                            },
+                            }
                             Err(e) => eprintln!("Failed to set chip slot {}: {:?}", i / 2, e),
                         }
                     } else {
                         match set_chip_code(i / 2, core.raw_read_8(address as u32, -1) as u16) {
                             Ok(_) => {
                                 // println!("Chip code {}: {}", i / 2, core.raw_read_8(address as u32, -1) as u16);
-                            },
+                            }
                             Err(e) => eprintln!("Failed to set chip code {}: {:?}", i / 2, e),
                         }
                     }
@@ -624,10 +711,18 @@ impl Session {
                     match set_selected_chip_index(i, core.raw_read_8(address as u32, -1) as u16) {
                         Ok(_) => {
                             // println!("Selected chip index {}: {}", i, core.raw_read_8(address as u32, -1) as u16);
-                        },
+                        }
                         Err(e) => eprintln!("Failed to set selected chip index {}: {:?}", i, e),
                     }
                 }
+
+                set_beast_out_selectable(core.raw_read_8(0x0203664B, -1) as u16);
+                // println!("Beast out selectable: {}", core.raw_read_8(0x0203664B, -1) as u16);
+
+                set_chip_count_visible(core.raw_read_8(0x020047D6, -1) as u16);
+                // println!("Chip count visible: {}", core.raw_read_8(0x020047D6, -1) as u16);
+
+                set_inside_cross_window(core.raw_read_8(0x020364C2, -1) as u16);
 
                 if completion_token.is_complete() {
                     thread_handle.pause();
@@ -832,7 +927,7 @@ impl Session {
             }
         });
 
-        let own_setup=  {
+        let own_setup = {
             let assets = local_game.load_rom_assets(local_rom, &local_save.as_raw_wram(), local_patch_overrides)?;
             Some(Setup {
                 game_lang: local_patch_overrides
@@ -843,9 +938,8 @@ impl Session {
                 assets,
             })
         };
-        let opponent_setup= if reveal_setup {
-            let assets =
-                remote_game.load_rom_assets(remote_rom, &remote_save.as_raw_wram(), remote_patch_overrides)?;
+        let mut opponent_setup = if true {
+            let assets = remote_game.load_rom_assets(remote_rom, &remote_save.as_raw_wram(), remote_patch_overrides)?;
             Some(Setup {
                 game_lang: remote_patch_overrides
                     .language
@@ -874,6 +968,103 @@ impl Session {
         // Log the Navi Cust IDs
         println!("Local Player Navi Cust IDs: {:?}", own_navi_cust_ids);
         println!("Opponent Player Navi Cust IDs: {:?}", opponent_navi_cust_ids);
+
+        // **Extract and Print Chips**
+        let own_chips = if let Some(ref setup) = own_setup {
+            extract_chips(&*setup.save, setup.assets.as_ref())
+        } else {
+            Ok(Vec::new())
+        };
+
+        let opponent_chips = if let Some(ref setup) = opponent_setup {
+            extract_chips(&*setup.save, setup.assets.as_ref())
+        } else {
+            Ok(Vec::new())
+        };
+
+        // **Extract and Print Chips**
+        let own_tag_chips = if let Some(ref setup) = own_setup {
+            extract_tag_indices(&*setup.save, setup.assets.as_ref())
+        } else {
+            Ok(Vec::new())
+        };
+
+        let opponent_tag_chips = if let Some(ref setup) = opponent_setup {
+            extract_tag_indices(&*setup.save, setup.assets.as_ref())
+        } else {
+            Ok(Vec::new())
+        };
+
+        // Extract regular chip index
+        let own_reg_chip_index = if let Some(ref setup) = own_setup {
+            extract_reg_index(&*setup.save, setup.assets.as_ref())
+        } else {
+            Ok(60)
+        };
+
+        let opponent_reg_chip_index = if let Some(ref setup) = opponent_setup {
+            extract_reg_index(&*setup.save, setup.assets.as_ref())
+        } else {
+            Ok(60)
+        };
+
+        let own_reg_chip_index = own_reg_chip_index.unwrap_or(60);
+        set_player_reg_chip(own_reg_chip_index as u16);
+        let opponent_reg_chip_index = opponent_reg_chip_index.unwrap_or(60);
+        set_enemy_reg_chip(opponent_reg_chip_index as u16);
+
+        // Log the Chips
+        println!("Local Player Chips:");
+        if let Ok(chips) = own_chips {
+            let mut index = 0;
+            for chip in chips {
+                // println!("  ID: {}, Code: {}", chip.id, chip.code);
+                if let Err(e) = set_player_chip_folder(index, chip.id as u16) {
+                    eprintln!("Failed to set player chip folder: {:?}", e);
+                }
+                match set_player_code_folder(index, chip.code as u16) {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("Failed to set player code folder: {:?}", e),
+                }
+                index += 1;
+            }
+        }
+
+        println!("Opponent Player Chips:");
+        if let Ok(chips) = opponent_chips {
+            let mut index = 0;
+            for chip in chips {
+                if let Err(e) = set_enemy_chip_folder(index, chip.id as u16) {
+                    eprintln!("Failed to set enemy chip folder: {:?}", e);
+                }
+                if let Err(e) = set_enemy_code_folder(index, chip.code as u16) {
+                    eprintln!("Failed to set enemy code folder: {:?}", e);
+                }
+                // println!("  ID: {}, Code: {}", chip.id, chip.code);
+                index += 1;
+            }
+        }
+
+        // Log the Tag Chips
+        println!("Local Player Tag Chips:");
+        if let Ok(tag_chips) = own_tag_chips {
+            let mut index = 0;
+            for tag_chip in tag_chips {
+                // println!("Tag Chip: {}", tag_chip);
+                set_player_tag_folder(index,tag_chip as u16);
+                index += 1;
+            }
+        }
+        println!("Opponent Player Tag Chips:");
+        if let Ok(tag_chips) = opponent_tag_chips {
+            let mut index = 0;
+            for tag_chip in tag_chips {
+                // println!("Tag Chip: {}", tag_chip);
+                set_enemy_tag_folder(index,tag_chip as u16);
+                index += 1;
+            }
+        }
+        opponent_setup = None;
 
         Ok(Session {
             start_time: std::time::SystemTime::now(),
@@ -1133,6 +1324,8 @@ impl Session {
                 LAST_OPPONENT_HEALTH = current_opponent_health;
                 set_player_health(current_player_health);
                 set_enemy_health(current_opponent_health);
+                // println!("Player Health: {}", current_player_health);
+                // println!("Opponent Health: {}", current_opponent_health);
                 set_player_charge(core.raw_read_8(0x02036948, -1) as u16);
                 set_enemy_charge(core.raw_read_8(0x02036A10, -1) as u16);
             }
@@ -1274,12 +1467,15 @@ impl Session {
                     let opponent_health_addr = *OPPONENT_HEALTH_ADDRESS.lock();
                     set_player_charge(core_ref.raw_read_8(0x02036948, -1) as u16);
                     set_enemy_charge(core_ref.raw_read_8(0x02036A10, -1) as u16);
-                    
+
                     set_player_emotion_state(core_ref.raw_read_8(0x020352CC, -1) as u16);
                     // println!("Player window emotion state: {}", core_ref.raw_read_8(0x020352CC, -1) as u16);
 
                     set_player_game_emotion_state(core_ref.raw_read_8(0x02035290, -1) as u16);
-                    println!("Player game emotion state: {}", core_ref.raw_read_8(0x02035290, -1) as u16);
+                    // println!(
+                    //     "Player game emotion state: {}",
+                    //     core_ref.raw_read_8(0x02035290, -1) as u16
+                    // );
 
                     set_enemy_game_emotion_state(core_ref.raw_read_8(0x02035291, -1) as u16);
 
@@ -1295,43 +1491,42 @@ impl Session {
                     // 0x0203EAF4,
                     // 0x02050B1C,
                     // 0x0207EAF4,
-                    
+
                     // ];
 
                     // //display values of addresses 8
                     // for address in &addresses {
                     //     let current_value = core_ref.raw_read_8(*address, -1);
                     //     println!("0x{:08X},{}", address, current_value);
-                    // }                    
+                    // }
 
-    
                     //set enemy emotion state
-    
+
                     set_selected_menu_index(core_ref.raw_read_8(0x020364C7, -1) as u16);
                     // println!("Selected menu index: {}", core_ref.raw_read_8(0x020364C7, -1) as u16);
-    
+
                     set_selected_cross_index(core_ref.raw_read_8(0x020364DB, -1) as u16);
                     // println!("Selected cross index: {}", core_ref.raw_read_8(0x020364DB, -1) as u16);
-    
+
                     for i in 0..16 {
                         let address = 0x0203CDB0 + i as u32;
                         if i % 2 == 0 {
                             match set_chip_slot(i / 2, core_ref.raw_read_8(address as u32, -1) as u16) {
                                 Ok(_) => {
                                     // println!("Chip slot {}: {}", i / 2, core_ref.raw_read_8(address as u32, -1) as u16);
-                                },
+                                }
                                 Err(e) => eprintln!("Failed to set chip slot {}: {:?}", i / 2, e),
                             }
                         } else {
                             match set_chip_code(i / 2, core_ref.raw_read_8(address as u32, -1) as u16) {
                                 Ok(_) => {
                                     // println!("Chip code {}: {}", i / 2, core_ref.raw_read_8(address as u32, -1) as u16);
-                                },
+                                }
                                 Err(e) => eprintln!("Failed to set chip code {}: {:?}", i / 2, e),
                             }
                         }
                     }
-    
+
                     set_chip_selected_count(core_ref.raw_read_8(0x020364C8, -1) as u16);
                     // println!("Chip selected count: {}", core_ref.raw_read_8(0x020364C8, -1) as u16);
                     //from 036508 through 03650C set the chip index selected
@@ -1340,10 +1535,18 @@ impl Session {
                         match set_selected_chip_index(i, core_ref.raw_read_8(address as u32, -1) as u16) {
                             Ok(_) => {
                                 // println!("Selected chip index {}: {}", i, core_ref.raw_read_8(address as u32, -1) as u16);
-                            },
+                            }
                             Err(e) => eprintln!("Failed to set selected chip index {}: {:?}", i, e),
                         }
                     }
+
+                    set_beast_out_selectable(core_ref.raw_read_8(0x0203664B, -1) as u16);
+                    // println!("Beast out selectable: {}", core_ref.raw_read_8(0x0203664B, -1) as u16);
+
+                    set_chip_count_visible(core_ref.raw_read_8(0x020047D6, -1) as u16);
+                    // println!("Chip count visible: {}", core_ref.raw_read_8(0x020047D6, -1) as u16);
+
+                    set_inside_cross_window(core_ref.raw_read_8(0x020364C2, -1) as u16);
 
                     // Ensure the addresses are set before calling `display_health_state`
                     if let (Some(player_addr), Some(opponent_addr)) = (player_health_addr, opponent_health_addr) {
@@ -1389,6 +1592,11 @@ impl Session {
                             set_player_selected_chip(core_ref.raw_read_16(0x203A9DA, -1));
                             // println!("First Chip P2: {}", core.raw_read_16(0x203AAB2, -1));
                             set_enemy_selected_chip(core_ref.raw_read_16(0x203AAB2, -1));
+
+                            set_player_game_emotion_state(core.raw_read_8(0x0203CE90, -1) as u16);
+                            set_enemy_game_emotion_state(core.raw_read_8(0x0203CE2C, -1) as u16);
+                            // println!("Player game emotion state: {}", core.raw_read_8(0x0203CE90, -1) as u16);
+                            // println!("P2 emotion state: {}", core.raw_read_8(0x0203CE2C, -1) as u16);
                         } else if get_player_health_index() == 1 {
                             set_player_position((player2_x, player2_y));
                             set_enemy_position((player1_x, player1_y));
@@ -1397,6 +1605,11 @@ impl Session {
                             set_enemy_selected_chip(core_ref.raw_read_16(0x203A9DA, -1));
                             // println!("First Chip P1: {}", core.raw_read_16(0x203AAB2, -1));
                             set_player_selected_chip(core_ref.raw_read_16(0x203AAB2, -1));
+
+                            set_player_game_emotion_state(core.raw_read_8(0x0203CE2C, -1) as u16);
+                            set_enemy_game_emotion_state(core.raw_read_8(0x0203CE90, -1) as u16);
+                            // println!("Player game emotion state: {}", core.raw_read_8(0x0203CE2C, -1) as u16);
+                            // println!("P2 emotion state: {}", core.raw_read_8(0x0203CE90, -1) as u16);
                         } else {
                             set_player_position((0, 0));
                         }

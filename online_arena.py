@@ -85,6 +85,7 @@ def cosine_annealing(current_step, total_steps, initial_gamma=0.1, min_gamma=0.0
     cosine_decay = 0.5 * (1 + math.cos(math.pi * current_step / total_steps))
     return min_gamma + (initial_gamma - min_gamma) * cosine_decay
 
+from planning_model import PlanningModel
 # Function to load trained models
 def load_trained_models(get_checkpoint_dir, get_latest_checkpoint, image_memory=1, device='cuda'):
     """
@@ -106,7 +107,7 @@ def load_trained_models(get_checkpoint_dir, get_latest_checkpoint, image_memory=
     training_planning_checkpoint_path = get_latest_checkpoint(model_type='planning', image_memory=image_memory)
 
     if training_planning_checkpoint_path:
-        training_planning_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
+        training_planning_model = PlanningModel().to(device)
         checkpoint_training_planning = torch.load(training_planning_checkpoint_path, map_location=device)
         if 'model_state_dict' in checkpoint_training_planning:
             training_planning_model.load_state_dict(checkpoint_training_planning['model_state_dict'])
@@ -115,7 +116,7 @@ def load_trained_models(get_checkpoint_dir, get_latest_checkpoint, image_memory=
             raise KeyError("Training Planning checkpoint does not contain 'model_state_dict'")
     else:
         # Initialize new Training Planning Model
-        training_planning_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
+        training_planning_model = PlanningModel().to(device)
         print("No Training Planning Model checkpoint found. Initialized a new Training Planning Model.")
 
     training_planning_model.train()  # Set to train mode
@@ -169,43 +170,43 @@ def perform_final_training():
     battle_data_dir = os.path.join(get_root_dir(), "data", "battle_data")
     planning_data_dir = os.path.join(get_root_dir(), "data", "planning_data")
 
-    # Train on Battle Data
-    if os.path.exists(battle_data_dir) and os.listdir(battle_data_dir):
-        try:
-            final_training_epoch(
-                model=training_battle_model,
-                optimizer=optimizer_battle,
-                training_data_dir=battle_data_dir,
-                model_type='Battle_Model',
-                batch_size=64,  # Adjust based on your system
-                num_workers=4,  # Increased workers for faster data loading
-                device='cuda',
-                max_batches=500
-            )
-        except Exception as e:
-            print(f"Failed to train Battle_Model: {e}")
-            traceback.print_exc()
-    else:
-        print("No Battle data available for final training.")
+    # # Train on Battle Data
+    # if os.path.exists(battle_data_dir) and os.listdir(battle_data_dir):
+    #     try:
+    #         final_training_epoch(
+    #             model=training_battle_model,
+    #             optimizer=optimizer_battle,
+    #             training_data_dir=battle_data_dir,
+    #             model_type='Battle_Model',
+    #             batch_size=64,  # Adjust based on your system
+    #             num_workers=4,  # Increased workers for faster data loading
+    #             device='cuda',
+    #             max_batches=500
+    #         )
+    #     except Exception as e:
+    #         print(f"Failed to train Battle_Model: {e}")
+    #         traceback.print_exc()
+    # else:
+    #     print("No Battle data available for final training.")
 
-    # Step 6: Save the Battle Model
-    save_models(
-        None, 
-        training_battle_model, 
-        None, 
-        optimizer_battle, 
-        get_checkpoint_dir, 
-        get_latest_checkpoint, 
-        MAX_CHECKPOINTS=config.get('MAX_CHECKPOINTS', 5), 
-        IMAGE_MEMORY=get_image_memory()
-    )
+    # # Step 6: Save the Battle Model
+    # save_models(
+    #     None, 
+    #     training_battle_model, 
+    #     None, 
+    #     optimizer_battle, 
+    #     get_checkpoint_dir, 
+    #     get_latest_checkpoint, 
+    #     MAX_CHECKPOINTS=config.get('MAX_CHECKPOINTS', 5), 
+    #     IMAGE_MEMORY=get_image_memory()
+    # )
 
-    # Clear Battle Model memory
-    del training_battle_model
-    del optimizer_battle
-    # Clear CUDA cache
-    torch.cuda.empty_cache()
-    gc.collect()
+    # # Clear Battle Model memory
+    # del training_battle_model
+    # del optimizer_battle
+    # # Clear CUDA cache
+    # torch.cuda.empty_cache()
+    # gc.collect()
 
     # Train on Planning Data
     if os.path.exists(planning_data_dir) and os.listdir(planning_data_dir):
@@ -215,7 +216,7 @@ def perform_final_training():
                 optimizer=optimizer_planning,
                 training_data_dir=planning_data_dir,
                 model_type='Planning_Model',
-                batch_size=64,  # Adjust based on your system
+                batch_size=1,  # Adjust based on your system
                 num_workers=4,  # Increased workers for faster data loading
                 device='cuda',
                 max_batches=500
@@ -252,14 +253,14 @@ async def main():
     total_steps = config.get('gamma', {}).get('total_steps', 10)  # Define total steps or cycles
 
     current_step = 0
-
+    # perform_final_training()
     while True:
         if current_step >= total_steps:
             # Reset or stop annealing if desired
             print("Completed all annealing steps. Resetting current_step.")
             
             # Perform final training when resetting the annealing steps
-            perform_final_training()
+            # perform_final_training()
             
             current_step = 0  # Or break if you want to stop
             # Optionally, you can set GAMMA back to initial_gamma or keep it at min_gamma

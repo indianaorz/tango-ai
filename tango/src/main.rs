@@ -1,17 +1,14 @@
 #![windows_subsystem = "windows"]
 
-
+use global::{get_all_player_chip_folders, get_frame_count, get_player_charge, get_selected_menu_index};
 use std::io::Write;
 use std::sync::Arc;
-use global::{get_frame_count, get_player_charge};
 use tango_pvp::replay;
-use tokio::runtime::Runtime;
-use tokio::net::TcpListener;
 use tokio::io::AsyncReadExt;
-
+use tokio::net::TcpListener;
+use tokio::runtime::Runtime;
 
 use clap::Parser;
-
 
 #[macro_use]
 extern crate lazy_static;
@@ -42,17 +39,24 @@ mod video;
 use fluent_templates::Loader;
 use keyboard::Key;
 
-
 mod global; // Include the global module
 
-use crate::global::{get_punishments,get_rewards,add_reward, add_punishment, clear_rewards, clear_punishments, get_enemy_charge, get_screen_image, get_local_input, clear_local_input, get_winner,get_player_health,get_player_position,get_enemy_health,get_enemy_position, get_is_player_inside_window, get_player_selected_chip, get_enemy_selected_chip, SCREEN_IMAGE, RewardPunishment};
-use crate::global::{REWARDS, PUNISHMENTS}; // Import the global variables
+use crate::global::{
+    add_punishment, add_reward, clear_local_input, clear_punishments, clear_rewards, get_all_chip_codes,
+    get_all_chip_slots, get_all_enemy_chip_folders, get_all_enemy_code_folders, get_all_enemy_tag_folders,
+    get_all_player_code_folders, get_all_player_tag_folders, get_all_selected_chip_indices, get_beast_out_selectable,
+    get_chip_code, get_chip_count_visible, get_chip_selected_count, get_chip_slot, get_enemy_charge,
+    get_enemy_emotion_state, get_enemy_game_emotion_state, get_enemy_health, get_enemy_position, get_enemy_reg_chip,
+    get_enemy_selected_chip, get_inside_cross_window, get_is_player_inside_window, get_local_input,
+    get_player_emotion_state, get_player_game_emotion_state, get_player_health, get_player_position,
+    get_player_reg_chip, get_player_selected_chip, get_punishments, get_rewards, get_screen_image,
+    get_selected_chip_index, get_selected_cross_index, get_winner, RewardPunishment, SCREEN_IMAGE,
+};
+use crate::global::{PUNISHMENTS, REWARDS}; // Import the global variables
 
-use base64::{encode}; // Add base64 for encoding images as strings
-
+use base64::encode; // Add base64 for encoding images as strings
 
 const TANGO_CHILD_ENV_VAR: &str = "TANGO_CHILD";
-
 
 #[derive(Debug)]
 struct Args {
@@ -60,7 +64,7 @@ struct Args {
     ai_model: String,
     rom: String,
     save: String,
-    port: u16, // Added port number
+    port: u16,                   // Added port number
     replay_path: Option<String>, // Add replay path argument
 }
 
@@ -81,7 +85,6 @@ enum UserEvent {
 }
 
 use lazy_static::lazy_static;
-
 
 fn main() -> Result<(), anyhow::Error> {
     std::env::set_var("RUST_BACKTRACE", "FULL");
@@ -106,7 +109,7 @@ fn main() -> Result<(), anyhow::Error> {
     log::info!("welcome to tango {}!", version::current());
 
     if std::env::var(TANGO_CHILD_ENV_VAR).unwrap_or_default() == "1" {
-        return child_main(config,args);
+        return child_main(config, args);
     }
 
     let log_filename = format!(
@@ -189,10 +192,8 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
     let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputMessage>(); // For sending messages back to Python
     let output_tx = Arc::new(Mutex::new(Some(output_tx))); // Wrap in Arc<Mutex<>> for sharing between threads
 
-
     // Run the async task within this runtime
     rt.spawn(setup_tcp_listener(port, input_tx.clone(), output_tx.clone()));
-
 
     println!("Using init_link_code: {}", init_link_code);
 
@@ -221,10 +222,9 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
     let icon_height = icon.height();
     let window_title = format!("{}", args.port);
 
-
     let window_builder = winit::window::WindowBuilder::new()
-        .with_title(&window_title)  // Set the title to the port number
-    //.with_title(i18n::LOCALES.lookup(&config.read().language, "window-title").unwrap())
+        .with_title(&window_title) // Set the title to the port number
+        //.with_title(i18n::LOCALES.lookup(&config.read().language, "window-title").unwrap())
         .with_window_icon(Some(winit::window::Icon::from_rgba(
             icon.into_bytes(),
             icon_width,
@@ -436,8 +436,8 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                 if cfg!(windows) {
                     redraw();
                 }
-                
-               // Process commands from the Python app
+
+                // Process commands from the Python app
                 while let Ok(cmd) = input_rx.try_recv() {
                     // Debug log for received command
                     // println!("Received command from TCP: {:?}", cmd);
@@ -472,18 +472,15 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                         }
                     }
                 }
-
             }
 
             _ => {}
         }
 
         if let Some(session) = state.shared.session.lock().as_mut() {
-
             session.set_joyflags(next_config.input_mapping.to_mgba_keys(&input_state));
             session.set_master_volume(next_config.volume);
         }
-
 
         // Now handle global rewards and punishments instead of session-specific ones
         let rewards = get_rewards(); // Use global function to get rewards
@@ -521,7 +518,6 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
         //         clear_punishments(); // Clear global punishments after processing
         //     }
         // }
-
 
         if let Some(player_won) = get_winner() {
             // Send a winner message to the Python script
@@ -638,8 +634,6 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
         updater.set_enabled(next_config.enable_updater);
     })?;
 
-  
-
     Ok(())
 }
 use serde::Serialize;
@@ -675,14 +669,14 @@ fn map_key_to_physical_key(key: &str) -> Option<Key> {
     }
 }
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use serde_json::to_string_pretty;
-use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use image::codecs::png::PngEncoder;
 use image::ColorType;
+use serde_json::to_string_pretty;
 use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 /// Saves the game state by writing the screenshot and the corresponding JSON data.
 ///
 /// # Arguments
@@ -701,7 +695,7 @@ use std::env;
 /// # Returns
 ///
 /// * `Result<()>` - Ok if successful, Err otherwise.
-/// 
+///
 fn save_game_state(
     image_bytes: &[u8],
     input_binary: &str,
@@ -767,19 +761,18 @@ fn save_game_state(
 // Function to map bits to specific keys
 fn map_bit_to_key(bit: usize) -> Option<Key> {
     match bit {
-        8 => Some(Key::A),        // 0000000100000000
-        7 => Some(Key::Down),     // 0000000010000000
-        6 => Some(Key::Up),       // 0000000001000000
-        5 => Some(Key::Left),     // 0000000000100000
-        4 => Some(Key::Right),    // 0000000000010000
-        9 => Some(Key::S),        // 0000001000000000 
-        1 => Some(Key::X),        // 0000000000000010
-        0 => Some(Key::Z),        // 0000000000000001
-        3 => Some(Key::Return),    // 0000000000001000 -> enter
+        8 => Some(Key::A),      // 0000000100000000
+        7 => Some(Key::Down),   // 0000000010000000
+        6 => Some(Key::Up),     // 0000000001000000
+        5 => Some(Key::Left),   // 0000000000100000
+        4 => Some(Key::Right),  // 0000000000010000
+        9 => Some(Key::S),      // 0000001000000000
+        1 => Some(Key::X),      // 0000000000000010
+        0 => Some(Key::Z),      // 0000000000000001
+        3 => Some(Key::Return), // 0000000000001000 -> enter
         _ => None,
     }
 }
-
 
 // Use this helper function to handle input consistently
 
@@ -794,10 +787,7 @@ fn handle_input_event(
     match element_state {
         winit::event::ElementState::Pressed => {
             if let Some(steal_input) = state.steal_input.take() {
-                steal_input.run_callback(
-                    input::PhysicalInput::Key(key),
-                    &mut next_config.input_mapping,
-                );
+                steal_input.run_callback(input::PhysicalInput::Key(key), &mut next_config.input_mapping);
             } else {
                 input_state.handle_key_down(key);
             }
@@ -829,11 +819,10 @@ async fn setup_tcp_listener(
     }
 }
 
-
-use tokio::sync::mpsc;
+use parking_lot::Mutex;
 use serde::Deserialize;
-use tokio::io::{AsyncWriteExt}; // Add this for sending data back
-use parking_lot::Mutex; // Add this for thread safety
+use tokio::io::AsyncWriteExt; // Add this for sending data back
+use tokio::sync::mpsc; // Add this for thread safety
 
 #[derive(Deserialize, Serialize, Debug, Clone)] // Add Clone here
 struct InputCommand {
@@ -842,14 +831,12 @@ struct InputCommand {
     key: String,
 }
 
-
 // Define a struct for messages sent back to the Python app
 #[derive(Serialize, Debug)]
 struct OutputMessage {
     event: String,
     details: String,
 }
-
 
 #[derive(Serialize, Debug)]
 struct ScreenImageDetails {
@@ -866,9 +853,30 @@ struct ScreenImageDetails {
     current_input: u16,
     player_chip: u16,
     enemy_chip: u16,
+    player_emotion: u16,
+    enemy_emotion: u16,
+    player_game_emotion: u16,
+    enemy_game_emotion: u16,
+    selected_menu_index: u16,
+    selected_cross_index: u16,
+    chip_selected_count: u16,
+    chip_visible_count: u16,
+    chip_slots: Vec<u16>,
+    chip_codes: Vec<u16>,
+    selected_chip_indices: Vec<u16>,
+    beast_out_selectable: u16,
+    inside_cross_window: u16,
+    player_chip_folder: Vec<u16>,
+    enemy_chip_folder: Vec<u16>,
+    player_code_folder: Vec<u16>,
+    enemy_code_folder: Vec<u16>,
+    player_tag_chips: Vec<u16>,
+    enemy_tag_chips: Vec<u16>,
+    player_reg_chip: u16,
+    enemy_reg_chip: u16,
 }
-use image::ImageEncoder;
 use egui::Color32;
+use image::ImageEncoder;
 
 async fn handle_tcp_client(
     mut socket: tokio::net::TcpStream,
@@ -939,6 +947,27 @@ async fn handle_tcp_client(
                                                     current_input: get_local_input().unwrap_or(0),
                                                     player_chip: get_player_selected_chip(),
                                                     enemy_chip: get_enemy_selected_chip(),
+                                                    player_emotion: get_player_emotion_state(),
+                                                    enemy_emotion: get_enemy_emotion_state(),
+                                                    player_game_emotion: get_player_game_emotion_state(),
+                                                    enemy_game_emotion: get_enemy_game_emotion_state(),
+                                                    selected_menu_index: get_selected_menu_index(),
+                                                    selected_cross_index: get_selected_cross_index(),
+                                                    chip_selected_count: get_chip_selected_count(),
+                                                    chip_visible_count: get_chip_count_visible(),
+                                                    chip_slots: get_all_chip_slots(),
+                                                    chip_codes: get_all_chip_codes(),
+                                                    selected_chip_indices: get_all_selected_chip_indices(),
+                                                    beast_out_selectable: get_beast_out_selectable(),
+                                                    inside_cross_window: get_inside_cross_window(),
+                                                    player_chip_folder: get_all_player_chip_folders(),
+                                                    enemy_chip_folder: get_all_enemy_chip_folders(),
+                                                    player_code_folder: get_all_player_code_folders(),
+                                                    enemy_code_folder: get_all_enemy_code_folders(),
+                                                    player_tag_chips: get_all_player_tag_folders(),
+                                                    enemy_tag_chips: get_all_enemy_tag_folders(),
+                                                    player_reg_chip: get_player_reg_chip(),
+                                                    enemy_reg_chip: get_enemy_reg_chip(),
                                                 };
                                                 clear_local_input();
                                                 clear_rewards();
@@ -1010,7 +1039,6 @@ async fn handle_tcp_client(
     }
 }
 
-
 // Function to send messages back to the Python app
 async fn send_message_to_python(
     socket: &mut tokio::net::TcpStream,
@@ -1023,6 +1051,6 @@ async fn send_message_to_python(
     //clear rewards
     // clear_rewards();
     // clear_punishments();
-    
+
     Ok(())
 }

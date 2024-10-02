@@ -83,14 +83,219 @@ lazy_static! {
     // Chip selected count
     pub static ref CHIP_SELECTED_COUNT: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
 
+    pub static ref CHIP_COUNT_VISIBLE: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
     // Chip slots
     pub static ref CHIP_SLOTS: Vec<Arc<Mutex<u16>>> = (0..8).map(|_| Arc::new(Mutex::new(0))).collect();
 
     // Chip codes
     pub static ref CHIP_CODES: Vec<Arc<Mutex<u16>>> = (0..8).map(|_| Arc::new(Mutex::new(0))).collect();
 
+    
+    pub static ref PLAYER_CHIP_FOLDER:Vec<Arc<Mutex<u16>>> = (0..30).map(|_| Arc::new(Mutex::new(0))).collect();
+    pub static ref PLAYER_CODE_FOLDER:Vec<Arc<Mutex<u16>>> = (0..30).map(|_| Arc::new(Mutex::new(0))).collect();
+
+    pub static ref ENEMY_CHIP_FOLDER:Vec<Arc<Mutex<u16>>> = (0..30).map(|_| Arc::new(Mutex::new(0))).collect();
+    pub static ref ENEMY_CODE_FOLDER:Vec<Arc<Mutex<u16>>> = (0..30).map(|_| Arc::new(Mutex::new(0))).collect();
+
+
+    pub static ref PLAYER_TAG_FOLDER:Vec<Arc<Mutex<u16>>> = (0..2).map(|_| Arc::new(Mutex::new(0))).collect();
+    pub static ref ENEMY_TAG_FOLDER:Vec<Arc<Mutex<u16>>> = (0..2).map(|_| Arc::new(Mutex::new(0))).collect();
+
+    pub static ref PLAYER_REG_CHIP: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+    pub static ref ENEMY_REG_CHIP: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
     // 5 possible ids for selected chips
     pub static ref SELECTED_CHIP_INDICES: Vec<Arc<Mutex<u16>>> = (0..5).map(|_| Arc::new(Mutex::new(0))).collect();
+
+    pub static ref BEAST_OUT_SELECTABLE: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    pub static ref INSIDE_CROSS_WINDOW: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+}
+
+// ================== Player Tag Folder Getters and Setters ==================
+pub fn set_player_tag_folder(index: usize, value: u16) -> Result<(), String> {
+    if index < PLAYER_TAG_FOLDER.len() {
+        let folder = &PLAYER_TAG_FOLDER[index];
+        let mut folder_lock = folder.lock();
+        *folder_lock = value;
+        Ok(())
+    } else {
+        Err(format!("Player tag folder index {} out of bounds", index))
+    }
+}
+pub fn get_player_tag_folder(index: usize) -> Option<u16> {
+    if index < PLAYER_TAG_FOLDER.len() {
+        let folder = &PLAYER_TAG_FOLDER[index];
+        Some(*folder.lock())
+    } else {
+        None
+    }
+}
+pub fn get_all_player_tag_folders() -> Vec<u16> {
+    PLAYER_TAG_FOLDER.iter().map(|folder| *folder.lock()).collect()
+}
+
+// ================== Enemy Tag Folder Getters and Setters ==================
+pub fn set_enemy_tag_folder(index: usize, value: u16) -> Result<(), String> {
+    if index < ENEMY_TAG_FOLDER.len() {
+        let folder = &ENEMY_TAG_FOLDER[index];
+        let mut folder_lock = folder.lock();
+        *folder_lock = value;
+        Ok(())
+    } else {
+        Err(format!("Enemy tag folder index {} out of bounds", index))
+    }
+}
+pub fn get_enemy_tag_folder(index: usize) -> Option<u16> {
+    if index < ENEMY_TAG_FOLDER.len() {
+        let folder = &ENEMY_TAG_FOLDER[index];
+        Some(*folder.lock())
+    } else {
+        None
+    }
+}
+pub fn get_all_enemy_tag_folders() -> Vec<u16> {
+    ENEMY_TAG_FOLDER.iter().map(|folder| *folder.lock()).collect()
+}
+
+// ================== Player Regular Chip Getters and Setters ==================
+pub fn set_player_reg_chip(value: u16) {
+    let mut reg_chip = PLAYER_REG_CHIP.lock();
+    *reg_chip = value;
+}
+pub fn get_player_reg_chip() -> u16 {
+    let reg_chip = PLAYER_REG_CHIP.lock();
+    *reg_chip
+}
+
+// ================== Enemy Regular Chip Getters and Setters ==================
+pub fn set_enemy_reg_chip(value: u16) {
+    let mut reg_chip = ENEMY_REG_CHIP.lock();
+    *reg_chip = value;
+}
+
+pub fn get_enemy_reg_chip() -> u16 {
+    let reg_chip = ENEMY_REG_CHIP.lock();
+    *reg_chip
+}
+
+
+// ================== Player Chip Folder Getters and Setters ==================
+pub fn set_player_chip_folder(index: usize, value: u16) -> Result<(), String> {
+    if index < PLAYER_CHIP_FOLDER.len() {
+        let folder = &PLAYER_CHIP_FOLDER[index];
+        let mut folder_lock = folder.lock();
+        *folder_lock = value;
+        Ok(())
+    } else {
+        Err(format!("Player chip folder index {} out of bounds", index))
+    }
+}
+pub fn get_player_chip_folder(index: usize) -> Option<u16> {
+    if index < PLAYER_CHIP_FOLDER.len() {
+        let folder = &PLAYER_CHIP_FOLDER[index];
+        Some(*folder.lock())
+    } else {
+        None
+    }
+}
+pub fn get_all_player_chip_folders() -> Vec<u16> {
+    PLAYER_CHIP_FOLDER.iter().map(|folder| *folder.lock()).collect()
+}
+
+// ================== Player Code Folder Getters and Setters ==================
+pub fn set_player_code_folder(index: usize, value: u16) -> Result<(), String> {
+    if index < PLAYER_CODE_FOLDER.len() {
+        let folder = &PLAYER_CODE_FOLDER[index];
+        let mut folder_lock = folder.lock();
+        *folder_lock = value;
+        Ok(())
+    } else {
+        Err(format!("Player code folder index {} out of bounds", index))
+    }
+}
+pub fn get_player_code_folder(index: usize) -> Option<u16> {
+    if index < PLAYER_CODE_FOLDER.len() {
+        let folder = &PLAYER_CODE_FOLDER[index];
+        Some(*folder.lock())
+    } else {
+        None
+    }
+}
+pub fn get_all_player_code_folders() -> Vec<u16> {
+    PLAYER_CODE_FOLDER.iter().map(|folder| *folder.lock()).collect()
+}
+
+// ================== Enemy Chip Folder Getters and Setters ==================
+pub fn set_enemy_chip_folder(index: usize, value: u16) -> Result<(), String> {
+    if index < ENEMY_CHIP_FOLDER.len() {
+        let folder = &ENEMY_CHIP_FOLDER[index];
+        let mut folder_lock = folder.lock();
+        *folder_lock = value;
+        Ok(())
+    } else {
+        Err(format!("Enemy chip folder index {} out of bounds", index))
+    }
+}
+
+pub fn get_enemy_chip_folder(index: usize) -> Option<u16> {
+    if index < ENEMY_CHIP_FOLDER.len() {
+        let folder = &ENEMY_CHIP_FOLDER[index];
+        Some(*folder.lock())
+    } else {
+        None
+    }
+}
+pub fn get_all_enemy_chip_folders() -> Vec<u16> {
+    ENEMY_CHIP_FOLDER.iter().map(|folder| *folder.lock()).collect()
+}
+
+// ================== Enemy Code Folder Getters and Setters ==================
+pub fn set_enemy_code_folder(index: usize, value: u16) -> Result<(), String> {
+    if index < ENEMY_CODE_FOLDER.len() {
+        let folder = &ENEMY_CODE_FOLDER[index];
+        let mut folder_lock = folder.lock();
+        *folder_lock = value;
+        Ok(())
+    } else {
+        Err(format!("Enemy code folder index {} out of bounds", index))
+    }
+}
+pub fn get_enemy_code_folder(index: usize) -> Option<u16> {
+    if index < ENEMY_CODE_FOLDER.len() {
+        let folder = &ENEMY_CODE_FOLDER[index];
+        Some(*folder.lock())
+    } else {
+        None
+    }
+}
+pub fn get_all_enemy_code_folders() -> Vec<u16> {
+    ENEMY_CODE_FOLDER.iter().map(|folder| *folder.lock()).collect()
+}
+
+// ================== Inside Cross Window Getters and Setters ==================
+/// Sets the inside cross window flag
+pub fn set_inside_cross_window(flag: u16) {
+    let mut inside_cross_window = INSIDE_CROSS_WINDOW.lock();
+    *inside_cross_window = flag;
+}
+pub fn get_inside_cross_window() -> u16 {
+    let inside_cross_window = INSIDE_CROSS_WINDOW.lock();
+    *inside_cross_window
+}
+
+// ================== Beast Out Selectable Getters and Setters ==================
+/// Sets the beast out selectable flag
+/// This flag is used to determine if the player can beast out
+pub fn set_beast_out_selectable(selectable: u16) {
+    let mut flag = BEAST_OUT_SELECTABLE.lock();
+    *flag = selectable;
+}
+pub fn get_beast_out_selectable() -> u16 {
+    let flag = BEAST_OUT_SELECTABLE.lock();
+    *flag
 }
 
 // ================== RewardPunishment Getters and Setters ==================
@@ -457,6 +662,17 @@ pub fn get_chip_selected_count() -> u16 {
     *chip_selected_count
 }
 
+// ================== Chip Count Visible Getters and Setters ==================
+/// Sets the chip count visible
+pub fn set_chip_count_visible(count: u16) {
+    let mut chip_count_visible = CHIP_COUNT_VISIBLE.lock();
+    *chip_count_visible = count;
+}
+pub fn get_chip_count_visible() -> u16 {
+    let chip_count_visible = CHIP_COUNT_VISIBLE.lock();
+    *chip_count_visible
+}
+
 // ================== Chip Slots Getters and Setters ==================
 /// Sets a specific chip slot by index
 pub fn set_chip_slot(index: usize, value: u16) -> Result<(), String> {
@@ -479,6 +695,7 @@ pub fn get_chip_slot(index: usize) -> Option<u16> {
         None
     }
 }
+
 
 /// Retrieves all chip slots
 pub fn get_all_chip_slots() -> Vec<u16> {
