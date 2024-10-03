@@ -1,3 +1,5 @@
+#inspect_h5_battle.py
+
 import h5py
 import os
 
@@ -11,6 +13,8 @@ def inspect_hdf5_file(file_path):
             print("Datasets in the file:")
             for key in hf.keys():
                 print(f" - {key}")
+                # Print the shape and dtype of each dataset
+                print(f"   - shape: {hf[key].shape}")
             # Specifically check for 'health'
             # if 'health' in hf:
             #     print("'health' dataset is present.")

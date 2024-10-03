@@ -24,7 +24,7 @@ from threading import Lock
 import pyautogui
 import subprocess
 import glob
-from train import GameInputPredictor  # Import the model class
+# from train import GameInputPredictor  # Import the model class
 from utils import (
     get_image_memory, get_exponential_sample,
     get_exponental_amount, get_threshold, get_root_dir, position_to_grid, get_threshold_plan, inference_fps,get_latest_checkpoint , get_checkpoint_dir,extract_number_from_checkpoint
@@ -32,6 +32,8 @@ from utils import (
 
 import threading
 import queue
+
+from battle_network_model import get_gamestate_tensor, BattleNetworkModel
 
 print("Saving data points to disk.")
 planning_data_dir = get_root_dir() + "/data/planning_data"
@@ -74,7 +76,7 @@ latest_checkpoint_number = {'planning': 0, 'battle': 0}
 training_queue = queue.Queue()
 
 # Timer duration in seconds (can be set via environment variable or config)
-CHIP_WINDOW_TIMER = float(os.getenv("CHIP_WINDOW_TIMER", 30.0))  # Default is 5 seconds
+CHIP_WINDOW_TIMER = float(os.getenv("CHIP_WINDOW_TIMER", 10.0))  # Default is 5 seconds
 REPLAYS_DIR = '/home/lee/Documents/Tango/replaysOrig'
 
 
@@ -97,39 +99,39 @@ max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
 replay_count = 0
-battle_count = 4
-include_orig = False
+battle_count = 0
+include_orig = True
 do_replays = False
 
 INSTANCES = []
 # Define the server addresses and ports for each instance
 INSTANCES = [
-    # {
-    #     'address': '127.0.0.1',
-    #     'port': 12344,
-    #     # 'rom_path': 'bn6,0',
-    #     'rom_path': 'bn6,1',
-    #     # 'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
-    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar 1.sav',
-    #     'name': 'Instance 1',
-    #     # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
-    #     # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-IndianaOrz-round1-p2.tangoreplay',
-    #     # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006015542-lunazoe-bn6-vs-IndianaOrz-round3-p2.tangoreplay',#player 2 cross change emotion state check fix needed
-    #     # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006020253-lunazoe-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
-    #     'init_link_code': 'arena1',
-    #     'is_player': True  # Set to True if you don't want this instance to send inputs
-    # },
-    # {
-    #     'address': '127.0.0.1',
-    #     'port': 12345,
-    #     # 'rom_path': 'bn6,0',
-    #     'rom_path': 'bn6,1',
-    #     # 'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
-    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar 1.sav',
-    #     'name': 'Instance 2',
-    #     'init_link_code': 'arena1',
-    #     'is_player': True  # Set to False if you want this instance to send inputs
-    # },
+    {
+        'address': '127.0.0.1',
+        'port': 12344,
+        'rom_path': 'bn6,0',
+        # 'rom_path': 'bn6,1',
+        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
+        # 'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar 1.sav',
+        'name': 'Instance 1',
+        # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
+        # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-IndianaOrz-round1-p2.tangoreplay',
+        # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006015542-lunazoe-bn6-vs-IndianaOrz-round3-p2.tangoreplay',#player 2 cross change emotion state check fix needed
+        # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006020253-lunazoe-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
+        'init_link_code': 'arena1',
+        'is_player': True  # Set to True if you don't want this instance to send inputs
+    },
+    {
+        'address': '127.0.0.1',
+        'port': 12345,
+        # 'rom_path': 'bn6,0',
+        'rom_path': 'bn6,1',
+        # 'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
+        'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar 1.sav',
+        'name': 'Instance 2',
+        'init_link_code': 'arena1',
+        'is_player': True  # Set to False if you want this instance to send inputs
+    },
     # Additional instances can be added here
 ]
 
@@ -437,7 +439,7 @@ def load_models(image_memory=1):
     training_battle_checkpoint_path = get_latest_checkpoint(model_type='battle', image_memory=image_memory)
 
     if training_battle_checkpoint_path:
-        training_battle_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
+        training_battle_model = BattleNetworkModel(memory=image_memory).to(device)
         checkpoint_training_battle = torch.load(training_battle_checkpoint_path, map_location=device)
         if 'model_state_dict' in checkpoint_training_battle:
             training_battle_model.load_state_dict(checkpoint_training_battle['model_state_dict'])
@@ -449,7 +451,7 @@ def load_models(image_memory=1):
             raise KeyError("Training Battle checkpoint does not contain 'model_state_dict'")
     else:
         # Initialize new Training Battle Model
-        training_battle_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
+        training_battle_model = BattleNetworkModel(memory=image_memory).to(device)
         print("No Training Battle Model checkpoint found. Initialized a new Training Battle Model.")
 
     training_battle_model.train()  # Set to train mode
@@ -591,7 +593,7 @@ def process_chip(chip_value):
     return chip_tensor.unsqueeze(0)  # Shape: (1, 400)
 
 
-from planning_model import get_planning_input_from_instance, encode_available_crosses, encode_beast_flags,encode_current_cross,encode_folder,encode_visible_chips
+from planning_model import get_planning_input_from_instance, encode_used_crosses, encode_beast_flags,encode_current_cross,encode_folder,encode_visible_chips
 # Function to perform inference with the AI model
 # previous_sent = 0
 
@@ -637,6 +639,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
 
         chip_slots = current_instance['chip_slots']
         chip_codes = current_instance['chip_codes']
+        
         chips_visible = current_instance['chip_visible_count']
 
         chip_data = []
@@ -659,6 +662,8 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
         target_list_input = []
         for i in range(len(target_list)):
             target_list_input.append(target_list[i])
+            
+        
         #log the inputs and outputs to the port for training
         data_point = {
             'inputs': inputs,
@@ -670,6 +675,20 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
         #set values higher than chip visible to 0
         for i in range(len(target_list)):
             if target_list[i] >= chips_visible:
+                target_list[i] = 0
+                
+                
+        #get the min index of any chip_data with a slot value > 360
+        min_null = 1000
+        for i in range(len(chip_data)):
+            if chip_data[i][0] > 360:
+                min_null = i
+                print(f"detected null at [{i}]")
+                break
+            
+        #set values higher than min_null to 0 as well
+        for i in range(len(target_list)):
+            if target_list[i] >= min_null:
                 target_list[i] = 0
         
         #remove all 0 values from the target_list
@@ -686,9 +705,9 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
 
         #randomly select value for cross_target
         #get count of available crosses
-        # available_crosses = len(current_instance['player_available_crosses']) - 1
-        # print(available_crosses)
-        # current_instance['cross_target'] = random.randint(-1, available_crosses)
+        # used_crosses = len(current_instance['player_used_crosses']) - 1
+        # print(used_crosses)
+        # current_instance['cross_target'] = random.randint(-1, used_crosses)
 
         # #randomly select target_list
         # current_instance['target_list'] = random.sample(range(chips_visible), 5)
@@ -733,7 +752,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
                     # Train the Planning Model with the collected data points
                     # if planning_data_buffers[port]:
                         # asyncio.create_task(asyncio.to_thread(
-                        #     train_model_online,
+                        #     save_data_to_hdf5,
                         #     port,
                         #     planning_data_buffers[port],
                         #     model_type="Planning_Model"
@@ -819,7 +838,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
             # do nothing if it hasn't been 1 second since last time
             # print(f"Port {port}: Target Index: {target_index}. current_index: {current_index}")
             time_difference = current_time - current_instance['last_pressed_time']
-            if  time_difference < 1 and time_difference > 0.1:
+            if  time_difference < 0.25 and time_difference > 0.1:
                 # print(f"Port {port}: Skipping key press. Not enough time elapsed.")
                 return {'type': 'key_press', 'key': '0000000000000000'}
             
@@ -1262,6 +1281,14 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         enemy_tag_chips = screen_data.get("enemy_tag_chips", 0)
                         player_reg_chip = screen_data.get("player_reg_chip", 0)
                         enemy_reg_chip = screen_data.get("enemy_reg_chip", 0)
+                        grid_state = screen_data.get("grid_state", 0)
+                        grid_owner_state = screen_data.get("grid_owner_state", 0)
+                        player_grid_position = screen_data.get("player_grid_position", 0)
+                        enemy_grid_position = screen_data.get("enemy_grid_position", 0)
+                        is_offerer = screen_data.get("is_offerer", 0)
+                        cust_gage = screen_data.get("cust_gage", 0)
+                        own_navi_cust = screen_data.get("own_navi_cust", 0)
+                        enemy_navi_cust = screen_data.get("enemy_navi_cust", 0)
 
                     except json.JSONDecodeError:
                         print(f"Port {port}: Failed to parse screen_image details: {details}")
@@ -1291,6 +1318,68 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                     game_instance['selected_chip_indices'] = selected_chip_indices
                     game_instance['beast_out_selectable'] = beast_out_selectable
                     game_instance['inside_cross_window'] = inside_cross_window
+                    game_instance['grid_state'] = grid_state
+                    game_instance['grid_owner_state'] = grid_owner_state
+                    game_instance['player_grid_position'] = player_grid_position
+                    game_instance['enemy_grid_position'] = enemy_grid_position
+                    game_instance['own_navi_cust'] = own_navi_cust
+                    game_instance['enemy_navi_cust'] = enemy_navi_cust
+                    
+                    
+                    #gridx positionx mapping
+                    # 1-20 2-60 3-100 4-140 5-180 6-220
+                    # Define the x mappings
+                    x_mapping = {0: 0, 1: 20, 2: 60, 3: 100, 4: 140, 5: 180, 6: 220}
+                    x_mapping_inverted = {v: k for k, v in x_mapping.items()}
+
+                    def get_closest_x(x, mapping_values):
+                        """
+                        Find the closest value in mapping_values to the given x.
+                        """
+                        return min(mapping_values, key=lambda k: abs(k - x))
+                    
+                    
+                    # Find the closest x values from the mapping
+                    closest_player_x = get_closest_x(current_player_position[0], x_mapping.values())
+                    closest_enemy_x = get_closest_x(current_enemy_position[0], x_mapping.values())
+                    
+                    # Map the closest x values to grid indices with error handling
+                    try:
+                        player_grid_x = x_mapping_inverted[closest_player_x]
+                    except KeyError:
+                        print(f"Error: Closest Player X position {closest_player_x} not found in x_mapping_inverted.")
+                        player_grid_x = 0  # Assign a default or handle as needed
+
+                    try:
+                        enemy_grid_x = x_mapping_inverted[closest_enemy_x]
+                    except KeyError:
+                        print(f"Error: Closest Enemy X position {closest_enemy_x} not found in x_mapping_inverted.")
+                        enemy_grid_x = 0  # Assign a default or handle as needed
+                   
+                    #get the closest x value to the mapping from the current position (so 57 should map to 60)
+                    player_grid_position[0] = player_grid_x#x_mapping_inverted[current_player_position[0]]
+                    #y1 is about 260, y2 is about 515, y3 is about 770
+                    player_grid_position[1] = 1 if current_player_position[1] < 300 else 2 if current_player_position[1] < 600 else 3
+                    enemy_grid_position[0] = enemy_grid_x#x_mapping_inverted[current_enemy_position[0]]
+                    enemy_grid_position[1] = 1 if current_enemy_position[1] < 300 else 2 if current_enemy_position[1] < 600 else 3
+                    
+                    game_instance['player_grid_position'] = player_grid_position
+                    game_instance['enemy_grid_position'] = enemy_grid_position
+                    game_instance['cust_gage'] = cust_gage
+                    #print cust gage
+                    # print(f"Port {port}: Cust Gage: {cust_gage}")
+
+                    
+                    #print grid state in a 6x3 grid
+                    # for i in range(0, 6):
+                    #     print(f"Port {port}: {grid_state[i*3:i*3+3]}")
+                    # for i in range(0, 6):
+                    #     print(f"Port {port}: {grid_owner_state[i*3:i*3+3]}")
+                    # print(f"Port {port}: Player GP: {game_instance['player_grid_position']} {is_offerer}")
+                    # print(f"Port {port}: Enemy GP: {game_instance['enemy_grid_position']} {is_offerer}")
+                    # # #print player and enemy position
+                    # print(f"Port {port}: Player Position: {current_player_position}")
+                    # print(f"Port {port}: Enemy Position: {current_enemy_position}")
                     if 'player_beasted_out' not in game_instance:
                         game_instance['player_beasted_out'] = False
                     if 'enemy_beasted_out' not in game_instance:
@@ -1328,72 +1417,43 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         
 
 
+                    if(current_reward !=0):
+                        print(f"Port {port}: Reward: {current_reward}")
+                    if(current_punishment !=0):
+                        print(f"Port {port}: Punishment: {current_punishment}")
+
+
+
                     #selected_chip_indices
                     # print(f"Port {port}: {selected_chip_indices}")
-
                     #set available crosses based on which crosses have been used
-                    if 'player_available_crosses' not in game_instance:
+                    if 'player_used_crosses' not in game_instance:
                         #initialize available crosses to include all
-                        if game_instance['rom_path'] == 'bn6,0':
-                            #clone gregar forms list
-                            game_instance['player_available_crosses'] = GREGAR_CROSSES.copy()
-                            print(f"Port {port}: Player Available Crosses: {game_instance['player_available_crosses']}")
-                        elif game_instance['rom_path'] == 'bn6,1':
-                            #clone falzar forms list
-                            game_instance['player_available_crosses'] = FALZAR_CROSSES.copy()
-                            print(f"Port {port}: Player Available Crosses: {game_instance['player_available_crosses']}")
-                            
-                    #set the player available crosses back to the string values from the indicies from the previous frame
-                    available_cross_indicies = [cross['type'] for cross in FORM_MAPPING if cross['normal'] in game_instance['player_available_crosses']]
-                    if len(available_cross_indicies) > 0:
-                        game_instance['player_available_crosses'] = available_cross_indicies
-                    # print(f"Port {port}: Player Available Crosses: {game_instance['player_available_crosses']}")
-                    #get the current selected cross from the player_game_emotion, check form mapping.normal and beast out to match current_player_emotion
-                    #simiar to .where in c#
+                        game_instance['player_used_crosses'] = []
+                    
                     selected_cross_form = next((cross for cross in FORM_MAPPING if cross['normal'] == current_player_game_emotion or cross['beast'] == current_player_game_emotion), None)
                     if selected_cross_form is not None:
-                        #check if contained
-                        if selected_cross_form['type'] in game_instance['player_available_crosses']:
-                            #remove the selected cross from the available crosses
-                            game_instance['player_available_crosses'].remove(selected_cross_form['type'])
-                            # print(f"Port {port}: Selected Cross Form: {selected_cross_form['type']}, Removing from available crosses. {game_instance['player_available_crosses']}")
-                    
-                    # print(f"Port {port}: Player Available Crosses: {game_instance['player_available_crosses']}")
-                    #set the player available crosses to the index from the game instance using the type for matching on current value
-                    available_cross_indicies = [cross['normal'] for cross in FORM_MAPPING if cross['type'] in game_instance['player_available_crosses']]
-                    # print(f"Port {port}: Player Available Crosses: {available_cross_indicies}")
-                    game_instance['player_available_crosses'] = available_cross_indicies
-                    
-                    # print(f"Port {port}: Player Available Crosses: {game_instance['player_available_crosses']}")
-                    
-                    #same for opponent cross
-                    if 'enemy_available_crosses' not in game_instance:
-                        #initialize available crosses to include all
-                        if game_instance['rom_path'] == 'bn6,0':
-                            #clone gregar forms list
-                            game_instance['enemy_available_crosses'] = GREGAR_CROSSES.copy()
-                        elif game_instance['rom_path'] == 'bn6,1':
-                            #clone falzar forms list
-                            game_instance['enemy_available_crosses'] = FALZAR_CROSSES.copy()
+                        #get the index of the form
+                        selected_cross_index = FORM_MAPPING.index(selected_cross_form)
+                        #add to used crosses list if it's not already there
+                        if selected_cross_index >= 1 and selected_cross_index not in game_instance['player_used_crosses']:
+                            game_instance['player_used_crosses'].append(selected_cross_index)
+                            print(f"Port {port}: Adding to used crosses: {selected_cross_index}")
                             
-                    available_cross_indicies = [cross['type'] for cross in FORM_MAPPING if cross['normal'] in game_instance['enemy_available_crosses']]
-                    if len(available_cross_indicies) > 0:
-                        game_instance['enemy_available_crosses'] = available_cross_indicies
-                    #get the current selected cross from the player_game_emotion, check form mapping.normal and beast out to match current_player_emotion
-                    #simiar to .where in c#
+                    if 'enemy_used_crosses' not in game_instance:
+                        #initialize available crosses to include all
+                        game_instance['enemy_used_crosses'] = []
+                    
                     selected_cross_form = next((cross for cross in FORM_MAPPING if cross['normal'] == current_enemy_game_emotion or cross['beast'] == current_enemy_game_emotion), None)
                     if selected_cross_form is not None:
-                        #check if contained
-                        if selected_cross_form['type'] in game_instance['enemy_available_crosses']:
-                            #remove the selected cross from the available crosses
-                            game_instance['enemy_available_crosses'].remove(selected_cross_form['type'])
-                            print(f"Port {port}: Selected Cross Form: {selected_cross_form['type']}, Removing from available crosses. {game_instance['enemy_available_crosses']}")
+                        #get the index of the form
+                        selected_cross_index = FORM_MAPPING.index(selected_cross_form)
+                        #add to used crosses list if it's not already there
+                        if selected_cross_index >= 1 and selected_cross_index not in game_instance['enemy_used_crosses']:
+                            game_instance['enemy_used_crosses'].append(selected_cross_index)
+                            print(f"Port {port}: Adding to used crosses: {selected_cross_index}")
                     
-                    #set the player available crosses to the index from the game instance using the type for matching on current value
-                    available_cross_indicies = [cross['normal'] for cross in FORM_MAPPING if cross['type'] in game_instance['enemy_available_crosses']]
-                    game_instance['enemy_available_crosses'] = available_cross_indicies
-                    
-                    # print(f"Port {port}: Enemy Available Crosses: {game_instance['enemy_available_crosses']}")
+                    # print(f"Port {port}: Enemy Available Crosses: {game_instance['enemy_used_crosses']}")
                     
                     #print emotions and indicies
                     # print(f"Port {port}: Player Emotion: {current_player_emotion}, Enemy Emotion: {current_enemy_emotion}")
@@ -1443,6 +1503,38 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
 
                     player_health_tensor = torch.tensor([normalized_player_health], dtype=torch.float32, device=device).unsqueeze(0)  # Shape: (1, 1)
                     enemy_health_tensor = torch.tensor([normalized_enemy_health], dtype=torch.float32, device=device).unsqueeze(0)    # Shape: (1, 1)
+
+
+
+
+                    gamestate_tensor = get_gamestate_tensor(
+                        screen_data,
+                        cust_gage,#validated
+                        grid_state,#validated
+                        grid_owner_state,#validated
+                        player_grid_position,#validated
+                        enemy_grid_position,#validated
+                        normalized_player_health,#validated
+                        normalized_enemy_health,#validated
+                        current_player_chip, #validated
+                        current_enemy_chip, #validated
+                        current_player_charge, #validated
+                        current_enemy_charge, #validated
+                        game_instance['current_hand'] if 'current_hand' in game_instance else None,#validated
+                        game_instance['player_folder'],#validated
+                        game_instance['enemy_folder'],#validated
+                        own_navi_cust,#validated
+                        enemy_navi_cust,#validated
+                        current_player_game_emotion,#validated
+                        current_enemy_game_emotion,#validated
+                        game_instance['player_used_crosses'],#validated
+                        game_instance['enemy_used_crosses'],#validated
+                        game_instance['player_beasted_out'],#validated
+                        game_instance['enemy_beasted_out'],#validated
+                        game_instance['player_beasted_over'],
+                        game_instance['enemy_beasted_over'],
+                    )
+
 
                     # Update health memory buffers
                     if health_memory_size > 0:
@@ -1550,22 +1642,10 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         if game_instance:# and not game_instance.get('is_player', False):
 
                             # Prepare data point
-                            data_point = {
-                                'frames': sampled_frames,
-                                'position_tensor': position_tensor,
-                                'inside_window': inside_window_tensor,
-                                'player_health': player_health_tensor,
-                                'enemy_health': enemy_health_tensor,
-                                'player_charge_seq': player_charge_seq,
-                                'enemy_charge_seq': enemy_charge_seq,
-                                'current_player_charge': current_player_charge,
-                                'current_enemy_charge': current_enemy_charge,
-                                'previous_inputs': previous_inputs_tensor,
-                                'health_memory': health_memory_tensor,  # Add health_memory
-                                'current_player_chip': current_player_chip,
-                                'current_enemy_chip': current_enemy_chip,
-                                'action': None  # Will be updated after sending the command
-                            }
+                            data_point = gamestate_tensor
+                            model = BattleNetworkModel(image_option='None', memory=1, scale=1.0, dropout_p=0.5)
+                            model.eval()  # Set the model to evaluation mode
+                            model([gamestate_tensor])
                             
                             current_time = time.time()
                             # Detect entering or exiting the window
@@ -1578,6 +1658,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 current_instance['press_count'] = 0
                                 current_instance['last_pressed_time'] = current_time +0.1
                                 chip_slots = current_instance['chip_slots']
+                                
+                                
                                 chip_codes = current_instance['chip_codes']
                                 chips_visible = current_instance['chip_visible_count']
 
@@ -1593,6 +1675,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                         #if the code is odd, add to the chip_data
                                         chip_data.append((chip_slots[i] + 256, (chip_codes[i] - 1) / 2))
                                 print(chip_data)
+                                
+                                
                                 
                                 #set game instance chip data
                                 current_instance['player_chips'] = chip_data
@@ -1635,17 +1719,25 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                     del window_entry_time[port]
                                 previous_sent_dict[port] = 0
                                 if previous_inside_window_dict[port] == 1.0:
+                                    #use the selected indicies to set the current hand's chip data
+                                    #create a list of the data from chip slots at each selected indicies
+                                    #game_instance['chip_slots'] game_instance['selected_chip_indices']
+                                    selected_chips = [game_instance['player_chips'][i][0] for i in game_instance['selected_chip_indices']]
+                                    #remove selected chips which are higher than the amount selected count
+                                    selected_chips = selected_chips[:game_instance['chip_selected_count']]
+                                    print(f"Port {port}: Selected Chips: {selected_chips}")
+                                    game_instance['current_hand'] = selected_chips
                                     #if exiting the window and the game is a replay
                                     if is_replay or game_instance.get('is_player', True):
                                         inputs, cross_target, target_list_input = get_planning_input_from_replay(game_instance, GAMMA, device)
                                         #append the selected data to the planning data buffer
-                                        data_point = {
+                                        planning_data_point = {
                                             'inputs': inputs,
                                             'cross_target': cross_target,
                                             'target_list': target_list_input
                                         }
                                         print(f"Port {port}: Appending planning data to buffer.")
-                                        planning_data_buffers[port].append(data_point)
+                                        planning_data_buffers[port].append(planning_data_point)
                                         
                                 previous_inside_window_dict[port] = 0.0
 
@@ -1677,106 +1769,31 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                     else:
                                         past_data_point['reward'] = discounted_reward
 
-                                # Train on the updated buffer
-                                # await train_model_online(
-                                #     port,
-                                #     list(data_buffers[port]),
-                                #     model_type="Battle_Model"
-                                # )
-                                # asyncio.create_task(asyncio.to_thread(
-                                #     train_model_online,
-                                #     port,
-                                #     list(data_buffers[port]),
-                                #     model_type="Battle_Model"
-                                # ))
-
-                                # training_queue.put((port, list(data_buffers[port]), "Battle_Model", True))
                                 # Reset rewards
                                 current_reward = 0
                                 current_punishment = 0
-                            # else:
-                            #     if current_player_charge != 0:# or current_punishment == 0:
-                            #         # print(f"Port {port}: Assigning reward: {0.1}")
-                            #         # Train on the current frame (data_point)
-                            #         if current_player_charge != 0:
-                            #             data_point['reward'] = 0.1
 
                             # Pruning Logic Starts Here
                             # Remove data points older than window_size that have no reward assigned
-                            if len(data_buffers[port]) > window_size:
-                                # Calculate how many data points to prune
-                                num_to_prune = len(data_buffers[port]) - window_size
-                                pruned_count = 0
-                                i = 0
-                                while pruned_count < num_to_prune and i < len(data_buffers[port]):
-                                    if 'reward' not in data_buffers[port][i]:
-                                        del data_buffers[port][i]
-                                        pruned_count += 1
-                                    else:
-                                        i += 1
+                            # print( len(data_buffers[port]))
+                            # if len(data_buffers[port]) > window_size:
+                            #     # Calculate how many data points to prune
+                            #     num_to_prune = len(data_buffers[port]) - window_size
+                            #     pruned_count = 0
+                            #     i = 0
+                            #     while pruned_count < num_to_prune and i < len(data_buffers[port]):
+                            #         if 'reward' not in data_buffers[port][i]:
+                            #             del data_buffers[port][i]
+                            #             pruned_count += 1
+                            #         else:
+                            #             i += 1
 
-                            
-
-                                # if pruned_count > 0:
-                                #     print(f"Port {port}: Pruned {pruned_count} data points from data_buffers.")
-                            # else:
-                            #     # Assign a small positive reward for frames with no damage taken
-                            #     # data_point['reward'] = 0.1  # Adjust the value as appropriate
-
-                            #     # Append data_point to buffer
-                            #     data_buffers[port].append(data_point)
-
-                                
-                                    # else:
-                                    #     data_point['reward'] = 0.001
-
-                            #     asyncio.create_task(asyncio.to_thread(
-                            #         train_model_online,
-                            #         port,
-                            #         [data_point],  # Pass a list with only the current data_point
-                            #         model_type="Battle_Model",
-                            #         log=False
-                            #     ))
-                            
-                            #if not moving, give a small punishment
-                            # elif current_input == '0000000000000000':
-                            #     print(f"Port {port}: Assigning punishment: {-1}")
-                            #     data_point['reward'] = -1
-                            #     await train_model_online(
-                            #         port,
-                            #         [data_point],  # Pass a list with only the current data_point
-                            #         model_type="Battle_Model",  # Assuming you're updating the Battle Model
-                            #         log=False
-                            #     )
                             
                             # Reset rewards/punishments
                             current_reward = 0
                             current_punishment = 0
 
-                        # Save the game state only if training_data_dir is set
-                        # if training_data_dir and current_input is not None:
-                        #     input_binary = current_input
-                            # save_game_state(
-                            #     image_path=image_path,
-                            #     input_binary=input_binary,
-                            #     reward=current_reward,
-                            #     punishment=current_punishment,
-                            #     training_data_dir=training_data_dir,
-                            #     player_health=current_player_health,
-                            #     enemy_health=current_enemy_health,
-                            #     player_position=current_player_position,
-                            #     enemy_position=current_enemy_position,
-                            #     inside_window=current_inside_window
-                            # )
-                            # print(f"Port {port}: Saved game state.")
 
-                        # Reset additional fields after processing
-                        # if current_inside_window == 1.0:
-                        #     # Append data_point to planning_data_buffers
-                        #     #only append if the action is not all 0s, unless the current is all 0s and the previous is not (to signify release)
-                        #     if data_point['action'] != '0000000000000000' or (data_point['action'] == '0000000000000000' and planning_data_buffers[port] and planning_data_buffers[port][-1]['action'] != '0000000000000000'):
-                        #         planning_data_buffers[port].append(data_point)
-                        #     # print(f"Port {port}: Appended data_point to planning_data_buffers. {current_input}. {len(planning_data_buffers[port])}")
                         current_player_health = None
                         current_enemy_health = None
                         current_player_position = None
@@ -1840,7 +1857,7 @@ from tqdm import tqdm
 import traceback
 data_buffers_locks = {instance['port']: Lock() for instance in INSTANCES}
 
-def training_thread_function(batch_size=48, max_wait_time=1.0):
+def saving_thread_function(batch_size=100000000, max_wait_time=1.0):
     """
     Training thread that processes training data in batches from each port's data buffer.
     
@@ -1857,7 +1874,12 @@ def training_thread_function(batch_size=48, max_wait_time=1.0):
         start_time = time.time()
         any_data_processed = False
         
-        # train battle model
+        # train battle model                            # else:
+                            #     if current_player_charge != 0:# or current_punishment == 0:
+                            #         # print(f"Port {port}: Assigning reward: {0.1}")
+                            #         # Train on the current frame (data_point)
+                            #         if current_player_charge != 0:
+                            #             data_point['reward'] = 0.1
         for port, buffer in data_buffers.items():
             lock = data_buffers_locks[port]
             with lock:
@@ -1874,7 +1896,7 @@ def training_thread_function(batch_size=48, max_wait_time=1.0):
             if batch_data:
                 any_data_processed = True
                 # Perform training on the batch_data
-                train_model_online(port, batch_data, model_type="Battle_Model", log=True)
+                save_data_to_hdf5(port, batch_data, model_type="Battle_Model", log=True)
                 progress_bar.update(1)
             
         #remove all battle data from memory
@@ -1901,7 +1923,7 @@ def training_thread_function(batch_size=48, max_wait_time=1.0):
             if batch_data:
                 any_data_processed = True
                 # Perform training on the batch_data
-                train_model_online(port, batch_data, model_type="Planning_Model", log=True)
+                save_data_to_hdf5(port, batch_data, model_type="Planning_Model", log=True)
                 progress_bar.update(1)
         
         if not any_data_processed:
@@ -1918,7 +1940,7 @@ def training_thread_function(batch_size=48, max_wait_time=1.0):
 
 import random
 
-def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
+def save_data_to_hdf5(port, data_buffer, model_type="Battle_Model", log=True):
     global training_battle_model, training_planning_model, optimizer_battle, optimizer_planning
 
     # Select the appropriate training model and lock
@@ -1943,285 +1965,63 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
             return
 
         if model_type == "Battle_Model":
-            # Existing Battle_Model training logic remains unchanged
-            frames_batch = []
-            position_batch = []
-            player_charge_seq_batch = []
-            enemy_charge_seq_batch = []
-            player_charge_batch = []
-            enemy_charge_batch = []
-            targets_batch = []
-            rewards_batch = []
-            previous_inputs_batch = []
-            health_memory_batch = []
-            player_chip_batch = []
-            enemy_chip_batch = []
+            print(f"Port {port}: Preparing Battle_Model data with {batch_size} data points.")
 
+            # Initialize dictionaries to collect batched inputs
+            batched_features = {}  # To collect feature tensors, keys are feature names
+            batched_actions = []   # To collect action tensors
+            batched_rewards = []   # To collect rewards
+
+            # For each data_point in data_buffer:
             for data_point in data_buffer:
-                # Process frames
-                preprocessed_frames = []
-                for img in data_point['frames']:
-                    img = img.convert('RGB')
-                    img = transform(img).unsqueeze(0).to(device)
-                    preprocessed_frames.append(img)
-                stacked_frames = torch.stack(preprocessed_frames, dim=2).squeeze(0)
-                frames_batch.append(stacked_frames)
+                # data_point contains the features (keys and tensors), 'action', and 'reward' (optional)
 
-                # Process player_chip
-                if data_point.get('player_chip') is not None:
-                    player_chip_tensor = process_chip(data_point['player_chip'])
-                    player_chip_batch.append(player_chip_tensor.squeeze(0))  # Remove batch dimension
-                else:
-                    player_chip_batch.append(torch.zeros(400, device=device))
+                # For the features:
+                for key, value in data_point.items():
+                    if key == 'action' or key == 'reward':
+                        continue  # Skip these keys
+                    if key not in batched_features:
+                        batched_features[key] = []
 
-                # Process enemy_chip
-                if data_point.get('enemy_chip') is not None:
-                    enemy_chip_tensor = process_chip(data_point['enemy_chip'])
-                    enemy_chip_batch.append(enemy_chip_tensor.squeeze(0))  # Remove batch dimension
-                else:
-                    enemy_chip_batch.append(torch.zeros(400, device=device))
+                    if isinstance(value, list):
+                        # For lists (e.g., 'player_chip_hand')
+                        # Concatenate tensors in the list along the feature dimension
+                        concatenated_value = torch.cat(value, dim=1)  # Shape: (1, total_feature_size)
+                        batched_features[key].append(concatenated_value)
+                    else:
+                        # Value is a tensor
+                        batched_features[key].append(value)
 
+                # For the action:
+                action_bitstring = data_point['action']  # Should be a 16-character string of '0's and '1's
+                # Convert to a tensor of shape (1, 16)
+                action_tensor = torch.tensor([[int(bit) for bit in action_bitstring]], dtype=torch.float32)
+                batched_actions.append(action_tensor)
 
-                # Positions
-                if data_point['position_tensor'] is not None:
-                    position_batch.append(data_point['position_tensor'].squeeze(0))
+                # For the reward:
+                reward = data_point.get('reward', 0.0)
+                batched_rewards.append(reward)
 
-                # Temporal charges
-                if data_point['player_charge_seq'] is not None:
-                    player_charge_seq = data_point['player_charge_seq'].squeeze(0)
-                    # Ensure the sequence is of length TEMPORAL_CHARGE by padding if necessary
-                    if player_charge_seq.size(0) < TEMPORAL_CHARGE:
-                        padding = torch.zeros(TEMPORAL_CHARGE - player_charge_seq.size(0), device=device)
-                        player_charge_seq = torch.cat((padding, player_charge_seq))
-                    player_charge_seq_batch.append(player_charge_seq)
-                else:
-                    # If not present, pad with zeros
-                    player_charge_seq_batch.append(torch.zeros(TEMPORAL_CHARGE, device=device))
+            # Now, convert batched_features to tensors
+            for key in batched_features:
+                batched_features[key] = torch.cat(batched_features[key], dim=0)  # Concatenate along batch dimension
 
-                # Previous inputs
-                if data_point.get('previous_inputs') is not None:
-                    previous_inputs_batch.append(data_point['previous_inputs'].squeeze(0))
-                else:
-                    previous_inputs_batch.append(torch.zeros(input_memory_size * 16, device=device))
+            # Convert batched_actions to tensor
+            batched_actions_tensor = torch.cat(batched_actions, dim=0)  # Shape: (batch_size, 16)
 
-                # Health memory
-                if data_point.get('health_memory') is not None:
-                    health_memory_batch.append(data_point['health_memory'].squeeze(0))
-                else:
-                    health_memory_batch.append(torch.zeros(2 * health_memory_size, device=device))
+            # Convert batched_rewards to tensor
+            batched_rewards_tensor = torch.tensor(batched_rewards, dtype=torch.float32)  # Shape: (batch_size,)
 
+            # Prepare batch_data dictionary
+            batch_data = batched_features  # Contains the feature tensors
+            batch_data['action'] = batched_actions_tensor
+            batch_data['reward'] = batched_rewards_tensor
 
-                if data_point['enemy_charge_seq'] is not None:
-                    enemy_charge_seq = data_point['enemy_charge_seq'].squeeze(0)
-                    # Ensure the sequence is of length TEMPORAL_CHARGE by padding if necessary
-                    if enemy_charge_seq.size(0) < TEMPORAL_CHARGE:
-                        padding = torch.zeros(TEMPORAL_CHARGE - enemy_charge_seq.size(0), device=device)
-                        enemy_charge_seq = torch.cat((padding, enemy_charge_seq))
-                    enemy_charge_seq_batch.append(enemy_charge_seq)
-                else:
-                    # If not present, pad with zeros
-                    enemy_charge_seq_batch.append(torch.zeros(TEMPORAL_CHARGE, device=device))
-
-                # Current charges
-                if data_point['current_player_charge'] is not None:
-                    player_charge_batch.append(
-                        torch.tensor(data_point['current_player_charge'], dtype=torch.float32, device=device)
-                    )
-                else:
-                    player_charge_batch.append(torch.tensor(0.0, dtype=torch.float32, device=device))
-
-                if data_point['current_enemy_charge'] is not None:
-                    enemy_charge_batch.append(
-                        torch.tensor(data_point['current_enemy_charge'], dtype=torch.float32, device=device)
-                    )
-                else:
-                    enemy_charge_batch.append(torch.tensor(0.0, dtype=torch.float32, device=device))
-
-                # Actions (targets)
-                action_binary = data_point['action']  # Binary string
-                action_tensor = torch.tensor([int(bit) for bit in action_binary], dtype=torch.float32, device=device)
-                targets_batch.append(action_tensor)
-
-                # Rewards
-                rewards_batch.append(data_point.get('reward', 0.0))
-
-            # Stack batches
-            frames_batch = torch.stack(frames_batch)  # Shape: (batch_size, 3, D, H, W)
-
-            if player_chip_batch:
-                player_chip_batch = torch.stack(player_chip_batch)  # Shape: (batch_size, 400)
-            else:
-                player_chip_batch = None
-
-            if enemy_chip_batch:
-                enemy_chip_batch = torch.stack(enemy_chip_batch)  # Shape: (batch_size, 400)
-            else:
-                enemy_chip_batch = None
-
-            if position_batch:
-                position_batch = torch.stack(position_batch)  # Shape: (batch_size, position_dim)
-            else:
-                position_batch = None
-                
-            if previous_inputs_batch:
-                previous_inputs_batch = torch.stack(previous_inputs_batch)  # Shape: (batch_size, input_memory_size * 16)
-            else:
-                previous_inputs_batch = None
-
-            if player_charge_seq_batch:
-                player_charge_seq_batch = torch.stack(player_charge_seq_batch)  # Shape: (batch_size, TEMPORAL_CHARGE)
-            else:
-                player_charge_seq_batch = torch.zeros(batch_size, TEMPORAL_CHARGE, device=device)
-
-            if enemy_charge_seq_batch:
-                enemy_charge_seq_batch = torch.stack(enemy_charge_seq_batch)  # Shape: (batch_size, TEMPORAL_CHARGE)
-            else:
-                enemy_charge_seq_batch = torch.zeros(batch_size, TEMPORAL_CHARGE, device=device)
-
-            if player_charge_batch:
-                player_charge_batch = torch.stack(player_charge_batch)  # Shape: (batch_size,)
-            else:
-                player_charge_batch = torch.zeros(batch_size, device=device)
-
-            if enemy_charge_batch:
-                enemy_charge_batch = torch.stack(enemy_charge_batch)  # Shape: (batch_size,)
-            else:
-                enemy_charge_batch = torch.zeros(batch_size, device=device)
-
-            if health_memory_batch:
-                health_memory_batch = torch.stack(health_memory_batch)  # Shape: (batch_size, 2 * health_memory_size)
-            else:
-                health_memory_batch = None
-
-            targets_batch = torch.stack(targets_batch)  # Shape: (batch_size, num_actions)
-
-            # Convert rewards to tensor
-            rewards_batch = torch.tensor(rewards_batch, dtype=torch.float32, device=device)  # Shape: (batch_size,)
-
-            # Zero gradients
-            selected_optimizer.zero_grad()
-
-            # Assertions to check for NaNs and Infs
-            assert not torch.isnan(frames_batch).any(), "frames_batch contains NaN"
-            assert not torch.isinf(frames_batch).any(), "frames_batch contains Inf"
-
-            if position_batch is not None:
-                assert not torch.isnan(position_batch).any(), "position_batch contains NaN"
-                assert not torch.isinf(position_batch).any(), "position_batch contains Inf"
-
-            assert not torch.isnan(player_charge_batch).any(), "player_charge_batch contains NaN"
-            assert not torch.isinf(player_charge_batch).any(), "player_charge_batch contains Inf"
-
-            assert not torch.isnan(enemy_charge_batch).any(), "enemy_charge_batch contains NaN"
-            assert not torch.isinf(enemy_charge_batch).any(), "enemy_charge_batch contains Inf"
-
-            assert not torch.isnan(player_charge_seq_batch).any(), "player_charge_seq_batch contains NaN"
-            assert not torch.isinf(player_charge_seq_batch).any(), "player_charge_seq_batch contains Inf"
-
-            assert not torch.isnan(enemy_charge_seq_batch).any(), "enemy_charge_seq_batch contains NaN"
-            assert not torch.isinf(enemy_charge_seq_batch).any(), "enemy_charge_seq_batch contains Inf"
-
-            # Save the batch here
-            batch_data = {
-                'frames': frames_batch,  # Shape: (batch_size, 3, D, H, W)
-                'position': position_batch,  # Shape: (batch_size, position_dim) or None
-                'player_charge_seq': player_charge_seq_batch,  # Shape: (batch_size, TEMPORAL_CHARGE)
-                'enemy_charge_seq': enemy_charge_seq_batch,  # Shape: (batch_size, TEMPORAL_CHARGE)
-                'player_charge': player_charge_batch,  # Shape: (batch_size,)
-                'enemy_charge': enemy_charge_batch,  # Shape: (batch_size,)
-                'previous_inputs': previous_inputs_batch,  # Shape: (batch_size, input_memory_size * 16) or None
-                'health_memory': health_memory_batch,  # Shape: (batch_size, 2 * health_memory_size) or None
-                'player_chip': player_chip_batch,  # Shape: (batch_size, 400) or None
-                'enemy_chip': enemy_chip_batch,  # Shape: (batch_size, 400) or None
-                'actions': targets_batch,  # Shape: (batch_size, num_actions)
-                'rewards': rewards_batch   # Shape: (batch_size,)
-            }
-
-            # Determine the training_data_dir based on model_type and port
-            if model_type == "Battle_Model":
-                save_batch_to_hdf5(batch_data, battle_data_dir, port, model_type)
-
-            # Forward pass
-            outputs = selected_model(
-                frames_batch,
-                position=position_batch,
-                player_charge=player_charge_batch,
-                enemy_charge=enemy_charge_batch,
-                player_charge_temporal=player_charge_seq_batch,
-                enemy_charge_temporal=enemy_charge_seq_batch,
-                previous_inputs=previous_inputs_batch,
-                health_memory=health_memory_batch,
-                player_chip=player_chip_batch,
-                enemy_chip=enemy_chip_batch
-            )
-
-            # Compute log probabilities directly
-            probs = torch.sigmoid(outputs)
-            epsilon = 1e-6  # For numerical stability
-            probs = torch.clamp(probs, epsilon, 1 - epsilon)
-            log_probs = targets_batch * torch.log(probs) + (1 - targets_batch) * torch.log(1 - probs)
-
-            # Compute the policy loss with the correct sign
-            policy_loss = - (log_probs.sum(dim=1) * rewards_batch).mean()
-
-            # Compute entropy
-            entropy = -(probs * torch.log(probs) + (1 - probs) * torch.log(1 - probs)).sum(dim=1)
-
-            entropy_coefficient = 0.05
-            total_loss = policy_loss - entropy_coefficient * entropy.mean()
-
-            # Backward pass
-            total_loss.backward()
-
-            # Assertions after computing outputs
-            assert not torch.isnan(outputs).any(), "Outputs contain NaN"
-            assert not torch.isinf(outputs).any(), "Outputs contain Inf"
-
-            # Assertions after computing log_probs
-            assert not torch.isnan(log_probs).any(), "log_probs contain NaN"
-            assert not torch.isinf(log_probs).any(), "log_probs contain Inf"
-
-            # Assertions after computing policy_loss
-            assert not torch.isnan(policy_loss).any(), "policy_loss contains NaN"
-            assert not torch.isinf(policy_loss).any(), "policy_loss contain Inf"
-
-            # Assertions after computing entropy
-            assert not torch.isnan(entropy).any(), "entropy contains NaN"
-            assert not torch.isinf(entropy).any(), "entropy contains Inf"
-
-            # Assertions after computing total_loss
-            assert not torch.isnan(total_loss).any(), "total_loss contains NaN"
-            assert not torch.isinf(total_loss).any(), "total_loss contain Inf"
-
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(selected_model.parameters(), max_norm=1.0)
-            selected_optimizer.step()
-
-            # Log metrics to W&B or console
-            total_loss_value = total_loss.item()
-            policy_loss_value = policy_loss.item()
-            entropy_value = entropy.mean().item()
-            print(f"{model_type} learning from Port {port}:\nLoss: {total_loss_value}")
-            # Uncomment and configure the following lines if using Weights & Biases (wandb)
-            # wandb.log({
-            #     f"{model_type}/total_loss": total_loss_value,
-            #     f"{model_type}/policy_loss": policy_loss_value,
-            #     f"{model_type}/entropy": entropy_value,
-            #     f"{model_type}/batch_size": batch_size,
-            #     f"{model_type}/port": port
-            # })
-
-            # selected_model.eval()  # Switch back to eval mode
-
-            # Log the inputs and outputs to the port for training
-            # This part may vary based on your specific implementation
-            # data_point = {
-            #     'inputs': inputs,
-            #     'cross_target': cross_target,
-            #     'target_list': target_list
-            # }
-            # planning_data_buffers[port].append(data_point)
-
+            # Now, save batch_data to HDF5
+            battle_data_dir = get_root_dir() + "/data/battle_data"
+            os.makedirs(battle_data_dir, exist_ok=True)
+            save_batch_to_hdf5(batch_data, battle_data_dir, port, model_type)
+            
         elif model_type == "Planning_Model":
             # Updated Training Logic for Planning_Model
             # Initialize lists to collect batched inputs and targets
@@ -2242,7 +2042,7 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
                 },
                 'health': [],
                 'current_crosses': [],
-                'available_crosses': [],
+                'used_crosses': [],
                 'beast_flags': []
             }
             cross_targets = []
@@ -2266,7 +2066,7 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
 
                 batched_inputs['health'].append(inputs['health'])
                 batched_inputs['current_crosses'].append(inputs['current_crosses'])
-                batched_inputs['available_crosses'].append(inputs['available_crosses'])
+                batched_inputs['used_crosses'].append(inputs['used_crosses'])
                 batched_inputs['beast_flags'].append(inputs['beast_flags'])
 
                 # Append targets and rewards
@@ -2283,7 +2083,7 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
                 batched_inputs['visible_chips'][key] = torch.cat(batched_inputs['visible_chips'][key], dim=0)
             batched_inputs['health'] = torch.cat(batched_inputs['health'], dim=0)  # Shape: (batch_size, 2)
             batched_inputs['current_crosses'] = torch.cat(batched_inputs['current_crosses'], dim=0)  # Shape: (batch_size, 52)
-            batched_inputs['available_crosses'] = torch.cat(batched_inputs['available_crosses'], dim=0)  # Shape: (batch_size, 60)
+            batched_inputs['used_crosses'] = torch.cat(batched_inputs['used_crosses'], dim=0)  # Shape: (batch_size, 60)
             batched_inputs['beast_flags'] = torch.cat(batched_inputs['beast_flags'], dim=0)  # Shape: (batch_size, 4)
 
             # Convert targets and rewards to tensors
@@ -2293,131 +2093,28 @@ def train_model_online(port, data_buffer, model_type="Battle_Model", log=True):
             
             cross_targets = cross_targets.clamp(max=6)
             target_lists = target_lists.clamp(max=9)
-
-            # Zero gradients
-            selected_optimizer.zero_grad()
-
-            # Assertions to check for NaNs and Infs in inputs
-            for key in batched_inputs:
-                if isinstance(batched_inputs[key], dict):
-                    for subkey in batched_inputs[key]:
-                        tensor = batched_inputs[key][subkey]
-                        assert not torch.isnan(tensor).any(), f"{key}[{subkey}] contains NaN"
-                        assert not torch.isinf(tensor).any(), f"{key}[{subkey}] contains Inf"
-                else:
-                    tensor = batched_inputs[key]
-                    assert not torch.isnan(tensor).any(), f"{key} contains NaN"
-                    assert not torch.isinf(tensor).any(), f"{key} contains Inf"
-
-            # Forward pass through the PlanningModel
-            cross_logits, chip_logits_list = selected_model(batched_inputs)  # cross_logits: (batch_size, 6), chip_logits_list: list of 5 tensors each (batch_size, 10)
-
-                
-            # Compute log probabilities for cross_selection
-            cross_log_probs = F.log_softmax(cross_logits, dim=-1)  # Shape: (batch_size, 6)
-            cross_selected_log_probs = cross_log_probs[torch.arange(batch_size), cross_targets]  # Shape: (batch_size,)
-
-            # Compute log probabilities for chip_selections
-            chip_log_probs = [F.log_softmax(chip_logits, dim=-1) for chip_logits in chip_logits_list]  # List of 5 tensors each (batch_size, 10)
-            chip_selected_log_probs = torch.stack([chip_log_probs[i][torch.arange(batch_size), target_lists[:, i]] for i in range(5)], dim=1)  # Shape: (batch_size, 5)
-
-            # Sum log_probs across all actions
-            total_log_probs = cross_selected_log_probs + chip_selected_log_probs.sum(dim=1)  # Shape: (batch_size,)
-
-            # Compute policy loss
-            policy_loss = - (total_log_probs * rewards_batch).mean()
-
-            # Optionally, compute entropy for regularization (optional for Planning_Model)
-            # Here, we can compute entropy for cross and chips separately
-            cross_entropy = -(F.softmax(cross_logits, dim=-1) * F.log_softmax(cross_logits, dim=-1)).sum(dim=1)  # Shape: (batch_size,)
-            chip_entropy = [-(F.softmax(chip_logits, dim=-1) * F.log_softmax(chip_logits, dim=-1)).sum(dim=1) for chip_logits in chip_logits_list]  # List of 5 tensors each (batch_size,)
-            total_entropy = cross_entropy + torch.stack(chip_entropy, dim=1).sum(dim=1)  # Shape: (batch_size,)
-
-            entropy_coefficient = 0.05
-            total_loss = policy_loss - entropy_coefficient * total_entropy.mean()
-
-            # Backward pass
-            total_loss.backward()
             
-            
-            if model_type == "Planning_Model":
-                # Construct the complete batch_data dictionary
-                batch_data = {
-                    'inputs_player_folder_chips_onehot': batched_inputs['player_folder']['chips_onehot'],
-                    'inputs_player_folder_codes_onehot': batched_inputs['player_folder']['codes_onehot'],
-                    'inputs_player_folder_flags': batched_inputs['player_folder']['flags'],
-                    'inputs_enemy_folder_chips_onehot': batched_inputs['enemy_folder']['chips_onehot'],
-                    'inputs_enemy_folder_codes_onehot': batched_inputs['enemy_folder']['codes_onehot'],
-                    'inputs_enemy_folder_flags': batched_inputs['enemy_folder']['flags'],
-                    'inputs_visible_chips_chips_onehot': batched_inputs['visible_chips']['chips_onehot'],
-                    'inputs_visible_chips_codes_onehot': batched_inputs['visible_chips']['codes_onehot'],
-                    'health': batched_inputs['health'],                # Top-level key without prefix
-                    'current_crosses': batched_inputs['current_crosses'],
-                    'available_crosses': batched_inputs['available_crosses'],
-                    'beast_flags': batched_inputs['beast_flags'],
-                    'cross_target': cross_targets,
-                    'target_list': target_lists,
-                    'reward': rewards_batch
-                }
+            # Construct the complete batch_data dictionary
+            batch_data = {
+                'inputs_player_folder_chips_onehot': batched_inputs['player_folder']['chips_onehot'],
+                'inputs_player_folder_codes_onehot': batched_inputs['player_folder']['codes_onehot'],
+                'inputs_player_folder_flags': batched_inputs['player_folder']['flags'],
+                'inputs_enemy_folder_chips_onehot': batched_inputs['enemy_folder']['chips_onehot'],
+                'inputs_enemy_folder_codes_onehot': batched_inputs['enemy_folder']['codes_onehot'],
+                'inputs_enemy_folder_flags': batched_inputs['enemy_folder']['flags'],
+                'inputs_visible_chips_chips_onehot': batched_inputs['visible_chips']['chips_onehot'],
+                'inputs_visible_chips_codes_onehot': batched_inputs['visible_chips']['codes_onehot'],
+                'health': batched_inputs['health'],                # Top-level key without prefix
+                'current_crosses': batched_inputs['current_crosses'],
+                'used_crosses': batched_inputs['used_crosses'],
+                'beast_flags': batched_inputs['beast_flags'],
+                'cross_target': cross_targets,
+                'target_list': target_lists,
+                'reward': rewards_batch
+            }
 
 
-                save_batch_to_hdf5(batch_data, planning_data_dir, port, model_type)
-
-            # Assertions after computing outputs
-            assert not torch.isnan(cross_logits).any(), "cross_logits contain NaN"
-            assert not torch.isinf(cross_logits).any(), "cross_logits contain Inf"
-
-            for i, chip_logits in enumerate(chip_logits_list):
-                assert not torch.isnan(chip_logits).any(), f"chip_logits[{i}] contain NaN"
-                assert not torch.isinf(chip_logits).any(), f"chip_logits[{i}] contain Inf"
-
-            # Assertions after computing log_probs
-            assert not torch.isnan(cross_log_probs).any(), "cross_log_probs contain NaN"
-            assert not torch.isinf(cross_log_probs).any(), "cross_log_probs contain Inf"
-            assert not torch.isnan(chip_selected_log_probs).any(), "chip_selected_log_probs contain NaN"
-            assert not torch.isinf(chip_selected_log_probs).any(), "chip_selected_log_probs contain Inf"
-
-            # Assertions after computing policy_loss
-            assert not torch.isnan(policy_loss).any(), "policy_loss contains NaN"
-            assert not torch.isinf(policy_loss).any(), "policy_loss contains Inf"
-
-            # Assertions after computing entropy
-            assert not torch.isnan(total_entropy).any(), "total_entropy contains NaN"
-            assert not torch.isinf(total_entropy).any(), "total_entropy contains Inf"
-
-            # Assertions after computing total_loss
-            assert not torch.isnan(total_loss).any(), "total_loss contains NaN"
-            assert not torch.isinf(total_loss).any(), "total_loss contain Inf"
-
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(selected_model.parameters(), max_norm=1.0)
-            selected_optimizer.step()
-
-            # Log metrics to W&B or console
-            total_loss_value = total_loss.item()
-            policy_loss_value = policy_loss.item()
-            entropy_value = total_entropy.mean().item()
-            print(f"{model_type} learning from Port {port}:\nLoss: {total_loss_value}")
-            # Uncomment and configure the following lines if using Weights & Biases (wandb)
-            # wandb.log({
-            #     f"{model_type}/total_loss": total_loss_value,
-            #     f"{model_type}/policy_loss": policy_loss_value,
-            #     f"{model_type}/entropy": entropy_value,
-            #     f"{model_type}/batch_size": batch_size,
-            #     f"{model_type}/port": port
-            # })
-
-            # Save the inputs and outputs for further training or analysis if needed
-            # This depends on your specific implementation
-            # Example:
-            # for i in range(batch_size):
-            #     data_point = {
-            #         'inputs': {key: batched_inputs[key][i].unsqueeze(0) for key in batched_inputs},
-            #         'cross_target': cross_targets[i].item(),
-            #         'target_list': target_lists[i].tolist(),
-            #         'reward': rewards_batch[i].item()
-            #     }
-            #     planning_data_buffers[port].append(data_point)
+            save_batch_to_hdf5(batch_data, planning_data_dir, port, model_type)
 
     return  # Function does not return anything by default
 
@@ -2456,7 +2153,7 @@ async def send_input_command(writer, command, port=0):
     except Exception as e:
         print(f"Failed to send command on port {port}: {e}")
         raise
-# Other functions remain the same (handle_connection, process_position, train_model_online, etc.)
+# Other functions remain the same (handle_connection, process_position, save_data_to_hdf5, etc.)
 async def handle_connection(instance, config):
     writer = None
     try:
@@ -2713,7 +2410,7 @@ async def main():
     connection_tasks = [asyncio.create_task(handle_connection(instance, config)) for instance in INSTANCES]
 
     # Start mouse monitoring task
-    monitor_task = asyncio.create_task(monitor_mouse_over_instances(INSTANCES))
+    # monitor_task = asyncio.create_task(monitor_mouse_over_instances(INSTANCES))
 
 
 
@@ -2796,7 +2493,7 @@ async def main():
 
      # Start the training thread... testing to see if we can do this after the instances have been closed
     
-    training_thread = threading.Thread(target=training_thread_function, daemon=True)
+    training_thread = threading.Thread(target=saving_thread_function, daemon=True)
     training_thread.start()
 
     # # # At the end, before exiting, signal the training thread to stop
@@ -2812,11 +2509,11 @@ async def main():
     # # --- End of Tally Display ---
 
     # # Cancel the monitor task gracefully
-    monitor_task.cancel()
-    try:
-        await monitor_task
-    except asyncio.CancelledError:
-        print("Mouse monitoring task cancelled.")
+    # monitor_task.cancel()
+    # try:
+    #     await monitor_task
+    # except asyncio.CancelledError:
+    #     print("Mouse monitoring task cancelled.")
 
     #log all the data from the planning buffers
     # for port, buffer in planning_data_buffers.items():
@@ -2948,63 +2645,6 @@ def save_batch_to_hdf5(batch_data, training_data_dir, port, model_type):
 import os
 import json
 from datetime import datetime
-
-def save_data_point(data_point, training_data_dir, port):
-    """
-    Saves a single data_point to the training_data_dir.
-    
-    Args:
-        data_point (dict): The data point to save.
-        training_data_dir (str): Directory where training data is stored.
-        port (int): Port number of the instance (used to organize data).
-    """
-    # Create a subdirectory for the port
-    port_dir = os.path.join(training_data_dir, f"port_{port}")
-    os.makedirs(port_dir, exist_ok=True)
-    
-    # Create a unique identifier for the data point
-    timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S%f')
-    data_point_id = f"data_{timestamp}"
-    
-    # Create a subdirectory for this data point
-    data_point_dir = os.path.join(port_dir, data_point_id)
-    os.makedirs(data_point_dir, exist_ok=True)
-    
-    # Save frames as image files
-    frame_paths = []
-    for i, frame in enumerate(data_point['frames']):
-        frame_filename = f"frame_{i:03d}.png"
-        frame_path = os.path.join(data_point_dir, frame_filename)
-        frame.save(frame_path)
-        frame_paths.append(frame_filename)
-    
-    # Prepare metadata
-    metadata = {
-        'frames': frame_paths,
-        'position_tensor': data_point['position_tensor'].cpu().numpy().tolist() if data_point['position_tensor'] is not None else None,
-        'inside_window': data_point['inside_window'].cpu().numpy().tolist() if data_point['inside_window'] is not None else None,
-        'player_health': data_point['player_health'].cpu().numpy().tolist() if data_point['player_health'] is not None else None,
-        'enemy_health': data_point['enemy_health'].cpu().numpy().tolist() if data_point['enemy_health'] is not None else None,
-        'player_charge_seq': data_point['player_charge_seq'].cpu().numpy().tolist() if data_point['player_charge_seq'] is not None else None,
-        'enemy_charge_seq': data_point['enemy_charge_seq'].cpu().numpy().tolist() if data_point['enemy_charge_seq'] is not None else None,
-        'current_player_charge': data_point['current_player_charge'],
-        'current_enemy_charge': data_point['current_enemy_charge'],
-        'previous_inputs': data_point['previous_inputs'].cpu().numpy().tolist() if data_point['previous_inputs'] is not None else None,
-        'health_memory': data_point['health_memory'].cpu().numpy().tolist() if data_point['health_memory'] is not None else None,
-        'player_chip': data_point['player_chip'].cpu().numpy().tolist() if data_point['player_chip'] is not None else None,
-        'enemy_chip': data_point['enemy_chip'].cpu().numpy().tolist() if data_point['enemy_chip'] is not None else None,
-        'action': data_point['action'],
-        'reward': data_point.get('reward', 0.0)
-    }
-    
-    # Save metadata as JSON
-    metadata_path = os.path.join(data_point_dir, "metadata.json")
-    with open(metadata_path, 'w') as f:
-        json.dump(metadata, f, indent=4)
-    
-    print(f"Port {port}: Saved data_point {data_point_id} to {data_point_dir}")
-
-
 def save_models():
     """
     Saves the Training Planning and Training Battle models to their respective checkpoint directories.
@@ -3051,40 +2691,6 @@ def save_models():
         manage_checkpoints(battle_checkpoint_dir)
     else:
         print("Training Battle Model is not loaded. Skipping save.")
-
-
-import gc
-
-# After your main training loops and before final_training_epoch()
-def clear_memory():
-    global data_buffers, planning_data_buffers, final_health, frame_buffers, frame_counters
-    global player_charge_sliding_windows, enemy_charge_sliding_windows
-    global training_battle_model, training_planning_model
-    global inference_battle_model, inference_planning_model
-
-    # Delete buffers and data structures
-    del data_buffers
-    del planning_data_buffers
-    del final_health
-    del frame_buffers
-    del frame_counters
-    del player_charge_sliding_windows
-    del enemy_charge_sliding_windows
-
-    # Delete models if they are not needed anymore or to reset their memory
-    # If you need them later, consider keeping them; otherwise, delete to free memory
-    # del training_battle_model
-    # del training_planning_model
-    # del inference_battle_model
-    # del inference_planning_model
-
-    # Force garbage collection
-    gc.collect()
-
-    # Clear CUDA cache
-    torch.cuda.empty_cache()
-
-    print("Cleared memory and CUDA cache.")
 
 
 if __name__ == '__main__':

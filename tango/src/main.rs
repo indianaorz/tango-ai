@@ -1,6 +1,6 @@
 #![windows_subsystem = "windows"]
 
-use global::{get_all_player_chip_folders, get_frame_count, get_player_charge, get_selected_menu_index};
+use global::{get_all_player_chip_folders, get_enemy_navi_cust_parts, get_frame_count, get_player_charge, get_player_navi_cust_parts, get_selected_menu_index};
 use std::io::Write;
 use std::sync::Arc;
 use tango_pvp::replay;
@@ -50,6 +50,8 @@ use crate::global::{
     get_enemy_selected_chip, get_inside_cross_window, get_is_player_inside_window, get_local_input,
     get_player_emotion_state, get_player_game_emotion_state, get_player_health, get_player_position,
     get_player_reg_chip, get_player_selected_chip, get_punishments, get_rewards, get_screen_image,
+    get_all_grid_owner_states,get_all_grid_states,get_player_grid_position, get_enemy_grid_position,get_is_offerer,
+    get_cust_gage,
     get_selected_chip_index, get_selected_cross_index, get_winner, RewardPunishment, SCREEN_IMAGE,
 };
 use crate::global::{PUNISHMENTS, REWARDS}; // Import the global variables
@@ -874,6 +876,14 @@ struct ScreenImageDetails {
     enemy_tag_chips: Vec<u16>,
     player_reg_chip: u16,
     enemy_reg_chip: u16,
+    grid_state : Vec<u16>,
+    grid_owner_state : Vec<u16>,
+    player_grid_position: Vec<u16>,
+    enemy_grid_position: Vec<u16>,
+    is_offerer: u16,
+    cust_gage: u16,
+    own_navi_cust: Vec<u16>,
+    enemy_navi_cust: Vec<u16>,
 }
 use egui::Color32;
 use image::ImageEncoder;
@@ -968,6 +978,15 @@ async fn handle_tcp_client(
                                                     enemy_tag_chips: get_all_enemy_tag_folders(),
                                                     player_reg_chip: get_player_reg_chip(),
                                                     enemy_reg_chip: get_enemy_reg_chip(),
+                                                    grid_state: get_all_grid_states(),
+                                                    grid_owner_state: get_all_grid_owner_states(),
+                                                    player_grid_position: get_player_grid_position(),
+                                                    enemy_grid_position: get_enemy_grid_position(),
+                                                    is_offerer: get_is_offerer(),
+                                                    cust_gage: get_cust_gage(),
+                                                    own_navi_cust: get_player_navi_cust_parts().unwrap_or_default().into_iter().map(|x| x as u16).collect(),
+                                                    enemy_navi_cust: get_enemy_navi_cust_parts().unwrap_or_default().into_iter().map(|x| x as u16).collect(),
+                                                    
                                                 };
                                                 clear_local_input();
                                                 clear_rewards();

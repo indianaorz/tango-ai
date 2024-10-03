@@ -1,10 +1,9 @@
 use crate::global::{
-    set_beast_out_selectable, set_chip_code, set_chip_count_visible, set_chip_selected_count, set_chip_slot,
-    set_enemy_game_emotion_state, set_inside_cross_window, set_player_chip_folder, set_player_emotion_state,
-    set_player_game_emotion_state, set_selected_chip_index, set_selected_cross_index, set_selected_menu_index,
+    set_beast_out_selectable, set_chip_code, set_chip_count_visible, set_chip_selected_count, set_chip_slot, set_cust_gage, set_enemy_game_emotion_state, set_inside_cross_window, set_is_offerer, set_player_chip_folder, set_player_emotion_state, set_player_game_emotion_state, set_selected_chip_index, set_selected_cross_index, set_selected_menu_index
 };
 use crate::{audio, config, game, gui, net, rom, stats, video};
 use egui::debug_text::print;
+use mgba::input::keys::L;
 use parking_lot::Mutex;
 use rand::SeedableRng;
 use sha2::digest::consts::True;
@@ -25,11 +24,12 @@ pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0) * 8.0;
 // session.rs
 use crate::global::{
     add_punishment, add_reward, clear_punishments, clear_rewards, get_frame_count, get_player_health_index,
-    set_enemy_charge, set_enemy_chip_folder, set_enemy_code_folder, set_enemy_health, set_enemy_position,
-    set_enemy_reg_chip, set_enemy_selected_chip, set_enemy_tag_folder, set_frame_count, set_is_player_inside_window,
-    set_local_input, set_player_charge, set_player_code_folder, set_player_health, set_player_health_index,
-    set_player_position, set_player_reg_chip, set_player_selected_chip, set_player_tag_folder, set_winner,
-    RewardPunishment,
+    set_enemy_charge, set_enemy_chip_folder, set_enemy_code_folder, set_enemy_grid_position, set_enemy_health,
+    set_enemy_position, set_enemy_reg_chip, set_enemy_selected_chip, set_enemy_tag_folder, set_frame_count,
+    set_grid_owner_state, set_grid_state, set_is_player_inside_window, set_local_input, set_player_charge,
+    set_player_code_folder, set_player_grid_position, set_player_health, set_player_health_index, set_player_position,
+    set_enemy_navi_cust_parts, set_player_navi_cust_parts,
+    set_player_reg_chip, set_player_selected_chip, set_player_tag_folder, set_winner, RewardPunishment,
 };
 use crate::global::{PUNISHMENTS, REWARDS}; // Import the global variables
 
@@ -202,7 +202,7 @@ fn extract_reg_index(save: &dyn Save, assets: &dyn Assets) -> Result<usize, Box<
 
     Ok(reg_index)
 }
-
+use std::sync::atomic::AtomicU8;
 impl Session {
     pub fn new_pvp(
         config: std::sync::Arc<parking_lot::RwLock<config::Config>>,
@@ -229,6 +229,12 @@ impl Session {
         match_type: (u8, u8),
         rng_seed: [u8; 16],
     ) -> Result<Self, anyhow::Error> {
+        // Step 1: Initialize a shared variable for local_player_index
+        let local_player_index_shared = Arc::new(AtomicU8::new(0));
+
+        // Clone it to move into the closure
+        let local_player_index_clone = Arc::clone(&local_player_index_shared);
+
         let mut core = mgba::core::Core::new_gba("tango")?;
         core.enable_video_buffer();
 
@@ -273,6 +279,10 @@ impl Session {
         let sender = std::sync::Arc::new(tokio::sync::Mutex::new(sender));
         let latency_counter = std::sync::Arc::new(tokio::sync::Mutex::new(crate::stats::LatencyCounter::new(5)));
 
+        // Create a shared variable for local_player_index
+        let local_player_index_arc = Arc::new(AtomicU8::new(0));
+        let local_player_index_for_match = Arc::clone(&local_player_index_arc);
+
         let cancellation_token = tokio_util::sync::CancellationToken::new();
         let match_ = match_.clone();
         *match_.try_lock().unwrap() = Some({
@@ -297,6 +307,9 @@ impl Session {
                 match_type,
                 config.input_delay,
                 move |round_number, local_player_index| {
+                    // Step 3: Update the shared local_player_index
+                    local_player_index_for_match.store(local_player_index, Ordering::SeqCst);
+
                     const TIME_DESCRIPTION: &[time::format_description::FormatItem<'_>] = time::macros::format_description!(
                         "[year padding:zero][month padding:zero repr:numerical][day padding:zero][hour padding:zero][minute padding:zero][second padding:zero]"
                     );
@@ -508,74 +521,72 @@ impl Session {
         }
 
         // Add these as state variables or within a struct if needed.
-        static mut LAST_PLAYER_HEALTH: u16 = 0;
-        static mut LAST_OPPONENT_HEALTH: u16 = 0;
 
-        fn display_health_state(core: &mut CoreMutRef, is_offerer: bool) {
-            // Define addresses for potential health values
-            let server_health_address = 0x0203A9D4; // Server side health
-            let client_health_address = 0x0203AAAC; // Client side health
-            let segment = -1; // Default segment; adjust if necessary
+        // fn display_health_state(core: &mut CoreMutRef, is_offerer: bool) {
+        //     // Define addresses for potential health values
+        //     let server_health_address = 0x0203A9D4; // Server side health
+        //     let client_health_address = 0x0203AAAC; // Client side health
+        //     let segment = -1; // Default segment; adjust if necessary
 
-            // Determine labels based on whether the instance is the server or the client
-            let (player_label, opponent_label, player_health_address, opponent_health_address) = if is_offerer {
-                // Server: Player is at 0x0203A9D4, Opponent is at 0x0203AAAC
-                (
-                    "Player Health",
-                    "Opponent Health",
-                    server_health_address,
-                    client_health_address,
-                )
-            } else {
-                // Client: Opponent is at 0x0203A9D4, Player is at 0x0203AAAC
-                (
-                    "Opponent Health",
-                    "Player Health",
-                    client_health_address,
-                    server_health_address,
-                )
-            };
+        //     // Determine labels based on whether the instance is the server or the client
+        //     let (player_label, opponent_label, player_health_address, opponent_health_address) = if is_offerer {
+        //         // Server: Player is at 0x0203A9D4, Opponent is at 0x0203AAAC
+        //         (
+        //             "Player Health",
+        //             "Opponent Health",
+        //             server_health_address,
+        //             client_health_address,
+        //         )
+        //     } else {
+        //         // Client: Opponent is at 0x0203A9D4, Player is at 0x0203AAAC
+        //         (
+        //             "Opponent Health",
+        //             "Player Health",
+        //             client_health_address,
+        //             server_health_address,
+        //         )
+        //     };
 
-            // Read current health values
-            let current_player_health = core.raw_read_16(player_health_address, segment);
-            let current_opponent_health = core.raw_read_16(opponent_health_address, segment);
+        //     // Read current health values
+        //     let current_player_health = core.raw_read_16(player_health_address, segment);
+        //     let current_opponent_health = core.raw_read_16(opponent_health_address, segment);
 
-            // Safety: Ensure safe access to the static variables
-            unsafe {
-                // Check if player's health has decreased (punishment)
-                if current_player_health < LAST_PLAYER_HEALTH {
-                    let damage = LAST_PLAYER_HEALTH - current_player_health;
-                    // Record punishment in global PUNISHMENTS
-                    add_punishment(RewardPunishment { damage });
-                }
+        //     // Safety: Ensure safe access to the static variables
+        //     unsafe {
+        //         // Check if player's health has decreased (punishment)
+        //         if current_player_health < LAST_PLAYER_HEALTH {
+        //             let damage = LAST_PLAYER_HEALTH - current_player_health;
+        //             // Record punishment in global PUNISHMENTS
+        //             add_punishment(RewardPunishment { damage });
+        //         }
 
-                // Check if opponent's health has decreased (reward)
-                if current_opponent_health < LAST_OPPONENT_HEALTH {
-                    let damage = LAST_OPPONENT_HEALTH - current_opponent_health;
-                    // Record reward in global REWARDS
-                    add_reward(RewardPunishment { damage });
-                }
+        //         // Check if opponent's health has decreased (reward)
+        //         if current_opponent_health < LAST_OPPONENT_HEALTH {
+        //             let damage = LAST_OPPONENT_HEALTH - current_opponent_health;
+        //             // Record reward in global REWARDS
+        //             add_reward(RewardPunishment { damage });
+        //         }
 
-                // Update last known health values
-                LAST_PLAYER_HEALTH = current_player_health;
-                LAST_OPPONENT_HEALTH = current_opponent_health;
+        //         // Update last known health values
+        //         LAST_PLAYER_HEALTH = current_player_health;
+        //         LAST_OPPONENT_HEALTH = current_opponent_health;
 
-                set_player_health(current_player_health);
-                set_enemy_health(current_opponent_health);
-                //display player and enemy health
-                //display if is player
-                // println!("{}: {}", player_label, current_player_health);
-                // println!("{}: {}", opponent_label, current_opponent_health);
+        //         set_player_health(current_player_health);
+        //         set_enemy_health(current_opponent_health);
+        //         //display player and enemy health
+        //         //display if is player
+        //         // println!("{}: {}", player_label, current_player_health);
+        //         // println!("{}: {}", opponent_label, current_opponent_health);
 
-                if (current_player_health == 0 && !current_opponent_health == 0
-                    || !current_player_health == 0 && current_opponent_health == 0)
-                {
-                    //close the program
-                    // Exit the application after sending the winner message
-                    std::process::exit(0);
-                }
-            }
-        }
+        //         if (current_player_health == 0 && !current_opponent_health == 0
+        //             || !current_player_health == 0 && current_opponent_health == 0)
+        //         {
+        //             //close the program
+        //             // Exit the application after sending the winner message
+        //             std::process::exit(0);
+        //         }
+        //     }
+        // }
 
         // Shared storage for initial boolean states
         static INITIAL_BOOLEAN_STATES: LazyLock<Mutex<HashMap<u32, u8>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -595,8 +606,8 @@ impl Session {
         let window_state_addresses = Arc::new(window_state_addresses);
 
         // Shared storage for boolean addresses
-        // let boolean_addresses = Arc::new(Mutex::new(Vec::new()));
-        // let boolean_addresses_clone = Arc::clone(&boolean_addresses);
+        let boolean_addresses = Arc::new(Mutex::new(Vec::new()));
+        let boolean_addresses_clone = Arc::clone(&boolean_addresses);
         // Initialize toggle state variables for Command 4
         let logging_enabled = Arc::new(AtomicBool::new(false));
         let command4_prev_state = Arc::new(AtomicBool::new(false));
@@ -604,6 +615,19 @@ impl Session {
         // // Clone these for use inside the closure
         let logging_enabled_clone = Arc::clone(&logging_enabled);
         let command4_prev_state_clone = Arc::clone(&command4_prev_state);
+
+        let commands_enabled = Arc::new(AtomicBool::new(true));
+        let local_player_index_for_frame = Arc::clone(&local_player_index_arc);
+        let mut is_left_player = -1;
+
+
+        // Wrap the health variables in Arc<Mutex<T>>
+        let last_player_health = Arc::new(Mutex::new(0u16));
+        let last_opponent_health = Arc::new(Mutex::new(0u16));
+
+        // Clone the Arc instances to pass into the closure
+        let last_player_health_clone = Arc::clone(&last_player_health);
+        let last_opponent_health_clone = Arc::clone(&last_opponent_health);
 
         // Set the frame callback
         thread.set_frame_callback({
@@ -613,7 +637,16 @@ impl Session {
             let emu_tps_counter = emu_tps_counter.clone();
             let log_file = log_file_clone.clone(); // Clone the Arc for use inside the closure
                                                    // let boolean_addresses = boolean_addresses_clone.clone();
+            let last_player_health = last_player_health_clone.clone();
+            let last_opponent_health = last_opponent_health_clone.clone();
+
             move |mut core, video_buffer, mut thread_handle| {
+                let mut is_left_player = is_left_player; // Create a mutable copy of is_left_player
+                
+                // Lock the Mutex to access and modify the health values
+                let mut last_player_health = last_player_health.lock();
+                let mut last_opponent_health = last_opponent_health.lock();
+
                 let mut vbuf = vbuf.lock();
                 vbuf.copy_from_slice(video_buffer);
                 video::fix_vbuf_alpha(&mut vbuf);
@@ -632,18 +665,24 @@ impl Session {
                 //player charge state 020369AC
                 //player charge state 020369B0
                 //player charge state 020369BB
+                // Access the local_player_index
+                let local_player_index = local_player_index_for_frame.load(Ordering::SeqCst);
 
-                if is_offerer {
-                    // println!("First Chip P1: {}", core.raw_read_16(0x203A9DA, -1));
-                    set_player_selected_chip(core.raw_read_16(0x203A9DA, -1));
-                    // println!("First Chip P2: {}", core.raw_read_16(0x203AAB2, -1));
-                    set_enemy_selected_chip(core.raw_read_16(0x203AAB2, -1));
-                } else {
-                    // println!("First Chip P2: {}", core.raw_read_16(0x203A9DA, -1));
-                    set_enemy_selected_chip(core.raw_read_16(0x203A9DA, -1));
-                    // println!("First Chip P1: {}", core.raw_read_16(0x203AAB2, -1));
-                    set_player_selected_chip(core.raw_read_16(0x203AAB2, -1));
-                }
+                //let is_offerer = local_player_index == 1;
+
+                set_is_offerer(local_player_index as u16);
+                // if is_offerer {
+                // } else {
+                //     // println!("First Chip P2: {}", core.raw_read_16(0x203A9DA, -1));
+                //     set_enemy_selected_chip(core.raw_read_16(0x203A9DA, -1));
+                //     // println!("First Chip P1: {}", core.raw_read_16(0x203AAB2, -1));
+                //     set_player_selected_chip(core.raw_read_16(0x203AAB2, -1));
+
+                //     set_enemy_charge(core.raw_read_8(0x0203409D, -1) as u16);
+                //     set_player_charge(core.raw_read_8(0x0203419D, -1) as u16);
+                // }
+
+                set_cust_gage(core.raw_read_8(0x20352A1, -1) as u16);
 
                 // //search all raw 16 values for ones that equal 196
                 // let found_addresses = search_all_specific_values(&mut core);
@@ -654,26 +693,41 @@ impl Session {
                 // }
 
                 // println!("Enemy Charge state: {}", core.raw_read_8(0x02036A10, -1));
-                // println!("Player Charge state: {}", core.raw_read_8(0x02036948, -1));
+                // println!("Player Charge state: {}", core.raw_read_8(0x0203419D, -1));
                 //set enemy and player charge globally
-                set_player_charge(core.raw_read_8(0x02036948, -1) as u16);
-                set_enemy_charge(core.raw_read_8(0x02036A10, -1) as u16);
 
                 set_player_emotion_state(core.raw_read_8(0x020352CC, -1) as u16);
                 // println!("Player emotion state: {}", core.raw_read_8(0x020352CC, -1) as u16);
 
+                // 0203A9E6 = 100 -> 20
+                // 0203AA4C = 20 -> 140
+
+                // 0203AB24 = 20 -> 140 (for other player)
+
                 // set_player_game_emotion_state(core.raw_read_8(0x02035290, -1) as u16);
-                if (is_offerer) {
-                    set_player_game_emotion_state(core.raw_read_8(0x0203CE90, -1) as u16);
-                    set_enemy_game_emotion_state(core.raw_read_8(0x0203CE2C, -1) as u16);
-                    // println!("Player game emotion state: {}", core.raw_read_8(0x0203CE90, -1) as u16);
-                    // println!("P2 emotion state: {}", core.raw_read_8(0x0203CE2C, -1) as u16);
-                } else {
-                    set_player_game_emotion_state(core.raw_read_8(0x0203CE2C, -1) as u16);
-                    set_enemy_game_emotion_state(core.raw_read_8(0x0203CE90, -1) as u16);
-                    // println!("Player game emotion state: {}", core.raw_read_8(0x0203CE2C, -1) as u16);
-                    // println!("P2 emotion state: {}", core.raw_read_8(0x0203CE90, -1) as u16);
-                }
+
+                // 2034136 x
+                // 2034137 y
+                // 2034236 x2
+                // 2034236 y2
+                //position of player 1
+                let player_grid_positionX1 = core.raw_read_8(0x0203AA9C, -1);
+                let player_grid_positionY1 = core.raw_read_8(0x0203AA9D, -1);
+                // let player_grid_positionX1 = core.raw_read_8(0x02034136, -1);
+                // let player_grid_positionY1 = core.raw_read_8(0x02034137, -1);
+                // println!("Player grid position1: {}, {}", player_grid_positionX1, player_grid_positionY1);
+
+                //position of player 2
+                let player_grid_positionX2 = core.raw_read_8(0x020384FA, -1);
+                let player_grid_positionY2 = core.raw_read_8(0x020384FB, -1);
+                // let player_grid_positionX2 = core.raw_read_8(0x02034236, -1);
+                // let player_grid_positionY2 = core.raw_read_8(0x02034237, -1);
+                // println!("Player grid position2: {}, {}", player_grid_positionX2, player_grid_positionY2);
+
+                set_player_grid_position((player_grid_positionX2 as u16, player_grid_positionY2 as u16));
+                set_enemy_grid_position((player_grid_positionX1 as u16, player_grid_positionY1 as u16));
+
+                
                 // println!("Player game emotion state: {}", core.raw_read_8(0x02035290, -1) as u16);
                 // println!("P2 emotion state: {}", core.raw_read_8(0x0203CE2C, -1) as u16);
                 //set enemy emotion state
@@ -684,41 +738,36 @@ impl Session {
                 set_selected_cross_index(core.raw_read_8(0x020364DB, -1) as u16);
                 // println!("Selected cross index: {}", core.raw_read_8(0x020364DB, -1) as u16);
 
-
                 //assign to 3x6 grid
                 let grid_addresses = [
-                    0x02039C06, 0x02039C26, 0x02039C46, 0x02039C66, 0x02039C86, 0x02039CA6,
-                    0x02039D06, 0x02039D26, 0x02039D46, 0x02039D66, 0x02039D86, 0x02039DA6,
-                    0x02039E06, 0x02039E26, 0x02039E46, 0x02039E66, 0x02039E86, 0x02039EA6,
+                    0x02039C06, 0x02039C26, 0x02039C46, 0x02039C66, 0x02039C86, 0x02039CA6, 0x02039D06, 0x02039D26,
+                    0x02039D46, 0x02039D66, 0x02039D86, 0x02039DA6, 0x02039E06, 0x02039E26, 0x02039E46, 0x02039E66,
+                    0x02039E86, 0x02039EA6,
                 ];
                 let grid_owner_addresses = [
-                    0x02039C07, 0x02039C27, 0x02039C47, 0x02039C67, 0x02039C87, 0x02039CA7,
-                    0x02039D07, 0x02039D27, 0x02039D47, 0x02039D67, 0x02039D87, 0x02039DA7,
-                    0x02039E07, 0x02039E27, 0x02039E47, 0x02039E67, 0x02039E87, 0x02039EA7,
+                    0x02039C07, 0x02039C27, 0x02039C47, 0x02039C67, 0x02039C87, 0x02039CA7, 0x02039D07, 0x02039D27,
+                    0x02039D47, 0x02039D67, 0x02039D87, 0x02039DA7, 0x02039E07, 0x02039E27, 0x02039E47, 0x02039E67,
+                    0x02039E87, 0x02039EA7,
                 ];
 
                 //display values of grid
+                let mut i = 0;
                 for address in &grid_addresses {
                     let current_value = core.raw_read_8(*address, -1);
+                    set_grid_state(i, current_value as u16);
+                    i += 1;
                     // println!("0x{:08X},{}", address, current_value);
                 }
 
                 //display values of grid
+                i = 0;
                 for address in &grid_owner_addresses {
                     let current_value = core.raw_read_8(*address, -1);
+
+                    set_grid_owner_state(i, current_value as u16);
+                    i += 1;
                     // println!("0x{:08X},{}", address, current_value);
                 }
-
-                //position of player 1
-                let player_grid_positionX1 = core.raw_read_8(0x0203AA9C, -1);
-                let player_grid_positionY1 = core.raw_read_8(0x0203AA9D, -1);
-                // println!("Player grid position1: {}, {}", player_grid_positionX1, player_grid_positionY1);
-
-
-                //position of player 2
-                let player_grid_positionX2 = core.raw_read_8(0x020384FA, -1);
-                let player_grid_positionY2 = core.raw_read_8(0x020384FB, -1);
-                // println!("Player grid position2: {}, {}", player_grid_positionX2, player_grid_positionY2);
 
                 for i in 0..16 {
                     let address = 0x0203CDB0 + i as u32;
@@ -765,7 +814,7 @@ impl Session {
                     //close application
                     std::process::exit(0);
                 } else {
-                    display_health_state(&mut core, is_offerer);
+                    // display_health_state(&mut core, is_offerer);
                     let core_ref = &mut core;
 
                     // **Determine and Log the Assumed Window State for Each Address**
@@ -796,173 +845,287 @@ impl Session {
 
                     let player_x = core_ref.raw_read_16(0x0203AA4C, -1);
                     let player_y = core_ref.raw_read_16(0x0203A9C4, -1);
-                    let enemy_x = core_ref.raw_read_16(0x02036A8C, -1);
+                    let enemy_x = core_ref.raw_read_16(0x0203AB24, -1);
                     let enemy_y = core_ref.raw_read_16(0x0203AA9C, -1);
+
+                    if is_left_player == -1 && player_x != 0 && player_y != 0 && enemy_x != 0 && enemy_y != 0 {
+                        if player_x < enemy_x {
+                            is_left_player = 1;
+                        } else {
+                            is_left_player = 0;
+                        }
+                    }
                     // println!("Enemy x: {}, Enemy y: {}", enemy_x, enemy_y);
                     // println!("Player x: {}, Player y: {}", player_x, player_y);
 
-                    set_enemy_position((enemy_x, enemy_y));
-                    set_player_position((player_x, player_y));
+                    let server_health_address = 0x0203A9D4; // Server side health
+                    let client_health_address = 0x0203AAAC; // Client side health
 
-                    // let joyflags_val = joyflags.load(std::sync::atomic::Ordering::Relaxed);
-                    // // Command 1 (Set all values, triggered by 0x00000200)
-                    // if joyflags_val & 0x00000200 != 0 {
-                    //     println!("Set Command - Populating boolean addresses");
-                    //     let mut addresses = boolean_addresses.lock();
-                    //     let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
+                    if local_player_index == 1{
+                        set_player_game_emotion_state(core_ref.raw_read_8(0x0203CE90, -1) as u16);
+                        set_enemy_game_emotion_state(core_ref.raw_read_8(0x0203CE2C, -1) as u16);
+                    }
+                    else{
+                        set_player_game_emotion_state(core_ref.raw_read_8(0x0203CE2C, -1) as u16);
+                        set_enemy_game_emotion_state(core_ref.raw_read_8(0x0203CE90, -1) as u16);
+                    }
+                    
+                    if is_left_player == 1 {
 
-                    //     // Clear previous boolean addresses and states
-                    //     addresses.clear();
-                    //     initial_states.clear();
 
-                    //     // Search for boolean values in memory and populate boolean_addresses
-                    //     let found_addresses = search_all_boolean_values(core_ref);
-                    //     addresses.extend(found_addresses);
+                        set_enemy_position((enemy_x, enemy_y));
+                        set_player_position((player_x, player_y));
 
-                    //     // Store the initial values of those addresses in INITIAL_BOOLEAN_STATES
-                    //     for &address in addresses.iter() {
-                    //         //only get values that are 0
+                        // println!("First Chip P1: {}", core.raw_read_16(0x203A9DA, -1));
+                        set_player_selected_chip(core_ref.raw_read_16(0x203A9DA, -1));
+                        // println!("First Chip P2: {}", core.raw_read_16(0x203AAB2, -1));
+                        set_enemy_selected_chip(core_ref.raw_read_16(0x203AAB2, -1));
 
-                    //         let current_value = core_ref.raw_read_8(address, -1);
-                    //         // if current_value == 0 {
-                    //             initial_states.insert(address, current_value);
-                    //         // }
-                    //         println!("Captured Address: 0x{:08X}, Initial Value: {}", address, current_value);
-                    //     }
+                        set_player_charge(core_ref.raw_read_8(0x0203409D, -1) as u16);
+                        set_enemy_charge(core_ref.raw_read_8(0x0203419D, -1) as u16);
 
-                    //     println!("Set Command - Populated {} boolean addresses.", addresses.len());
-                    // }
 
-                    // // Command 2 (Prune the list, triggered by 0x00000100)
-                    // if joyflags_val & 0x00000100 != 0 {
-                    //     println!("Prune Command - Pruning boolean addresses");
-                    //     let mut addresses = boolean_addresses.lock();
-                    //     let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
-                    //     addresses.retain(|&address| {
-                    //         let current_value = core_ref.raw_read_8(address, -1);
-                    //         if let Some(&initial_value) = initial_states.get(&address) {
-                    //             if current_value != initial_value {
-                    //                 // Value has changed, prune it from the list
-                    //                 println!(
-                    //                     "Pruned Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
-                    //                     address, initial_value, current_value
-                    //                 );
-                    //                 return false;
-                    //             }
-                    //         }
-                    //         true
-                    //     });
 
-                    //     println!("Prune Command - Remaining {} boolean addresses.", addresses.len());
-                    // }
 
-                    // // Command 2 (Prune the list, triggered by 0x00000100)
-                    // if joyflags_val & 0x00000002 != 0 {
-                    //     println!("Prune Command - Pruning same boolean addresses");
-                    //     let mut addresses = boolean_addresses.lock();
-                    //     let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
-                    //     addresses.retain(|&address| {
-                    //         let current_value = core_ref.raw_read_8(address, -1);
-                    //         if let Some(&initial_value) = initial_states.get(&address) {
-                    //             if current_value == initial_value {
-                    //                 // Value has changed, prune it from the list
-                    //                 println!(
-                    //                     "Pruned Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
-                    //                     address, initial_value, current_value
-                    //                 );
-                    //                 return false;
-                    //             }
-                    //         }
-                    //         true
-                    //     });
+                        let current_player_health = core_ref.raw_read_16(server_health_address, -1);
+                        let current_opponent_health = core_ref.raw_read_16(client_health_address, -1);
 
-                    //     println!("Prune Command - Remaining {} boolean addresses.", addresses.len());
-                    // }
+                        // Check if player's health has decreased (punishment)
+                        if current_player_health != *last_player_health && *last_player_health != 0 {
+                            let damage = *last_player_health - current_player_health;
+                            // Record punishment in global PUNISHMENTS
+                            add_punishment(RewardPunishment { damage });
+                        }
 
-                    // // Command 3 (Compare the current values, triggered by 0x00000008)
-                    // if joyflags_val & 0x00000008 != 0 {
-                    //     println!("Compare Command - Checking different current values");
-                    //     let addresses = boolean_addresses.lock();
-                    //     let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
+                        // Check if opponent's health has decreased (reward)
+                        if current_opponent_health != *last_opponent_health && *last_opponent_health != 0 {
+                            let damage = *last_opponent_health- current_opponent_health;
+                            // Record reward in global REWARDS
+                            add_reward(RewardPunishment { damage });
+                        }
 
-                    //     for &address in addresses.iter() {
-                    //         let current_value = core_ref.raw_read_8(address, -1);
-                    //         //update initial value to the current value
-                    //         if let Some(initial_value) = initial_states.get_mut(&address) {
-                    //             *initial_value = current_value;
-                    //         }
-                    //         // if let Some(&initial_value) = initial_states.get(&address) {
-                    //         //     // Only display if the current value has changed compared to the initial value
-                    //         //     if current_value != initial_value {
-                    //         //         println!(
-                    //         //             "Compare Command - Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
-                    //         //             address, initial_value, current_value
-                    //         //         );
-                    //         //     }
-                    //         // }
-                    //     }
-                    // }
-                    // // Command 3 (Compare the current values, triggered by 0x00000008)
-                    // // if joyflags_val & 0x00000001 != 0 {
-                    // //    // Lock the boolean_addresses and log_file for safe access
-                    // //     let addresses = boolean_addresses.lock();
-                    // //     let mut file = log_file.lock();
+                        // Update last known health values
+                        *last_player_health = current_player_health;
+                        *last_opponent_health = current_opponent_health;
 
-                    // //     // Iterate over each address and write to the file
-                    // //     for &address in addresses.iter() {
-                    // //         if let Err(e) = writeln!(file, "0x{:08X}", address) {
-                    // //             eprintln!("Failed to write address 0x{:08X} to log file: {}", address, e);
-                    // //         }
-                    // //     }
+                        set_player_health(current_player_health);
+                        set_enemy_health(current_opponent_health);
 
-                    // //     // Optionally, flush the file to ensure data is written immediately
-                    // //     if let Err(e) = file.flush() {
-                    // //         eprintln!("Failed to flush log file: {}", e);
-                    // //     }
+                        if (current_player_health == 0 && current_opponent_health != 0)
+                            || (current_player_health != 0 && current_opponent_health == 0)
+                        {
+                            // Exit the application after sending the winner message
+                            std::process::exit(0);
+                        }
 
-                    // // }
-                    // // Handle Command 4 as a toggle
-                    // {
-                    //     // Check the current state of Command 4 bit (0x00000004)
-                    //     let command4_current = (joyflags_val & 0x00000004) != 0;
-                    //     let command4_prev = command4_prev_state.load(Ordering::Relaxed);
+                    } else {
 
-                    //     // Detect rising edge: Command 4 bit was not set in the previous frame but is set now
-                    //     if command4_current && !command4_prev {
-                    //         // Toggle the logging_enabled state
-                    //         let new_state = !logging_enabled.load(Ordering::Relaxed);
-                    //         logging_enabled.store(new_state, Ordering::Relaxed);
-                    //         if new_state {
-                    //             println!("Command 4 Toggle: Logging ENABLED.");
-                    //         } else {
-                    //             println!("Command 4 Toggle: Logging DISABLED.");
-                    //         }
-                    //     }
 
-                    //     // Update the previous state for the next frame
-                    //     command4_prev_state.store(command4_current, Ordering::Relaxed);
-                    // }
+                        set_enemy_position((player_x, player_y));
+                        set_player_position((enemy_x, enemy_y));
 
-                    // // If logging is enabled, perform the logging
-                    // if logging_enabled.load(Ordering::Relaxed) {
-                    //     println!("Command 4 Action: Logging Remaining Boolean Addresses and Their Current Values.");
-                    //     let addresses = boolean_addresses.lock();
-                    //     let initial_states = INITIAL_BOOLEAN_STATES.lock();
+                        // println!("First Chip P1: {}", core.raw_read_16(0x203A9DA, -1));
+                        set_enemy_selected_chip(core_ref.raw_read_16(0x203A9DA, -1));
+                        // println!("First Chip P2: {}", core.raw_read_16(0x203AAB2, -1));
+                        set_player_selected_chip(core_ref.raw_read_16(0x203AAB2, -1));
 
-                    //     for &address in addresses.iter() {
-                    //         let current_value = core_ref.raw_read_8(address, -1);
-                    //         if let Some(&initial_value) = initial_states.get(&address) {
-                    //             println!(
-                    //                 "Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
-                    //                 address, initial_value, current_value
-                    //             );
-                    //         }
-                    //     }
-                    // }
+                        set_enemy_charge(core_ref.raw_read_8(0x0203409D, -1) as u16);
+                        set_player_charge(core_ref.raw_read_8(0x0203419D, -1) as u16);
+
+
+                        let current_player_health = core_ref.raw_read_16(client_health_address, -1);
+                        let current_opponent_health = core_ref.raw_read_16(server_health_address, -1);
+
+                        // Check if player's health has decreased (punishment)
+                        if current_player_health != *last_player_health && *last_player_health != 0 {
+                            let damage = *last_player_health - current_player_health;
+                            // Record punishment in global PUNISHMENTS
+                            add_punishment(RewardPunishment { damage });
+                        }
+
+                        // Check if opponent's health has decreased (reward)
+                        if current_opponent_health != *last_opponent_health && *last_opponent_health != 0 {
+                            let damage = *last_opponent_health- current_opponent_health;
+                            // Record reward in global REWARDS
+                            add_reward(RewardPunishment { damage });
+                        }
+                        // Update last known health values
+                        *last_player_health = current_player_health;
+                        *last_opponent_health = current_opponent_health;
+
+
+                        set_player_health(current_player_health);
+                        set_enemy_health(current_opponent_health);
+
+                        if (current_player_health == 0 && current_opponent_health != 0)
+                            || (current_player_health != 0 && current_opponent_health == 0)
+                        {
+                            // Exit the application after sending the winner message
+                            std::process::exit(0);
+                        }
+
+                    }
+
+                    if commands_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                        let joyflags_val = joyflags.load(std::sync::atomic::Ordering::Relaxed);
+                        // Command 1 (Set all values, triggered by 0x00000200)
+                        if joyflags_val & 0x00000200 != 0 {
+                            // println!("Set Command - Populating boolean addresses");
+                            let mut addresses = boolean_addresses.lock();
+                            let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
+
+                            // Clear previous boolean addresses and states
+                            addresses.clear();
+                            initial_states.clear();
+
+                            // Search for boolean values in memory and populate boolean_addresses
+                            let found_addresses = search_all_boolean_values(core_ref);
+                            addresses.extend(found_addresses);
+
+                            // Store the initial values of those addresses in INITIAL_BOOLEAN_STATES
+                            for &address in addresses.iter() {
+                                //only get values that are 0
+
+                                let current_value = core_ref.raw_read_8(address, -1);
+                                // if current_value == 0 {
+                                initial_states.insert(address, current_value);
+                                // }
+                                println!("Captured Address: 0x{:08X}, Initial Value: {}", address, current_value);
+                            }
+
+                            // println!("Set Command - Populated {} boolean addresses.", addresses.len());
+                        }
+
+                        // Command 2 (Prune the list, triggered by 0x00000100)
+                        if joyflags_val & 0x00000100 != 0 {
+                            // println!("Prune Command - Pruning boolean addresses");
+                            let mut addresses = boolean_addresses.lock();
+                            let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
+                            addresses.retain(|&address| {
+                                let current_value = core_ref.raw_read_8(address, -1);
+                                if let Some(&initial_value) = initial_states.get(&address) {
+                                    if current_value != initial_value {
+                                        // Value has changed, prune it from the list
+                                        println!(
+                                            "Pruned Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
+                                            address, initial_value, current_value
+                                        );
+                                        return false;
+                                    }
+                                }
+                                true
+                            });
+
+                            // println!("Prune Command - Remaining {} boolean addresses.", addresses.len());
+                        }
+
+                        // Command 2 (Prune the list, triggered by 0x00000100)
+                        if joyflags_val & 0x00000002 != 0 {
+                            // println!("Prune Command - Pruning same boolean addresses");
+                            let mut addresses = boolean_addresses.lock();
+                            let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
+                            addresses.retain(|&address| {
+                                let current_value = core_ref.raw_read_8(address, -1);
+                                if let Some(&initial_value) = initial_states.get(&address) {
+                                    if current_value == initial_value {
+                                        // Value has changed, prune it from the list
+                                        println!(
+                                            "Pruned Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
+                                            address, initial_value, current_value
+                                        );
+                                        return false;
+                                    }
+                                }
+                                true
+                            });
+
+                            // println!("Prune Command - Remaining {} boolean addresses.", addresses.len());
+                        }
+
+                        // Command 3 (Compare the current values, triggered by 0x00000008)
+                        if joyflags_val & 0x00000008 != 0 {
+                            // println!("Compare Command - Checking different current values");
+                            let addresses = boolean_addresses.lock();
+                            let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
+
+                            for &address in addresses.iter() {
+                                let current_value = core_ref.raw_read_8(address, -1);
+                                //update initial value to the current value
+                                if let Some(initial_value) = initial_states.get_mut(&address) {
+                                    *initial_value = current_value;
+                                }
+                                // if let Some(&initial_value) = initial_states.get(&address) {
+                                //     // Only display if the current value has changed compared to the initial value
+                                //     if current_value != initial_value {
+                                //         println!(
+                                //             "Compare Command - Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
+                                //             address, initial_value, current_value
+                                //         );
+                                //     }
+                                // }
+                            }
+                        }
+                        // Command 3 (Compare the current values, triggered by 0x00000008)
+                        // if joyflags_val & 0x00000001 != 0 {
+                        //    // Lock the boolean_addresses and log_file for safe access
+                        //     let addresses = boolean_addresses.lock();
+                        //     let mut file = log_file.lock();
+
+                        //     // Iterate over each address and write to the file
+                        //     for &address in addresses.iter() {
+                        //         if let Err(e) = writeln!(file, "0x{:08X}", address) {
+                        //             eprintln!("Failed to write address 0x{:08X} to log file: {}", address, e);
+                        //         }
+                        //     }
+
+                        //     // Optionally, flush the file to ensure data is written immediately
+                        //     if let Err(e) = file.flush() {
+                        //         eprintln!("Failed to flush log file: {}", e);
+                        //     }
+
+                        // }
+                        // Handle Command 4 as a toggle
+                        {
+                            // Check the current state of Command 4 bit (0x00000004)
+                            let command4_current = (joyflags_val & 0x00000004) != 0;
+                            let command4_prev = command4_prev_state.load(Ordering::Relaxed);
+
+                            // Detect rising edge: Command 4 bit was not set in the previous frame but is set now
+                            if command4_current && !command4_prev {
+                                // Toggle the logging_enabled state
+                                let new_state = !logging_enabled.load(Ordering::Relaxed);
+                                logging_enabled.store(new_state, Ordering::Relaxed);
+                                if new_state {
+                                    println!("Command 4 Toggle: Logging ENABLED.");
+                                } else {
+                                    println!("Command 4 Toggle: Logging DISABLED.");
+                                }
+                            }
+
+                            // Update the previous state for the next frame
+                            command4_prev_state.store(command4_current, Ordering::Relaxed);
+                        }
+
+                        // If logging is enabled, perform the logging
+                        if logging_enabled.load(Ordering::Relaxed) {
+                            println!("Command 4 Action: Logging Remaining Boolean Addresses and Their Current Values.");
+                            let addresses = boolean_addresses.lock();
+                            let initial_states = INITIAL_BOOLEAN_STATES.lock();
+
+                            for &address in addresses.iter() {
+                                let current_value = core_ref.raw_read_8(address, -1);
+                                if let Some(&initial_value) = initial_states.get(&address) {
+                                    println!(
+                                        "Address: 0x{:08X}, Initial Value: {}, Current Value: {}",
+                                        address, initial_value, current_value
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
         });
-
 
         let own_setup = {
             let assets = local_game.load_rom_assets(local_rom, &local_save.as_raw_wram(), local_patch_overrides)?;
@@ -1005,6 +1168,10 @@ impl Session {
         // Log the Navi Cust IDs
         println!("Local Player Navi Cust IDs: {:?}", own_navi_cust_ids);
         println!("Opponent Player Navi Cust IDs: {:?}", opponent_navi_cust_ids);
+        
+
+        set_player_navi_cust_parts(own_navi_cust_ids);
+        set_enemy_navi_cust_parts(opponent_navi_cust_ids);
 
         // **Extract and Print Chips**
         let own_chips = if let Some(ref setup) = own_setup {
@@ -1088,7 +1255,7 @@ impl Session {
             let mut index = 0;
             for tag_chip in tag_chips {
                 // println!("Tag Chip: {}", tag_chip);
-                set_player_tag_folder(index,tag_chip as u16);
+                set_player_tag_folder(index, tag_chip as u16);
                 index += 1;
             }
         }
@@ -1097,7 +1264,7 @@ impl Session {
             let mut index = 0;
             for tag_chip in tag_chips {
                 // println!("Tag Chip: {}", tag_chip);
-                set_enemy_tag_folder(index,tag_chip as u16);
+                set_enemy_tag_folder(index, tag_chip as u16);
                 index += 1;
             }
         }
@@ -1204,8 +1371,8 @@ impl Session {
         emu_tps_counter: Arc<Mutex<stats::Counter>>,
         replay: &tango_pvp::replay::Replay,
         roms: HashMap<(String, u8), Vec<u8>>, // Update the type here
-        // patches: HashMap<String, Patch>,
-        // patches_path: std::path::PathBuf,
+                                              // patches: HashMap<String, Patch>,
+                                              // patches_path: std::path::PathBuf,
     ) -> Result<Self, anyhow::Error> {
         let mut core = mgba::core::Core::new_gba("tango")?;
         core.enable_video_buffer();
@@ -1281,14 +1448,10 @@ impl Session {
         let remote_state = replay.remote_state.clone();
         let local_player_index = replay.local_player_index;
 
-        
-
         thread.handle().run_on_core(move |mut core| {
             core.load_state(&local_state).expect("load state");
         });
         thread.handle().unpause();
-
-
 
         let pause_on_next_frame = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let vbuf = Arc::new(Mutex::new(vec![
@@ -1336,14 +1499,14 @@ impl Session {
                 // If health values are initialized, start monitoring for winner or damage changes
                 if HEALTH_INITIALIZED {
                     // Check if player's health has decreased (punishment)
-                    if current_player_health < LAST_PLAYER_HEALTH {
+                    if current_player_health < LAST_PLAYER_HEALTH && LAST_PLAYER_HEALTH != 0 {
                         let damage = LAST_PLAYER_HEALTH - current_player_health;
                         // Record punishment in global PUNISHMENTS
                         add_punishment(RewardPunishment { damage });
                     }
 
                     // Check if opponent's health has decreased (reward)
-                    if current_opponent_health < LAST_OPPONENT_HEALTH {
+                    if current_opponent_health < LAST_OPPONENT_HEALTH && LAST_OPPONENT_HEALTH != 0{
                         let damage = LAST_OPPONENT_HEALTH - current_opponent_health;
                         // Record reward in global REWARDS
                         add_reward(RewardPunishment { damage });
@@ -1527,7 +1690,6 @@ impl Session {
 
                     set_enemy_game_emotion_state(core_ref.raw_read_8(0x02035291, -1) as u16);
 
-
                     //values for the grid state (3x6) 8bit
                     //0x02039C06	0x02039C26	0x02039C46	0x02039C66	0x02039C86	0x02039CA6
                     //0x02039D06	0x02039D26	0x02039D46	0x02039D66	0x02039D86	0x02039DA6
@@ -1535,28 +1697,33 @@ impl Session {
 
                     //assign to 3x6 grid
                     let grid_addresses = [
-                        0x02039C06, 0x02039C26, 0x02039C46, 0x02039C66, 0x02039C86, 0x02039CA6,
-                        0x02039D06, 0x02039D26, 0x02039D46, 0x02039D66, 0x02039D86, 0x02039DA6,
-                        0x02039E06, 0x02039E26, 0x02039E46, 0x02039E66, 0x02039E86, 0x02039EA6,
+                        0x02039C06, 0x02039C26, 0x02039C46, 0x02039C66, 0x02039C86, 0x02039CA6, 0x02039D06, 0x02039D26,
+                        0x02039D46, 0x02039D66, 0x02039D86, 0x02039DA6, 0x02039E06, 0x02039E26, 0x02039E46, 0x02039E66,
+                        0x02039E86, 0x02039EA6,
                     ];
                     let grid_owner_addresses = [
-                        0x02039C07, 0x02039C27, 0x02039C47, 0x02039C67, 0x02039C87, 0x02039CA7,
-                        0x02039D07, 0x02039D27, 0x02039D47, 0x02039D67, 0x02039D87, 0x02039DA7,
-                        0x02039E07, 0x02039E27, 0x02039E47, 0x02039E67, 0x02039E87, 0x02039EA7,
+                        0x02039C07, 0x02039C27, 0x02039C47, 0x02039C67, 0x02039C87, 0x02039CA7, 0x02039D07, 0x02039D27,
+                        0x02039D47, 0x02039D67, 0x02039D87, 0x02039DA7, 0x02039E07, 0x02039E27, 0x02039E47, 0x02039E67,
+                        0x02039E87, 0x02039EA7,
                     ];
 
                     //display values of grid
+                    let mut i = 0;
                     for address in &grid_addresses {
                         let current_value = core_ref.raw_read_8(*address, -1);
-                        println!("0x{:08X},{}", address, current_value);
-                    }
 
+                        set_grid_state(i, current_value as u16);
+                        i += 1;
+                        // println!("0x{:08X},{}", address, current_value);
+                    }
+                    i = 0;
                     //display values of grid
                     for address in &grid_owner_addresses {
                         let current_value = core_ref.raw_read_8(*address, -1);
-                        println!("0x{:08X},{}", address, current_value);
+                        set_grid_owner_state(i, current_value as u16);
+                        i += 1;
+                        // println!("0x{:08X},{}", address, current_value);
                     }
-
 
                     //search for values that are equal to 9
                     // let possible_addresses = search_all_health_values(core_ref, 19);
@@ -1663,6 +1830,17 @@ impl Session {
                         let player1_y = core_ref.raw_read_16(0x0203A9C4, -1);
                         let player2_x = core_ref.raw_read_16(0x02036A8C, -1);
                         let player2_y = core_ref.raw_read_16(0x0203AA9C, -1);
+
+                        //position of player 1
+                        let player_grid_positionX1 = core_ref.raw_read_8(0x0203AA9C, -1);
+                        let player_grid_positionY1 = core_ref.raw_read_8(0x0203AA9D, -1);
+                        // println!("Player grid position1: {}, {}", player_grid_positionX1, player_grid_positionY1);
+
+                        //position of player 2
+                        let player_grid_positionX2 = core_ref.raw_read_8(0x020384FA, -1);
+                        let player_grid_positionY2 = core_ref.raw_read_8(0x020384FB, -1);
+                        // println!("Player grid position2: {}, {}", player_grid_positionX2, player_grid_positionY2);
+
                         if get_player_health_index() == 0 {
                             set_player_position((player1_x, player1_y));
                             set_enemy_position((player2_x, player2_y));
@@ -1674,6 +1852,9 @@ impl Session {
 
                             set_player_game_emotion_state(core.raw_read_8(0x0203CE90, -1) as u16);
                             set_enemy_game_emotion_state(core.raw_read_8(0x0203CE2C, -1) as u16);
+
+                            set_player_grid_position((player_grid_positionX1 as u16, player_grid_positionY1 as u16));
+                            set_enemy_grid_position((player_grid_positionX2 as u16, player_grid_positionY2 as u16));
                             // println!("Player game emotion state: {}", core.raw_read_8(0x0203CE90, -1) as u16);
                             // println!("P2 emotion state: {}", core.raw_read_8(0x0203CE2C, -1) as u16);
                         } else if get_player_health_index() == 1 {
@@ -1687,6 +1868,9 @@ impl Session {
 
                             set_player_game_emotion_state(core.raw_read_8(0x0203CE2C, -1) as u16);
                             set_enemy_game_emotion_state(core.raw_read_8(0x0203CE90, -1) as u16);
+
+                            set_player_grid_position((player_grid_positionX2 as u16, player_grid_positionY2 as u16));
+                            set_enemy_grid_position((player_grid_positionX1 as u16, player_grid_positionY1 as u16));
                             // println!("Player game emotion state: {}", core.raw_read_8(0x0203CE2C, -1) as u16);
                             // println!("P2 emotion state: {}", core.raw_read_8(0x0203CE90, -1) as u16);
                         } else {
@@ -1750,11 +1934,7 @@ impl Session {
             }
         };
 
-        let own_assets = game.load_rom_assets(
-            rom,
-            own_wram_data,
-            &rom::Overrides::default(),
-        )?;
+        let own_assets = game.load_rom_assets(rom, own_wram_data, &rom::Overrides::default())?;
 
         let own_setup = Some(Setup {
             game_lang: crate::game::region_to_language(game.gamedb_entry().region),
@@ -1773,19 +1953,17 @@ impl Session {
                     let key = (remote_game_info.rom_family.clone(), remote_game_info.rom_variant as u8);
 
                     // Load the remote ROM
-                    let remote_rom = roms.get(&key).cloned().ok_or_else(|| {
-                        anyhow::anyhow!("Remote ROM not found for game {:?}", remote_game_info)
-                    })?;
+                    let remote_rom = roms
+                        .get(&key)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("Remote ROM not found for game {:?}", remote_game_info))?;
 
                     // Proceed with loading the opponent's save and assets
                     let opponent_wram_data = replay.remote_state.wram();
                     let opponent_save = remote_game.save_from_wram(opponent_wram_data)?;
 
-                    let opponent_assets = remote_game.load_rom_assets(
-                        &remote_rom,
-                        opponent_wram_data,
-                        &rom::Overrides::default(),
-                    )?;
+                    let opponent_assets =
+                        remote_game.load_rom_assets(&remote_rom, opponent_wram_data, &rom::Overrides::default())?;
 
                     Some(Setup {
                         game_lang: crate::game::region_to_language(remote_game.gamedb_entry().region),
@@ -1805,7 +1983,6 @@ impl Session {
             None
         };
 
-
         //get setups and set the global chip folder and print navi cust data
         // After initializing `own_setup` and `opponent_setup`
         let own_navi_cust_ids = if let Some(ref setup) = own_setup {
@@ -1823,6 +2000,10 @@ impl Session {
         // Log the Navi Cust IDs
         println!("Local Player Navi Cust IDs: {:?}", own_navi_cust_ids);
         println!("Opponent Player Navi Cust IDs: {:?}", opponent_navi_cust_ids);
+
+
+        set_player_navi_cust_parts(own_navi_cust_ids);
+        set_enemy_navi_cust_parts(opponent_navi_cust_ids);
 
         // **Extract and Print Chips**
         let own_chips = if let Some(ref setup) = own_setup {
@@ -1906,7 +2087,7 @@ impl Session {
             let mut index = 0;
             for tag_chip in tag_chips {
                 // println!("Tag Chip: {}", tag_chip);
-                set_player_tag_folder(index,tag_chip as u16);
+                set_player_tag_folder(index, tag_chip as u16);
                 index += 1;
             }
         }
@@ -1915,12 +2096,11 @@ impl Session {
             let mut index = 0;
             for tag_chip in tag_chips {
                 // println!("Tag Chip: {}", tag_chip);
-                set_enemy_tag_folder(index,tag_chip as u16);
+                set_enemy_tag_folder(index, tag_chip as u16);
                 index += 1;
             }
         }
         //opponent_setup = None;
-
 
         Ok(Session {
             start_time: std::time::SystemTime::now(),

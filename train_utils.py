@@ -553,7 +553,7 @@ class HDF5Dataset(Dataset):
             },
             'health': torch.tensor(hf['health'][sample_idx], dtype=torch.float32),
             'current_crosses': torch.tensor(hf['current_crosses'][sample_idx], dtype=torch.float32),
-            'available_crosses': torch.tensor(hf['available_crosses'][sample_idx], dtype=torch.float32),
+            'used_crosses': torch.tensor(hf['used_crosses'][sample_idx], dtype=torch.float32),
             'beast_flags': torch.tensor(hf['beast_flags'][sample_idx], dtype=torch.float32)
         }
 

@@ -37,7 +37,6 @@ lazy_static! {
     // New globals for additional data points
     pub static ref PLAYER_POSITION: Arc<Mutex<Option<(u16, u16)>>> = Arc::new(Mutex::new(None));
     pub static ref ENEMY_POSITION: Arc<Mutex<Option<(u16, u16)>>> = Arc::new(Mutex::new(None));
-    pub static ref GRID_STATE: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
     pub static ref PLAYER_FORMS_USED: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
     pub static ref ENEMY_FORMS_USED: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
     pub static ref IS_PLAYER_INSIDE_WINDOW: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None)); // New flag
@@ -112,8 +111,141 @@ lazy_static! {
 
     pub static ref INSIDE_CROSS_WINDOW: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
 
+    //6x3 grid of uint16s for the grid state
+    pub static ref GRID_STATE: Vec<Arc<Mutex<u16>>> = (0..18).map(|_| Arc::new(Mutex::new(0))).collect();
+    
+    //6x3 grid of uint16s for the grid owner state
+    pub static ref GRID_OWNER_STATE: Vec<Arc<Mutex<u16>>> = (0..18).map(|_| Arc::new(Mutex::new(0))).collect();
+
+    //xy of player grid position
+    pub static ref PLAYER_GRID_POSITION: Arc<Mutex<(u16, u16)>> = Arc::new(Mutex::new((0, 0)));
+
+    //xy of enemy grid position
+    pub static ref ENEMY_GRID_POSITION: Arc<Mutex<(u16, u16)>> = Arc::new(Mutex::new((0, 0)));
+
+    //is offerer
+    pub static ref IS_OFFERER: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    //cust gage
+    pub static ref CUST_GAGE: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    // Global variable for storing player Navi Cust parts
+    pub static ref PLAYER_NAVI_CUST_PARTS: Arc<Mutex<Option<Vec<usize>>>> = Arc::new(Mutex::new(None));
+
+    // Global variable for storing enemy Navi Cust parts
+    pub static ref ENEMY_NAVI_CUST_PARTS: Arc<Mutex<Option<Vec<usize>>>> = Arc::new(Mutex::new(None));
+
 }
 
+// ================== Player Navi Cust Parts Getters and Setters ==================
+/// Sets the player Navi Cust parts
+pub fn set_player_navi_cust_parts(parts: Vec<usize>) {
+    let mut player_parts = PLAYER_NAVI_CUST_PARTS.lock();
+    *player_parts = Some(parts);
+}
+
+/// Sets the enemy Navi Cust parts
+pub fn set_enemy_navi_cust_parts(parts: Vec<usize>) {
+    let mut enemy_parts = ENEMY_NAVI_CUST_PARTS.lock();
+    *enemy_parts = Some(parts);
+}
+
+pub fn get_player_navi_cust_parts() -> Option<Vec<usize>> {
+    let player_parts = PLAYER_NAVI_CUST_PARTS.lock();
+    player_parts.clone()
+}
+
+pub fn get_enemy_navi_cust_parts() -> Option<Vec<usize>> {
+    let enemy_parts = ENEMY_NAVI_CUST_PARTS.lock();
+    enemy_parts.clone()
+}
+
+
+// ================== Cust Gage Getters and Setters ==================
+pub fn set_cust_gage(value: u16) {
+    let mut cust_gage = CUST_GAGE.lock();
+    *cust_gage = value;
+}
+pub fn get_cust_gage() -> u16 {
+    let cust_gage = CUST_GAGE.lock();
+    *cust_gage
+}
+
+// ================== Is Offerer Getters and Setters ==================
+pub fn set_is_offerer(value: u16) {
+    let mut is_offerer = IS_OFFERER.lock();
+    *is_offerer = value;
+}
+pub fn get_is_offerer() -> u16 {
+    let is_offerer = IS_OFFERER.lock();
+    *is_offerer
+}
+
+// ================== Grid Owner State Getters and Setters ==================
+pub fn set_grid_owner_state(index: usize, value: u16) -> Result<(), String> {
+    if index < GRID_OWNER_STATE.len() {
+        let state = &GRID_OWNER_STATE[index];
+        let mut state_lock = state.lock();
+        *state_lock = value;
+        Ok(())
+    } else {
+        Err(format!("Grid owner state index {} out of bounds", index))
+    }
+}
+pub fn get_grid_owner_state(index: usize) -> Option<u16> {
+    if index < GRID_OWNER_STATE.len() {
+        let state = &GRID_OWNER_STATE[index];
+        Some(*state.lock())
+    } else {
+        None
+    }
+}
+pub fn get_all_grid_owner_states() -> Vec<u16> {
+    GRID_OWNER_STATE.iter().map(|state| *state.lock()).collect()
+}
+
+// ================== Player Grid Position Getters and Setters ==================
+pub fn set_player_grid_position(position: (u16, u16)) {
+    let mut pos = PLAYER_GRID_POSITION.lock();
+    *pos = position;
+}
+pub fn get_player_grid_position() -> Vec<u16> {
+    let pos = PLAYER_GRID_POSITION.lock();
+    vec![pos.0, pos.1]
+}
+
+// ================== Enemy Grid Position Getters and Setters ==================
+pub fn set_enemy_grid_position(position: (u16, u16)) {
+    let mut pos = ENEMY_GRID_POSITION.lock();
+    *pos = position;
+}
+pub fn get_enemy_grid_position() -> Vec<u16> {
+    let pos = ENEMY_GRID_POSITION.lock();
+    vec![pos.0, pos.1]
+}
+
+// ================== Grid State Getters and Setters ==================
+pub fn set_grid_state(index: usize, value: u16) -> Result<(), String> {
+    if index < GRID_STATE.len() {
+        let state = &GRID_STATE[index];
+        let mut state_lock = state.lock();
+        *state_lock = value;
+        Ok(())
+    } else {
+        Err(format!("Grid state index {} out of bounds", index))
+    }
+}
+pub fn get_grid_state(index: usize) -> Option<u16> {
+    if index < GRID_STATE.len() {
+        let state = &GRID_STATE[index];
+        Some(*state.lock())
+    } else {
+        None
+    }
+}
+pub fn get_all_grid_states() -> Vec<u16> {
+    GRID_STATE.iter().map(|state| *state.lock()).collect()
+}
 
 
 // ================== Player Tag Folder Getters and Setters ==================
@@ -418,19 +550,6 @@ pub fn set_enemy_position(position: (u16, u16)) {
 pub fn get_enemy_position() -> Option<(u16, u16)> {
     let pos = ENEMY_POSITION.lock();
     *pos
-}
-
-// ================== Grid State Getters and Setters ==================
-/// Sets the grid state
-pub fn set_grid_state(state: Vec<String>) {
-    let mut gs = GRID_STATE.lock();
-    *gs = Some(state);
-}
-
-/// Retrieves the grid state
-pub fn get_grid_state() -> Option<Vec<String>> {
-    let gs = GRID_STATE.lock();
-    gs.clone()
 }
 
 // ================== Player Forms Used Getters and Setters ==================

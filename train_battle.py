@@ -1,327 +1,244 @@
-# online_arena.py
+# train_battle.py
 
 import os
-import time
-import shutil
-import subprocess
-from datetime import datetime
-import asyncio
-import math
-import yaml
+import glob
+import h5py
+import random
 import torch
-import traceback
-import gc
-import wandb  # Import wandb
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
 
-# Import necessary functions from training_utils.py
-from train_utils import final_training_epoch, save_models
-from utils import get_checkpoint_dir, get_latest_checkpoint, get_latest_checkpoint_plus1, get_new_checkpoint_path, get_root_dir, get_image_memory  # Ensure these are accessible
+from battle_network_model import BattleNetworkModel
+from utils import get_root_dir, get_image_memory
 
-# Paths
-REPLAYS_DIR = '/home/lee/Documents/Tango/replays'
-NEW_REPLAY_FOLDER_BASE = '/home/lee/Documents/Tango/replays_'
-CONFIG_PATH = 'config.yaml'  # Assuming a config file exists for parameters
+class BattleDataset(Dataset):
+    def __init__(self, sequences, actions, rewards):
+        """
+        Initializes the dataset with gamestate sequences and corresponding targets.
 
-# Load configuration
-def load_config(config_path=CONFIG_PATH):
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Configuration file not found at {config_path}")
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+        Args:
+            sequences (list of list of dict): List where each element is a list of gamestates (dicts).
+            actions (torch.Tensor): Tensor of shape (num_samples, 16) containing action targets.
+            rewards (torch.Tensor): Tensor of shape (num_samples,) containing reward targets.
+        """
+        assert len(sequences) == len(actions) == len(rewards), "Sequences, actions, and rewards must have the same length."
+        self.sequences = sequences
+        self.actions = actions
+        self.rewards = rewards
 
-config = load_config()
+    def __len__(self):
+        return len(self.actions)
 
-# Function to move the replay folder to a new directory with the current date and time
-def move_replays():
-    # Get the current timestamp and format it
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Create the new folder path
-    new_replay_folder = f"{NEW_REPLAY_FOLDER_BASE}{timestamp}"
+    def __getitem__(self, idx):
+        """
+        Retrieves the gamestate sequence and target for a given index.
 
-    # Move the replays folder
-    try:
-        shutil.move(REPLAYS_DIR, new_replay_folder)
-        print(f"Moved replays to {new_replay_folder}")
-    except Exception as e:
-        print(f"Failed to move replays: {e}")
+        Args:
+            idx (int): Index of the sample.
 
-# Function to run battle instances with a specific GAMMA
-def run_battle_instances(gamma):
-    try:
-        # Prepare environment variables, including GAMMA
-        env = os.environ.copy()
-        env["GAMMA"] = str(gamma)
-        print(f"Launching battle instances with GAMMA={gamma:.4f}")
-        
-        # Run fight_and_learn.py as a subprocess
-        subprocess.run(["python3", "fight_and_learn.py"], check=True, env=env)
-    except subprocess.CalledProcessError as e:
-        print(f"Battle instances terminated with an error: {e}")
-    except Exception as e:
-        print(f"Failed to run battle instances: {e}")
+        Returns:
+            tuple: (list of gamestates dicts, action tensor, reward tensor)
+        """
+        return self.sequences[idx], self.actions[idx], self.rewards[idx]
 
-# Function to run data capture on saved replays
-def run_data_capture():
-    try:
-        # Run the data capture script
-        subprocess.run(["python3", "datacapture.py"], check=True)
-    except Exception as e:
-        print(f"Failed to run data capture: {e}")
-
-# Cosine annealing function
-def cosine_annealing(current_step, total_steps, initial_gamma=0.1, min_gamma=0.01):
+def load_h5_file(file_path):
     """
-    Compute GAMMA using cosine annealing.
+    Loads data from an HDF5 file.
 
     Args:
-        current_step (int): The current training step or cycle.
-        total_steps (int): The total number of steps over which to anneal GAMMA.
-        initial_gamma (float): The starting value of GAMMA.
-        min_gamma (float): The minimum value of GAMMA.
+        file_path (str): Path to the HDF5 file.
 
     Returns:
-        float: The updated GAMMA value.
+        dict: Dictionary containing all datasets as tensors.
     """
-    cosine_decay = 0.5 * (1 + math.cos(math.pi * current_step / total_steps))
-    return min_gamma + (initial_gamma - min_gamma) * cosine_decay
+    data = {}
+    with h5py.File(file_path, 'r') as hf:
+        for key in hf.keys():
+            if key in ['action', 'reward']:
+                data[key] = torch.tensor(hf[key][:], dtype=torch.float32)
+            else:
+                data[key] = torch.tensor(hf[key][:], dtype=torch.float32)
+    return data
 
-from planning_model import PlanningModel
-# Function to load trained models
-def load_trained_models(get_checkpoint_dir, get_latest_checkpoint, image_memory=1, device='cuda'):
+def create_sequences(data, memory):
     """
-    Loads the latest trained Planning and Battle models.
+    Creates sequences of gamestates with corresponding targets.
 
     Args:
-        get_checkpoint_dir (function): Function to get checkpoint directory.
-        get_latest_checkpoint (function): Function to get the latest checkpoint file.
-        image_memory (int): Image memory parameter.
-        device (str): Device to load the models on.
+        data (dict): Dictionary containing all datasets as tensors.
+        memory (int): Number of past gamestates to consider.
 
     Returns:
-        tuple: (training_planning_model, training_battle_model, optimizer_planning, optimizer_battle)
+        tuple: (sequences, actions, rewards)
+            sequences: List of sequences, each sequence is a list of gamestate dicts.
+            actions: Tensor of shape (num_sequences, 16)
+            rewards: Tensor of shape (num_sequences,)
     """
-    from train import GameInputPredictor  # Import the model class
-    import torch.optim as optim
+    num_samples = data['cust_gage'].shape[0]
+    sequences = []
+    actions = []
+    rewards = []
 
-    # Load Training Planning Model
-    training_planning_checkpoint_path = get_latest_checkpoint(model_type='planning', image_memory=image_memory)
+    for idx in range(num_samples):
+        sequence = []
+        for m in range(memory):
+            seq_idx = idx - (memory - 1 - m)
+            seq_idx = max(seq_idx, 0)  # Pad with the first gamestate if out of bounds
+            gamestate = {}
+            for key in data.keys():
+                if key not in ['action', 'reward']:
+                    gamestate[key] = data[key][seq_idx]
+            sequence.append(gamestate)
+        sequences.append(sequence)
+        actions.append(data['action'][idx])
+        rewards.append(data['reward'][idx])
 
-    if training_planning_checkpoint_path:
-        training_planning_model = PlanningModel().to(device)
-        checkpoint_training_planning = torch.load(training_planning_checkpoint_path, map_location=device)
-        if 'model_state_dict' in checkpoint_training_planning:
-            training_planning_model.load_state_dict(checkpoint_training_planning['model_state_dict'])
-            print(f"Training Planning Model loaded from {training_planning_checkpoint_path}")
-        else:
-            raise KeyError("Training Planning checkpoint does not contain 'model_state_dict'")
-    else:
-        # Initialize new Training Planning Model
-        training_planning_model = PlanningModel().to(device)
-        print("No Training Planning Model checkpoint found. Initialized a new Training Planning Model.")
+    actions = torch.stack(actions)  # Shape: (num_sequences, 16)
+    rewards = torch.stack(rewards)  # Shape: (num_sequences,)
+    return sequences, actions, rewards
 
-    training_planning_model.train()  # Set to train mode
-
-    # Load Training Battle Model
-    training_battle_checkpoint_path = get_latest_checkpoint(model_type='battle', image_memory=image_memory)
-
-    if training_battle_checkpoint_path:
-        training_battle_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
-        checkpoint_training_battle = torch.load(training_battle_checkpoint_path, map_location=device)
-        if 'model_state_dict' in checkpoint_training_battle:
-            training_battle_model.load_state_dict(checkpoint_training_battle['model_state_dict'])
-            print(f"Training Battle Model loaded from {training_battle_checkpoint_path}")
-        else:
-            raise KeyError("Training Battle checkpoint does not contain 'model_state_dict'")
-    else:
-        # Initialize new Training Battle Model
-        training_battle_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
-        print("No Training Battle Model checkpoint found. Initialized a new Training Battle Model.")
-
-    training_battle_model.train()  # Set to train mode
-
-    # Initialize separate optimizers for Training Models
-    learning_rate = config.get('learning_rate', 5e-5)
-    optimizer_planning = optim.Adam(training_planning_model.parameters(), lr=learning_rate)
-    optimizer_battle = optim.Adam(training_battle_model.parameters(), lr=learning_rate)
-
-    return training_planning_model, training_battle_model, optimizer_planning, optimizer_battle
-training_planning_model = None
-training_battle_model = None
-optimizer_planning = None
-optimizer_battle = None
-try:
-    # Step 4: Load trained models for final training
-    training_planning_model, training_battle_model, optimizer_planning, optimizer_battle = load_trained_models(
-        get_checkpoint_dir, 
-        get_latest_checkpoint, 
-        image_memory=get_image_memory(), 
-        device='cuda'
-    )
-    
-    # set the learning rate of the planning optimizer
-    # learning_rate = 1e-4
-    # for param_group in optimizer_planning.param_groups:
-    #     param_group['lr'] = learning_rate
-    # print(f"Set learning rate of the planning optimizer to {learning_rate}")
-    
-except Exception as e:
-    print(f"Failed to load trained models: {e}")
-    traceback.print_exc()
-    # return  # Exit the function if models cannot be loaded
-# Function to perform final training steps
-def perform_final_training(wandb_run, save = True):
+def collate_fn(batch):
     """
-    Performs the final training steps including loading models, training on battle and planning data,
-    saving models, and clearing memory.
+    Custom collate function to handle sequences of dicts.
 
     Args:
-        wandb_run: The wandb run object for logging.
+        batch (list of tuples): Each tuple is (sequence, action, reward)
+
+    Returns:
+        sequences_batched (list of dicts): List of dicts for each memory step, keys -> batched tensors
+        actions (torch.Tensor): Batched actions
+        rewards (torch.Tensor): Batched rewards
     """
-    global training_planning_model, training_battle_model, optimizer_planning, optimizer_battle
+    sequences, actions, rewards = zip(*batch)  # sequences is list of sequences, each sequence is list of dicts
 
-    # Step 5: Perform Final Training Epoch
-    print("Starting final training epoch on accumulated data.")
-    battle_data_dir = os.path.join(get_root_dir(), "data", "battle_data")
-    planning_data_dir = os.path.join(get_root_dir(), "data", "planning_data")
+    memory = len(sequences[0])  # assuming all sequences have same memory
 
-    # # Train on Battle Data
-    if os.path.exists(battle_data_dir) and os.listdir(battle_data_dir):
-        try:
-            final_training_epoch(
-                model=training_battle_model,
-                optimizer=optimizer_battle,
-                training_data_dir=battle_data_dir,
-                model_type='Battle_Model',
-                batch_size=512,  # Adjust based on your system
-                num_workers=8,  # Increased workers for faster data loading
-                device='cuda',
-                max_batches=500000
-            )
-        except Exception as e:
-            print(f"Failed to train Battle_Model: {e}")
-            traceback.print_exc()
-    else:
-        print("No Battle data available for final training.")
+    sequences_batched = []
+    for m in range(memory):
+        batch_dict = {}
+        for key in sequences[0][m].keys():
+            if key == 'player_chip_hand':
+                # Stack the 'player_chip_hand' tensors
+                stacked = torch.stack([sequence[m][key] for sequence in sequences], dim=0)  # Shape: (batch_size, 2005)
 
-    # Step 6: Save the Battle Model
-    save_models(
-        None, 
-        training_battle_model, 
-        None, 
-        optimizer_battle, 
-        get_checkpoint_dir, 
-        get_latest_checkpoint_plus1, 
-        MAX_CHECKPOINTS=config.get('MAX_CHECKPOINTS', 5), 
-        IMAGE_MEMORY=get_image_memory()
-    )
+                # Split into 5 tensors of shape (batch_size, 401)
+                split_tensors = torch.split(stacked, 401, dim=1)  # Returns a tuple of 5 tensors
 
-    # # Clear Battle Model memory
-    # del training_battle_model
-    # del optimizer_battle
-    # # Clear CUDA cache
-    # torch.cuda.empty_cache()
-    # gc.collect()
+                # Convert tuple to list for consistency with the model's expectation
+                split_tensors = list(split_tensors)  # List of 5 tensors each of shape (batch_size, 401)
 
-    # Train on Planning Data
-    # if os.path.exists(planning_data_dir) and os.listdir(planning_data_dir):
-    #     try:
-    #         average_loss = final_training_epoch(
-    #             model=training_planning_model,
-    #             optimizer=optimizer_planning,
-    #             training_data_dir=planning_data_dir,
-    #             model_type='Planning_Model',
-    #             batch_size=64,  # Adjust based on your system
-    #             num_workers=4,  # Increased workers for faster data loading
-    #             device='cuda',
-    #             max_batches=500000
-    #         )
-    #         # Log the average_loss to wandb
-    #         wandb_run.log({"average_loss": average_loss})
-    #         print(f"Logged average_loss: {average_loss}")
-    #     except Exception as e:
-    #         print(f"Failed to train Planning_Model: {e}")
-    #         traceback.print_exc()
-    # else:
-    #     print("No Planning data available for final training.")
-    # if save:
-    #     # Step 6: Save the Planning Model
-    #     save_models(
-    #         training_planning_model, 
-    #         None, 
-    #         optimizer_planning, 
-    #         None, 
-    #         get_checkpoint_dir, 
-    #         get_latest_checkpoint_plus1, 
-    #         MAX_CHECKPOINTS=config.get('MAX_CHECKPOINTS', 5), 
-    #         IMAGE_MEMORY=get_image_memory(),
-    #         append = 1
-    #     )
+                batch_dict[key] = split_tensors  # List of 5 tensors
+            else:
+                # Stack normally
+                batch_dict[key] = torch.stack([sequence[m][key] for sequence in sequences], dim=0)
+        sequences_batched.append(batch_dict)
 
-    # Clear Planning Model memory
-    # del training_planning_model
-    # del optimizer_planning
-    # Clear CUDA cache
-    # torch.cuda.empty_cache()
-    # gc.collect()
+    actions = torch.stack(actions, dim=0)
+    rewards = torch.stack(rewards, dim=0)
 
-async def main():
-    # Initialize wandb
-    wandb_config = config.copy()
-    wandb.init(
-        project=wandb_config.get('wandb_project', 'online_arena'),
-        config=wandb_config,
-        name=wandb_config.get('run_name', f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"),
-        resume="allow",  # Allows resuming the run if it exists
-    )
-    wandb_run = wandb.run
+    return sequences_batched, actions, rewards
 
-    # Load or set initial GAMMA parameters
-    initial_gamma = config.get('gamma', {}).get('initial', 0.25)
-    min_gamma = config.get('gamma', {}).get('min', 0.01)
-    total_steps = config.get('gamma', {}).get('total_steps', 10)  # Define total steps or cycles
+def main():
+    # Configuration
+    root_dir = get_root_dir()
+    data_dir = os.path.join(root_dir, 'data', 'battle_data')
+    h5_files = glob.glob(os.path.join(data_dir, '*.h5'))
+    random.shuffle(h5_files)  # Shuffle the order of HDF5 files
 
-    current_step = 0
-    while True:
-        perform_final_training(wandb_run, True)
-        if current_step >= total_steps:
-            # Reset or stop annealing if desired
-            print("Completed all annealing steps. Resetting current_step.")
-            
-            # Optionally, you can reset wandb if you plan to continue logging
-            # wandb.finish()
-            # wandb.init(...)  # Reinitialize if needed
+    memory = get_image_memory()  # e.g., memory = 5
 
-            current_step = 0  # Or break if you want to stop
-            # Optionally, you can set GAMMA back to initial_gamma or keep it at min_gamma
-            # break
+    all_sequences = []
+    all_actions = []
+    all_rewards = []
 
-        # Compute GAMMA using cosine annealing
-        gamma = cosine_annealing(current_step, total_steps, initial_gamma, min_gamma)
-        print(f"Cycle {current_step + 1}/{total_steps}: GAMMA={gamma:.4f}")
-        
-        # Step 1: Run the battle instances with the current GAMMA
-        # run_battle_instances(gamma)
+    print(f"Total HDF5 files found: {len(h5_files)}")
 
-        # # Step 2: Optionally, run data capture on completed battles
-        # print("Running data capture on replays...")
-        # run_data_capture()
+    for file_path in h5_files:
+        print(f"Loading data from {file_path}...")
+        data = load_h5_file(file_path)
+        sequences, actions, rewards = create_sequences(data, memory)
+        all_sequences.extend(sequences)
+        all_actions.append(actions)
+        all_rewards.append(rewards)
 
-        # # Step 3: Move old replays to a new folder
-        # print("Moving replays to a new folder...")
-        # move_replays()
+    # Concatenate all actions and rewards
+    all_actions_tensor = torch.cat(all_actions, dim=0)  # Shape: (total_samples, 16)
+    all_rewards_tensor = torch.cat(all_rewards, dim=0)  # Shape: (total_samples,)
 
-        # Step 7: Increment the step and wait before the next cycle
-        current_step += 1
-        print("Cycle completed. Waiting for the next cycle...")
-        # await asyncio.sleep(1)  # Adjust the delay time as needed
+    print(f"Total sequences created: {len(all_sequences)}")
 
-    # Optionally, finish the wandb run when the loop ends
-    wandb.finish()
+    # Create Dataset and DataLoader
+    dataset = BattleDataset(all_sequences, all_actions_tensor, all_rewards_tensor)
+    dataloader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=4, collate_fn=collate_fn)
+
+    # Initialize model
+    model = BattleNetworkModel(image_option='None', memory=memory)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+
+    # Define loss function and optimizer
+    criterion = nn.BCELoss(reduction='none')  # We'll handle reduction manually to incorporate rewards
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    # Training loop
+    num_epochs = 10
+
+    for epoch in range(num_epochs):
+        model.train()
+        running_loss = 0.0
+        total_batches = 0
+
+        for batch_idx, (sequences_batched, targets, rewards) in enumerate(dataloader):
+            batch_size = targets.size(0)
+
+            # Move data to device
+            for m in range(memory):
+                for key in sequences_batched[m].keys():
+                    if key == 'player_chip_hand':
+                        # Move each tensor in the list to the device
+                        sequences_batched[m][key] = [tensor.to(device) for tensor in sequences_batched[m][key]]
+                    else:
+                        # Move the tensor to the device
+                        sequences_batched[m][key] = sequences_batched[m][key].to(device)
+            targets = targets.to(device)
+            rewards = rewards.to(device)
+
+            # Zero the parameter gradients
+            optimizer.zero_grad()
+
+            # Forward pass
+            outputs = model(sequences_batched)  # Shape: (batch_size, 16)
+
+            # Compute loss
+            loss_per_sample = criterion(outputs, targets)  # Shape: (batch_size, 16)
+            loss_per_sample = loss_per_sample.mean(dim=1)  # Shape: (batch_size,)
+            weighted_loss = loss_per_sample * rewards  # Incorporate reward as a weight
+            loss = weighted_loss.mean()
+
+            # Backward pass and optimize
+            loss.backward()
+            optimizer.step()
+
+            # Accumulate loss
+            running_loss += loss.item()
+            total_batches += 1
+
+            # Print statistics every 10 batches
+            if (batch_idx + 1) % 10 == 0:
+                avg_loss = running_loss / total_batches
+                print(f'Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(dataloader)}], Loss: {avg_loss:.4f}')
+                running_loss = 0.0
+                total_batches = 0
+
+        # Optionally, save the model checkpoint after each epoch
+        checkpoint_dir = os.path.join(root_dir, 'models')
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        checkpoint_path = os.path.join(checkpoint_dir, f'battle_model_epoch_{epoch+1}.pth')
+        torch.save(model.state_dict(), checkpoint_path)
+        print(f'Model checkpoint saved at {checkpoint_path}')
+
+    print('Training completed.')
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Process interrupted. Exiting...")
-        wandb.finish()  # Ensure wandb finishes properly on interrupt
+    main()

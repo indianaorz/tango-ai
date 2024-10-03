@@ -39,7 +39,7 @@ class PlanningModel(nn.Module):
         scaled_hidden_size = int(hidden_size * scale)
         scaled_health_size = int(16 * scale)
         scaled_cross_size = int(32 * scale)
-        scaled_available_crosses_size = int(16 * scale)
+        scaled_used_crosses_size = int(16 * scale)
         scaled_beast_flags_size = int(16 * scale)
         scaled_fc1_size = int(128 * scale)
         scaled_fc2_size = int(128 * scale)
@@ -58,7 +58,7 @@ class PlanningModel(nn.Module):
         # Other feature encoders
         self.health_fc = nn.Linear(2, scaled_health_size)  # Player and enemy health
         self.cross_fc = nn.Linear(52, scaled_cross_size)  # Player and enemy current cross (each 26 one-hot)
-        self.available_crosses_fc = nn.Linear(20, scaled_available_crosses_size)  # Player and enemy available crosses (each 10 bits, total 20)
+        self.used_crosses_fc = nn.Linear(20, scaled_used_crosses_size)  # Player and enemy available crosses (each 10 bits, total 20)
         self.beast_flags_fc = nn.Linear(4, scaled_beast_flags_size)  # Beast out flags for player and enemy
         
         # Fully connected layers
@@ -66,7 +66,7 @@ class PlanningModel(nn.Module):
             scaled_hidden_size * 3 + 
             scaled_health_size + 
             scaled_cross_size + 
-            scaled_available_crosses_size + 
+            scaled_used_crosses_size + 
             scaled_beast_flags_size
         )  # From processed inputs
         self.fc1 = nn.Linear(total_features, scaled_fc1_size)
@@ -93,7 +93,7 @@ class PlanningModel(nn.Module):
         # Process other features
         health_feat = F.relu(self.health_fc(inputs['health']))  # (batch_size, scaled_health_size)
         cross_feat = F.relu(self.cross_fc(inputs['current_crosses']))  # (batch_size, scaled_cross_size)
-        available_crosses_feat = F.relu(self.available_crosses_fc(inputs['available_crosses']))  # (batch_size, scaled_available_crosses_size)
+        used_crosses_feat = F.relu(self.used_crosses_fc(inputs['used_crosses']))  # (batch_size, scaled_used_crosses_size)
         beast_flags_feat = F.relu(self.beast_flags_fc(inputs['beast_flags']))  # (batch_size, scaled_beast_flags_size)
         
         # Concatenate all features
@@ -103,7 +103,7 @@ class PlanningModel(nn.Module):
             visible_chips_embeds, 
             health_feat, 
             cross_feat, 
-            available_crosses_feat, 
+            used_crosses_feat, 
             beast_flags_feat
         ], dim=-1)
         
@@ -262,19 +262,19 @@ def encode_visible_chips(chips, visible_count):
     
     return {'chips_onehot': chips_onehot, 'codes_onehot': codes_onehot}
 
-def encode_available_crosses(available_crosses):
+def encode_used_crosses(used_crosses):
     """
     Encodes available crosses into a 10-bit binary tensor.
 
     Args:
-        available_crosses (list): List of available cross indices (integers from 0 to 9).
+        used_crosses (list): List of available cross indices (integers from 0 to 9).
 
     Returns:
         torch.Tensor: Binary tensor of shape (1,10), where each bit represents the availability of a cross.
     """
     num_crosses = 10
     binary_vector = [0] * num_crosses
-    for cross_index in available_crosses:
+    for cross_index in used_crosses:
         if 0 <= cross_index < num_crosses:
             binary_vector[cross_index] = 1
         else:
@@ -350,8 +350,8 @@ def get_planning_input_from_instance(inference_planning_model, instance, GAMMA, 
     enemy_health = instance['enemy_health']
     player_chips = instance['player_chips']
     chip_visible_count = instance['chip_visible_count']
-    player_available_crosses = instance['player_available_crosses']  # List of up to 5 indices [0-4]
-    enemy_available_crosses = instance['enemy_available_crosses']  # List of up to 5 indices [0-4]
+    player_used_crosses = instance['player_used_crosses']  # List of up to 5 indices [0-4]
+    enemy_used_crosses = instance['enemy_used_crosses']  # List of up to 5 indices [0-4]
     player_cross = instance['player_game_emotion']
     opponent_cross = instance['enemy_game_emotion']
     player_beasted_out = instance['player_beasted_out']
@@ -372,11 +372,11 @@ def get_planning_input_from_instance(inference_planning_model, instance, GAMMA, 
     health_tensor = torch.tensor([[player_health, enemy_health]], dtype=torch.float32, device=device)  # Shape: (1, 2)
 
     # Encode available crosses for player and enemy
-    player_available_crosses_encoded = encode_available_crosses(player_available_crosses)  # Shape: (1,10)
-    enemy_available_crosses_encoded = encode_available_crosses(enemy_available_crosses)    # Shape: (1,10)
+    player_used_crosses_encoded = encode_used_crosses(player_used_crosses)  # Shape: (1,10)
+    enemy_used_crosses_encoded = encode_used_crosses(enemy_used_crosses)    # Shape: (1,10)
 
     # Concatenate player and enemy available crosses to form a 20-bit vector
-    available_crosses_tensor = torch.cat([player_available_crosses_encoded, enemy_available_crosses_encoded], dim=1)  # Shape: (1,20)
+    used_crosses_tensor = torch.cat([player_used_crosses_encoded, enemy_used_crosses_encoded], dim=1)  # Shape: (1,20)
 
     # Encode current crosses for player and enemy
     player_current_cross_encoded = encode_current_cross(player_cross)      # Shape: (1,26)
@@ -406,7 +406,7 @@ def get_planning_input_from_instance(inference_planning_model, instance, GAMMA, 
         },
         'health': health_tensor,                                     # (1,2)
         'current_crosses': current_crosses_tensor,                   # (1,52)
-        'available_crosses': available_crosses_tensor,               # (1,10)
+        'used_crosses': used_crosses_tensor,               # (1,10)
         'beast_flags': beast_flags_encoded                           # (1,4)
     }
     
@@ -447,10 +447,10 @@ def get_planning_input_from_instance(inference_planning_model, instance, GAMMA, 
             # print(f"Port {instance.get('port', 'N/A')}: Planning Output - chip_selection_logits: {chip_prob}")
         
         # Ensure the selected cross is within the range of available crosses
-        # 'None' is considered as the first cross (index 0), so available_crosses_count = len - 1
-        available_crosses = len(instance['player_available_crosses'])  # Number of available crosses
-        print(f"-------------------{len(instance['player_available_crosses'])}:")
-        cross_target = min(cross_target, available_crosses)  # Ensures cross_target does not exceed available crosses
+        # 'None' is considered as the first cross (index 0), so used_crosses_count = len - 1
+        used_crosses = len(instance['player_used_crosses'])  # Number of available crosses
+        print(f"-------------------{len(instance['player_used_crosses'])}:")
+        cross_target = min(cross_target, used_crosses)  # Ensures cross_target does not exceed available crosses
         
         # Ensure the selected chips are within the range of visible chips
         chip_visible = instance['chip_visible_count']
@@ -466,9 +466,9 @@ def get_planning_input_from_instance(inference_planning_model, instance, GAMMA, 
     # Epsilon-Greedy Strategy: With probability GAMMA, select a random action
     if random.random() < GAMMA:
         # Determine cross_target
-        available_crosses_count = len(instance['player_available_crosses'])
-        if available_crosses_count > 0:
-            cross_target = random.randint(0, available_crosses_count - 1)
+        used_crosses_count = len(instance['player_used_crosses'])
+        if used_crosses_count > 0:
+            cross_target = random.randint(0, used_crosses_count - 1)
         else:
             cross_target = 0  # Default to 'None'
         
@@ -480,7 +480,7 @@ def get_planning_input_from_instance(inference_planning_model, instance, GAMMA, 
             target_list = random.sample(range(chip_visible), chip_visible)
         
         # Ensure the selected cross is within the range of available crosses
-        cross_target = min(cross_target, available_crosses_count - 1)
+        cross_target = min(cross_target, used_crosses_count - 1)
         
         # Ensure the selected chips are within the range of visible chips
         for i in range(len(target_list)):
@@ -517,8 +517,8 @@ def get_planning_input_from_replay(instance, GAMMA, device):
     enemy_health = instance['enemy_health']
     player_chips = instance['player_chips']
     chip_visible_count = instance['chip_visible_count']
-    player_available_crosses = instance['player_available_crosses']  # List of up to 5 indices [0-4]
-    enemy_available_crosses = instance['enemy_available_crosses']  # List of up to 5 indices [0-4]
+    player_used_crosses = instance['player_used_crosses']  # List of up to 5 indices [0-4]
+    enemy_used_crosses = instance['enemy_used_crosses']  # List of up to 5 indices [0-4]
     player_cross = instance['player_game_emotion']
     opponent_cross = instance['enemy_game_emotion']
     player_beasted_out = instance['player_beasted_out']
@@ -541,11 +541,11 @@ def get_planning_input_from_replay(instance, GAMMA, device):
     health_tensor = torch.tensor([[player_health, enemy_health]], dtype=torch.float32, device=device)  # Shape: (1, 2)
 
     # Encode available crosses for player and enemy
-    player_available_crosses_encoded = encode_available_crosses(player_available_crosses)  # Shape: (1,5)
-    enemy_available_crosses_encoded = encode_available_crosses(enemy_available_crosses)    # Shape: (1,5)
+    player_used_crosses_encoded = encode_used_crosses(player_used_crosses)  # Shape: (1,5)
+    enemy_used_crosses_encoded = encode_used_crosses(enemy_used_crosses)    # Shape: (1,5)
     
     # Concatenate player and enemy available crosses to form a 10-bit vector
-    available_crosses_tensor = torch.cat([player_available_crosses_encoded, enemy_available_crosses_encoded], dim=1)  # Shape: (1,10)
+    used_crosses_tensor = torch.cat([player_used_crosses_encoded, enemy_used_crosses_encoded], dim=1)  # Shape: (1,10)
 
     # Encode current crosses for player and enemy
     player_current_cross_encoded = encode_current_cross(player_cross)      # Shape: (1,26)
@@ -575,7 +575,7 @@ def get_planning_input_from_replay(instance, GAMMA, device):
         },
         'health': health_tensor,                                     # (1,2)
         'current_crosses': current_crosses_tensor,                   # (1,52)
-        'available_crosses': available_crosses_tensor,               # (1,10)
+        'used_crosses': used_crosses_tensor,               # (1,10)
         'beast_flags': beast_flags_encoded                           # (1,4)
     }
     
@@ -616,9 +616,9 @@ def get_planning_input_from_replay(instance, GAMMA, device):
     # Epsilon-Greedy Strategy: With probability GAMMA, select a random action
     if random.random() < GAMMA:
         # Determine cross_target
-        available_crosses_count = len(instance['player_available_crosses'])
-        if available_crosses_count > 0:
-            cross_target = random.randint(0, available_crosses_count - 1)
+        used_crosses_count = len(instance['player_used_crosses'])
+        if used_crosses_count > 0:
+            cross_target = random.randint(0, used_crosses_count - 1)
         else:
             cross_target = 0  # Default to 'None'
         
@@ -630,7 +630,7 @@ def get_planning_input_from_replay(instance, GAMMA, device):
             target_list = random.sample(range(chip_visible), chip_visible)
         
         # Ensure the selected cross is within the range of available crosses
-        cross_target = min(cross_target, available_crosses_count - 1)
+        cross_target = min(cross_target, used_crosses_count - 1)
         
         # Ensure the selected chips are within the range of visible chips
         for i in range(len(target_list)):
