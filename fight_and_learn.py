@@ -448,7 +448,10 @@ def load_models(image_memory=1):
             latest_number = extract_number_from_checkpoint(training_battle_checkpoint_path)
             latest_checkpoint_number['battle'] = latest_number
         else:
-            raise KeyError("Training Battle checkpoint does not contain 'model_state_dict'")
+            #load from the checkpoint
+            training_battle_model.load_state_dict(torch.load(training_battle_checkpoint_path))
+            latest_number = extract_number_from_checkpoint(training_battle_checkpoint_path)
+            latest_checkpoint_number['battle'] = latest_number
     else:
         # Initialize new Training Battle Model
         training_battle_model = BattleNetworkModel(memory=image_memory).to(device)
@@ -1643,9 +1646,6 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
 
                             # Prepare data point
                             data_point = gamestate_tensor
-                            model = BattleNetworkModel(image_option='None', memory=1, scale=1.0, dropout_p=0.5)
-                            model.eval()  # Set the model to evaluation mode
-                            model([gamestate_tensor])
                             
                             current_time = time.time()
                             # Detect entering or exiting the window
@@ -1689,19 +1689,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             if not game_instance.get('is_player', False) and not is_replay:
                                 command = predict(
                                     port,
-                                    sampled_frames,
-                                    position_tensor,
-                                    inside_window_tensor,
-                                    player_health_tensor,
-                                    enemy_health_tensor,
-                                    player_charge_seq,
-                                    enemy_charge_seq,
-                                    current_player_charge,
-                                    current_enemy_charge,
-                                    previous_inputs_tensor,
-                                    health_memory_tensor,
-                                    current_player_chip,
-                                    current_enemy_chip
+                                    data_point
                                 )
                                 #final check to make sure the action doesn't contain the pause button while outside the window
                                 if current_inside_window == 0 and command['key'][15 - KEY_BIT_POSITIONS['RETURN']] == '1': 

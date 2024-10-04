@@ -559,6 +559,7 @@ class BattleDataset(Dataset):
 def test_battle_network_model():
     import h5py
     import torch
+    import random
 
     # Define the file path
     file_path = '../TANGO/data/battle_data/Battle_Model_port_12345_20241003223718928205.h5'
@@ -570,75 +571,206 @@ def test_battle_network_model():
         for key in hf.keys():
             datasets[key] = torch.tensor(hf[key][()], dtype=torch.float32)  # Convert to torch tensors
 
-    # Initialize the model
-    model = BattleNetworkModel(image_option='None', memory=1, scale=1.0, dropout_p=0.5)
+    # Initialize the model with memory=10
+    memory = 10
+    batch_size = 5
+    model = BattleNetworkModel(image_option='None', memory=memory, scale=1.0, dropout_p=0.5)
     model.eval()  # Set the model to evaluation mode
 
-    # Set memory
-    memory = model.memory
-
-    # Select an index for testing
-    idx = 0
-
-    # Ensure there are enough samples
+    # Select random starting indices ensuring there are enough gamestates
     num_samples = datasets['cust_gage'].shape[0]
-    if idx + memory > num_samples:
-        print("Not enough samples for the desired memory length")
+    if num_samples < memory:
+        print(f"Not enough samples in the dataset to test with memory={memory}.")
         return
 
-    # Prepare the input batch
-    # Assuming memory = 1 for simplicity; adjust as needed
-    batch_size = 1  # Modify as per your requirements
-    batch_gamestates = {}
-
-    # Updated list of all required features
-    feature_keys = [
-        'cust_gage', 'grid', 'player_health', 'enemy_health', 'player_chip',
-        'enemy_chip', 'player_charge', 'enemy_charge', 'player_chip_hand',
-        'player_folder', 'enemy_folder', 'player_custom', 'enemy_custom',
-        'player_emotion_state', 'enemy_emotion_state', 'player_used_crosses',
-        'enemy_used_crosses', 'player_beasted_out', 'enemy_beasted_out',
-        'player_beasted_over', 'enemy_beasted_over'
-    ]
-
-    # Print keys of datasets for verification
-    print("Available dataset keys:", datasets.keys())
-    
-    print("dataset shape:", datasets['cust_gage'].shape)
-
-    for key in feature_keys:
-        if key not in datasets:
-            print(f"Warning: Key '{key}' not found in datasets. Skipping this feature.")
-            continue  # Skip missing features or handle appropriately
-
-        # Extract the relevant slice for the batch
-        # Shape adjustment may be necessary depending on how the model expects the input
-        if memory > 1:
-            # For memory sequences, you might need to extract a window of data
-            batch_gamestates[key] = datasets[key][idx:idx + memory].unsqueeze(0)  # Shape: (1, memory, ...)
-        else:
-            batch_gamestates[key] = datasets[key][idx].unsqueeze(0)  # Shape: (1, ...)
-
-    # Verify that all required features are present
-    missing_features = [key for key in feature_keys if key not in batch_gamestates]
-    if missing_features:
-        print(f"Error: The following required features are missing from the input batch: {missing_features}")
+    # To ensure that each sequence has enough gamestates, select starting indices such that start_idx + memory <= num_samples
+    max_start_idx = num_samples - memory
+    if max_start_idx < batch_size:
+        print(f"Not enough samples to create a batch of size {batch_size} with memory={memory}.")
         return
 
-    # Pass the batch to the model
-    with torch.no_grad():  # Disable gradient computation for inference
+    # Select 5 unique starting indices
+    # To allow overlapping sequences, you can allow duplicate starting indices by using random.randint multiple times
+    # Here, we select unique starting indices
+    start_indices = random.sample(range(0, max_start_idx), batch_size)
+    print(f"Selected starting indices for {batch_size} sequences: {start_indices}")
+
+    # Helper function to split flattened tensors
+    def split_flattened_tensor(flat_tensor, num_chunks, chunk_size):
+        """
+        Splits a flattened tensor into a tuple of tensors.
+
+        Args:
+            flat_tensor (torch.Tensor): The flattened tensor of shape (batch_size, num_chunks * chunk_size).
+            num_chunks (int): Number of chunks to split into.
+            chunk_size (int): Size of each chunk.
+
+        Returns:
+            tuple of torch.Tensor: Tuple containing the split tensors.
+        """
+        return torch.chunk(flat_tensor, chunks=num_chunks, dim=1)
+
+    # Helper function to process a single gamestate
+    def load_gamestate(datasets, idx):
+        gamestate = {
+            'cust_gage': datasets['cust_gage'][idx].unsqueeze(0),  # Shape: (1,)
+            'grid': datasets['grid'][idx].unsqueeze(0),  # Shape: (1, 6, 3, 16)
+            'player_health': datasets['player_health'][idx].unsqueeze(0),  # Shape: (1,)
+            'enemy_health': datasets['enemy_health'][idx].unsqueeze(0),  # Shape: (1,)
+            'player_chip': datasets['player_chip'][idx].unsqueeze(0),  # Shape: (1, 401)
+            'enemy_chip': datasets['enemy_chip'][idx].unsqueeze(0),  # Shape: (1, 401)
+            'player_charge': datasets['player_charge'][idx].unsqueeze(0),  # Shape: (1,)
+            'enemy_charge': datasets['enemy_charge'][idx].unsqueeze(0),  # Shape: (1,)
+            # 'player_chip_hand' is a flattened tensor (1, 2005) → split into 5 tensors of (1, 401)
+            'player_chip_hand': split_flattened_tensor(
+                datasets['player_chip_hand'][idx].unsqueeze(0), num_chunks=5, chunk_size=401
+            ),
+            # 'player_folder' is a flattened tensor (1, 12930) → split into 30 tensors of (1, 431)
+            'player_folder': split_flattened_tensor(
+                datasets['player_folder'][idx].unsqueeze(0), num_chunks=30, chunk_size=431
+            ),
+            # 'enemy_folder' is a flattened tensor (1, 12930) → split into 30 tensors of (1, 431)
+            'enemy_folder': split_flattened_tensor(
+                datasets['enemy_folder'][idx].unsqueeze(0), num_chunks=30, chunk_size=431
+            ),
+            'player_custom': datasets['player_custom'][idx].unsqueeze(0),  # Shape: (1, 200)
+            'enemy_custom': datasets['enemy_custom'][idx].unsqueeze(0),  # Shape: (1, 200)
+            'player_emotion_state': datasets['player_emotion_state'][idx].unsqueeze(0),  # Shape: (1, 27)
+            'enemy_emotion_state': datasets['enemy_emotion_state'][idx].unsqueeze(0),  # Shape: (1, 27)
+            'player_used_crosses': datasets['player_used_crosses'][idx].unsqueeze(0),  # Shape: (1, 10)
+            'enemy_used_crosses': datasets['enemy_used_crosses'][idx].unsqueeze(0),  # Shape: (1, 10)
+            'player_beasted_out': datasets['player_beasted_out'][idx].unsqueeze(0),  # Shape: (1,)
+            'enemy_beasted_out': datasets['enemy_beasted_out'][idx].unsqueeze(0),  # Shape: (1,)
+            'player_beasted_over': datasets['player_beasted_over'][idx].unsqueeze(0),  # Shape: (1,)
+            'enemy_beasted_over': datasets['enemy_beasted_over'][idx].unsqueeze(0)  # Shape: (1,)
+        }
+        return gamestate
+
+    # Helper function to batch multiple gamestates
+    def batch_gamestates(gamestates_list):
+        """
+        Batches multiple gamestates into a single gamestate dictionary with batch dimension.
+
+        Args:
+            gamestates_list (list of dict): List of gamestates to batch.
+
+        Returns:
+            dict: Batched gamestate with tensors having batch_size dimension.
+        """
+        batched_gamestate = {}
+        for key in gamestates_list[0].keys():
+            if isinstance(gamestates_list[0][key], (list, tuple)):
+                # For list-based fields like player_chip_hand, player_folder, enemy_folder
+                # Stack the tensors along a new batch dimension
+                batched_gamestate[key] = [torch.cat([g[key][i] for g in gamestates_list], dim=0) for i in range(len(gamestates_list[0][key]))]
+            else:
+                # For tensor fields
+                batched_gamestate[key] = torch.cat([g[key] for g in gamestates_list], dim=0)  # Shape: (batch_size, ...)
+        return batched_gamestate
+
+    # Load all sequences and batch them
+    batch_gamestates_list = []  # List of gamestates per memory step (length=memory)
+    for t in range(memory):
+        current_gamestates = []
+        for s in range(batch_size):
+            current_idx = start_indices[s] + t
+            gamestate = load_gamestate(datasets, current_idx)
+            current_gamestates.append(gamestate)
+        # Batch the current gamestates across the batch dimension
+        batched_gamestate = batch_gamestates(current_gamestates)
+        batch_gamestates_list.append(batched_gamestate)
+
+    # **Debugging: Inspect Each Batched Gamestate in the Sequence**
+    for t, batched_gamestate in enumerate(batch_gamestates_list):
+        print(f"\nMemory Step {t + 1}:")
+        print("Type of 'player_chip_hand':", type(batched_gamestate['player_chip_hand']))
+        print("After splitting 'player_chip_hand':")
+        for j, chip in enumerate(batched_gamestate['player_chip_hand']):
+            print(f"  player_chip_hand[{j}].shape: {chip.shape}")  # Should be torch.Size([batch_size, 401])
+
+        print("After splitting 'player_folder':")
+        for j, folder in enumerate(batched_gamestate['player_folder']):
+            print(f"  player_folder[{j}].shape: {folder.shape}")  # Should be torch.Size([batch_size, 431])
+            if j < 3:  # Limit to first 3 for brevity
+                print(f"  player_folder[{j}].shape: {folder.shape}")
+        # Similarly, limit enemy_folder prints
+        print("After splitting 'enemy_folder':")
+        for j, folder in enumerate(batched_gamestate['enemy_folder']):
+            print(f"  enemy_folder[{j}].shape: {folder.shape}")  # Should be torch.Size([batch_size, 431])
+            if j < 3:  # Limit to first 3 for brevity
+                print(f"  enemy_folder[{j}].shape: {folder.shape}")
+
+    # **Validate Each Batched Gamestate in the Sequence**
+    def validate_batched_gamestate(batched_gamestate, memory_step, batch_size):
+        # Validate 'player_chip_hand'
+        if not isinstance(batched_gamestate['player_chip_hand'], (list, tuple)):
+            raise TypeError(f"Memory Step {memory_step}: player_chip_hand must be a list or tuple.")
+        if len(batched_gamestate['player_chip_hand']) != 5:
+            raise ValueError(f"Memory Step {memory_step}: player_chip_hand must contain 5 tensors.")
+        for i, chip in enumerate(batched_gamestate['player_chip_hand']):
+            if chip.dim() != 2 or chip.shape[0] != batch_size or chip.shape[1] != 401:
+                raise ValueError(f"Memory Step {memory_step}: player_chip_hand[{i}] must have shape (batch_size, 401). Got {chip.shape}")
+
+        # Validate 'player_folder' and 'enemy_folder'
+        for folder_key in ['player_folder', 'enemy_folder']:
+            folder = batched_gamestate[folder_key]
+            if not isinstance(folder, (list, tuple)):
+                raise TypeError(f"Memory Step {memory_step}: {folder_key} must be a list or tuple.")
+            if len(folder) != 30:
+                raise ValueError(f"Memory Step {memory_step}: {folder_key} must contain 30 tensors.")
+            for i, chip in enumerate(folder):
+                if chip.dim() != 2 or chip.shape[0] != batch_size or chip.shape[1] != 431:
+                    raise ValueError(f"Memory Step {memory_step}: {folder_key}[{i}] must have shape (batch_size, 431). Got {chip.shape}")
+
+        # Validate other tensor shapes as needed
+        expected_shapes = {
+            'cust_gage': (batch_size,),
+            'grid': (batch_size, 6, 3, 16),
+            'player_health': (batch_size,),
+            'enemy_health': (batch_size,),
+            'player_chip': (batch_size, 401),
+            'enemy_chip': (batch_size, 401),
+            'player_charge': (batch_size,),
+            'enemy_charge': (batch_size,),
+            'player_custom': (batch_size, 200),
+            'enemy_custom': (batch_size, 200),
+            'player_emotion_state': (batch_size, 27),
+            'enemy_emotion_state': (batch_size, 27),
+            'player_used_crosses': (batch_size, 10),
+            'enemy_used_crosses': (batch_size, 10),
+            'player_beasted_out': (batch_size,),
+            'enemy_beasted_out': (batch_size,),
+            'player_beasted_over': (batch_size,),
+            'enemy_beasted_over': (batch_size,)
+        }
+
+        for key, shape in expected_shapes.items():
+            tensor = batched_gamestate.get(key)
+            if tensor is None:
+                raise ValueError(f"Memory Step {memory_step}: Missing key: {key}")
+            if tensor.shape != shape:
+                raise ValueError(f"Memory Step {memory_step}: {key} has shape {tensor.shape}, expected {shape}.")
+
+    # Validate all batched gamestates
+    for t, batched_gamestate in enumerate(batch_gamestates_list):
         try:
-            output = model(batch_gamestates)
-        except Exception as e:
-            print(f"Error during model inference: {e}")
-            traceback.print_exc()  # Uncomment for detailed error trace
+            validate_batched_gamestate(batched_gamestate, memory_step=t + 1, batch_size=batch_size)
+            print(f"\nMemory Step {t + 1} validation passed.")
+        except (TypeError, ValueError) as e:
+            print(f"\nValidation Error in Memory Step {t + 1}: {e}")
             return
 
-    # Print the output
-    print("Model output:", output)
-    print("Output shape:", output.shape)
+    # **Prepare the Sequence for the Model**
+    # The model expects a list of 'memory' gamestates, each containing batched data with batch_size=5
+    # So, batch_gamestates_list is already a list of 10 batched gamestates
+    print("\nBatch gamestates prepared.")
 
+    # **Forward Pass Through the Model**
+    print("\nPerforming model inference...")
+    with torch.no_grad():
+        output = model(batch_gamestates_list)
 
+    print("\nModel output:", output)
 
 # If this script is run directly, execute the test function
 if __name__ == "__main__":
