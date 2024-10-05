@@ -105,6 +105,11 @@ do_replays = False
 save_data = False
 prune = False
 
+#grid experience for ports
+grid_experiences = defaultdict(list)
+
+shoot_experiences = defaultdict(list)
+
 
 # replay_count = 0
 # battle_count = 1
@@ -141,10 +146,10 @@ INSTANCES = [
     {
         'address': '127.0.0.1',
         'port': 12345,
-        # 'rom_path': 'bn6,0',
-        'rom_path': 'bn6,1',
-        # 'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar.sav',
+        'rom_path': 'bn6,0',
+        # 'rom_path': 'bn6,1',
+        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
+        # 'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar.sav',
         'name': 'Instance 2',
         'init_link_code': 'arena1',
         'is_player': False  # Set to False if you want this instance to send inputs
@@ -377,6 +382,9 @@ from planning_model import PlanningModel, get_planning_input_from_replay
 gridstate_model = None
 from dodgemodel import GridStateEvaluator
 
+shoot_model = None
+from dodgemodel import GridStateEvaluator
+
 def load_models(image_memory=1, learning_rate=1e-3):
     global gridstate_model
     global latest_checkpoint_number  # Access the global variable
@@ -400,6 +408,18 @@ def load_models(image_memory=1, learning_rate=1e-3):
         print(f"Loaded model checkpoint from {checkpoint_path}")
     else:
         print("No checkpoint found. Initializing a new model.")
+        
+    #load shootmodel
+    global shoot_model
+    shoot_model = GridStateEvaluator().to(device)
+    checkpoint_path = 'shooteval.pth'
+    if os.path.exists(checkpoint_path):
+        shoot_model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        shoot_model.eval()
+        print(f"Loaded model checkpoint from {checkpoint_path}")
+    else:
+        print("No checkpoint found. Initializing a new model.")
+        
 
     
 
@@ -474,7 +494,7 @@ from planning_model import get_planning_input_from_instance, encode_used_crosses
 # previous_sent = 0
 
 def predict(port, current_data_point, inside_window, tensor_params):
-    global window_entry_time, previous_sent_dict, previous_inside_window_dict, INSTANCES, gridstate_model
+    global window_entry_time, previous_sent_dict, previous_inside_window_dict, INSTANCES, gridstate_model, shoot_model
     current_time = time.time()
 
     #skip chip window
@@ -500,6 +520,35 @@ def predict(port, current_data_point, inside_window, tensor_params):
     else:
         # Get confidence score using the model's method
         confidence = gridstate_model.get_confidence_score(current_data_point)
+        
+        shoot_confidence = shoot_model.get_confidence_score(current_data_point)
+        
+        shoot_bit = '0' if not tensor_params['player_shoot_button'] else '1'
+        
+        input_string='0000000000000000'
+        press_confidence = 0
+        release_confidence = 0
+        
+        release_params = tensor_params.copy()
+        release_params['player_shoot_button'] = False
+        release_confidence = shoot_model.get_confidence_score(get_gamestate_tensor(release_params))
+        
+        press_params = tensor_params.copy()
+        press_params['player_shoot_button'] = True
+        press_confidence = shoot_model.get_confidence_score(get_gamestate_tensor(press_params))
+        
+        if press_confidence > shoot_confidence:
+            shoot_bit = '1'
+            # print('shoot')
+        elif release_confidence > shoot_confidence:
+            shoot_bit = '0'
+            # print('release')
+        
+        print(press_confidence - release_confidence)
+        
+        #set 
+        input_string = input_string[:15 -KEY_BIT_POSITIONS['X']] + shoot_bit + input_string[15 - KEY_BIT_POSITIONS['X']+1:]
+        # print(input_string)
 
         if confidence is None:
             print(f"Port {port}: Unable to compute confidence score.")
@@ -529,37 +578,32 @@ def predict(port, current_data_point, inside_window, tensor_params):
         #sort the possible states by confidence
         # print(possible_states)
         
+        #print confidence of stay, up down left right to 2 decimals
+        # print(f"Position: [{tensor_params['player_grid_position']}] Conidences: Stay[{confidence:.6f}] Left[{left_confidence:.6f}] Right[{right_confidence:.6f}] Up[{up_confidence:.6f}] Down[{down_confidence:.6f}] Shoot[{press_confidence:.6f}] Release[{release_confidence:.6f}]")
+        
         #perform the most confident action
         offset = possible_states[0][0]
-        if offset[0] == 0 and offset[1] == 0:
+        # if offset[0] == 0 and offset[1] == 0:
             #stay
-            return {'type': 'key_press', 'key': '0000000000000000'}
-        elif offset[0] == -1 and offset[1] == 0:
+            # print('stay')
+        if offset[0] == -1 and offset[1] == 0:
             #move left
-            print('left')
-            return {'type': 'key_press', 'key': '0000000000100000'}
+            # print('left')
+            input_string = input_string[:15 -KEY_BIT_POSITIONS['LEFT']] + '1' + input_string[15 - KEY_BIT_POSITIONS['LEFT']+1:]
         elif offset[0] == 1 and offset[1] == 0:
             #move right
-            print('right')
-            return {'type': 'key_press', 'key': '0000000000010000'}
+            # print('right')
+            input_string = input_string[:15 -KEY_BIT_POSITIONS['RIGHT']] + '1' + input_string[15 - KEY_BIT_POSITIONS['RIGHT']+1:]
         elif offset[0] == 0 and offset[1] == -1:
             #move up
-            print('up')
-            return {'type': 'key_press', 'key': '0000000001000000'}
+            # print('up')
+            input_string = input_string[:15 -KEY_BIT_POSITIONS['UP']] + '1' + input_string[15 - KEY_BIT_POSITIONS['UP']+1:]
         elif offset[0] == 0 and offset[1] == 1:
             #move down
-            print('down')
-            return {'type': 'key_press', 'key': '0000000010000000'}
-        
-        
+            # print('down')
+            input_string = input_string[:15 -KEY_BIT_POSITIONS['DOWN']] + '1' + input_string[15 - KEY_BIT_POSITIONS['DOWN']+1:]
 
-        # Decide action based on confidence
-        if confidence > 0.5:
-            action_key = '0000000000001000'  # Example action for high confidence
-        else:
-            action_key = '0000000000000000'  # Example action for low confidence
-
-        return {'type': 'key_press', 'key': action_key}
+        return {'type': 'key_press', 'key': input_string}
 
 
     return {'type': 'key_press', 'key': '0000000000000000'}
@@ -567,6 +611,9 @@ def predict(port, current_data_point, inside_window, tensor_params):
 def get_offset_confidence(offset, tensor_params):
     global gridstate_model
     offset_position = [tensor_params['player_grid_position'][0] + offset[0], tensor_params['player_grid_position'][1] + offset[1]]
+    #check if offset position x is between 1-6 and y is between 1-3
+    if offset_position[0] < 1 or offset_position[0] > 6 or offset_position[1] < 1 or offset_position[1] > 3:
+        return 0
     offset_tensor = tensor_params.copy()
     offset_tensor['player_grid_position'] = offset_position
     gamestate = get_gamestate_tensor(offset_tensor)
@@ -578,7 +625,7 @@ max_reward = 1
 max_punishment = 1
 # Function to receive messages from the game and process them
 async def receive_messages(reader, writer, port, training_data_dir, config):
-    global max_reward, max_punishment, prune
+    global max_reward, max_punishment, prune, gridstate_model, grid_experiences, shoot_experiences
     buffer = ""
     current_input = None
     current_reward = 0
@@ -913,6 +960,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         "enemy_chip": current_enemy_chip,  # validated 2
                         "player_charge": current_player_charge,  # validated 2
                         "enemy_charge": current_enemy_charge,  # validated 2
+                        "player_shoot_button": current_input[14] == '1',
+                        "player_chip_button": current_input[15] == '1',
                         "player_chip_hand": game_instance['current_hand'] if 'current_hand' in game_instance else None,  # validated 2
                         "player_folder": game_instance['player_folder'],  # validated 2
                         "enemy_folder": game_instance['enemy_folder'],  # validated 2
@@ -1056,29 +1105,48 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             # Assign reward to the current data_point
                             data_buffers[port].append(data_point)
                             if current_reward != 0 or current_punishment != 0:
-                                
-                                # Compute reward for the data_point
+                                # Compute reward
                                 reward_value = (current_reward / max_reward) - (current_punishment / max_punishment)
-                                # print(f"Port {port}: Assigning reward: {reward_value}")
-
-                                #assign datapoint if not assigned
-                                if 'reward' not in data_buffers[port][-1]:
-                                    data_buffers[port][-1]['reward'] = reward_value
+                                grid_experiences[port].append([data_point, reward_value])
+                                
+                                # Apply discounted rewards to all experiences
+                                gamma = 0.99
+                                grid_experiences[port] = apply_discounted_rewards(grid_experiences[port], gamma)
+                                shoot_experiences[port] = apply_discounted_rewards(shoot_experiences[port], gamma)
+                                
+                                # Train on the last batch of window_size
+                                if len(grid_experiences[port]) > window_size:
+                                    batch = grid_experiences[port][-window_size:]
                                 else:
-                                    data_point['reward'] += reward_value    
-
-                                # Apply discounted rewards to past data points
-                                gamma = 0.99  # Discount factor
-                                for i, past_data_point in enumerate(reversed(data_buffers[port][-window_size:])):
-                                    discounted_reward = reward_value * (gamma ** i)
-                                    if 'reward' in past_data_point:
-                                        past_data_point['reward'] += discounted_reward
+                                    batch = grid_experiences[port]
+                                
+                                average_loss, num_trained = gridstate_model.train_batch(batch)
+                                
+                                if reward_value > 0:
+                                    shoot_experiences[port].append([data_point, reward_value])
+                                    #train on shoot experiences
+                                    if len(shoot_experiences[port]) > window_size:
+                                        batch = shoot_experiences[port][-window_size:]
                                     else:
-                                        past_data_point['reward'] = discounted_reward
+                                        batch = shoot_experiences[port]
+                                    
+                                    average_loss, num_trained = shoot_model.train_batch(batch)
+
 
                                 # Reset rewards
                                 current_reward = 0
                                 current_punishment = 0
+                            else:
+                                grid_experiences[port].append([data_point, 0.001])
+                                #train on the current experience
+                                gridstate_model.train_batch(grid_experiences[port][-1:])
+                                #train on random batch of 100
+                                # if len(grid_experiences[port]) > 100:
+                                #     batch = grid_experiences[port][-100:]
+                                #     average_loss, num_trained = gridstate_model.train_batch(batch)
+                                # else:
+                                #     average_loss, num_trained = gridstate_model.train_batch(grid_experiences[port])
+                                # print(f"Port {port}: Average Loss: {average_loss}, Num Trained: {num_trained}")
 
                             # Pruning Logic Starts Here
                             # Remove data points older than window_size that have no reward assigned
@@ -1095,7 +1163,11 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             #                 pruned_count += 1
                             #             else:
                             #                 i += 1
-
+                            #reward shoot model if charging
+                            # if current_player_charge >= 0.5:
+                            #     shoot_experiences[port].append([data_point, 0.1])
+                            #     shoot_model.train_batch(shoot_experiences[port][-1:])
+                                
                             current_reward = 0
                             current_punishment = 0
                             
@@ -1230,7 +1302,25 @@ async def send_input_command(writer, command, port=0):
     except Exception as e:
         print(f"Failed to send command on port {port}: {e}")
         raise
-    
+def apply_discounted_rewards(experiences, gamma=0.99):
+    """
+    Applies discounted rewards to a list of experiences.
+
+    Args:
+        experiences (list): List of [data_point, reward] pairs.
+        gamma (float): Discount factor.
+
+    Returns:
+        list: List of [data_point, discounted_return] pairs.
+    """
+    discounted_returns = []
+    G = 0
+    for data_point, reward in reversed(experiences):
+        G = reward + gamma * G
+        discounted_returns.insert(0, [data_point, G])
+    return discounted_returns
+
+
 # Other functions remain the same (handle_connection, process_position, save_data_to_hdf5, etc.)
 async def handle_connection(instance, config):
     writer = None

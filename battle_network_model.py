@@ -349,6 +349,8 @@ def get_gamestate_tensor(
     enemy_chip = tensor_params['enemy_chip']
     player_charge = tensor_params['player_charge']
     enemy_charge = tensor_params['enemy_charge']
+    player_chip_button = tensor_params['player_chip_button']
+    player_shoot_button = tensor_params['player_shoot_button']
     player_chip_hand = tensor_params['player_chip_hand']
     player_folder = tensor_params['player_folder']
     enemy_folder = tensor_params['enemy_folder']
@@ -398,7 +400,9 @@ def get_gamestate_tensor(
 
     # 3. grid
     # Each grid object has 16 features: 13 (grid_type one-hot) + 3 (grid_owner, player, enemy)
-    grid = torch.zeros(1, 6, 3, 16, dtype=torch.float32)  # Shape: (1, 6, 3, 16)
+    # Revised Grid Tensor Initialization
+    grid = torch.zeros(1, 16, 3, 6, dtype=torch.float32)  # Shape: (1, 16, 3, 6)
+
     if grid_tiles is not None and grid_owner is not None:
         for tile_idx in range(18):
             x = tile_idx % 6  # columns from 0 to 5
@@ -416,14 +420,10 @@ def get_gamestate_tensor(
             grid_owner_value = float(grid_owner[tile_idx]) if grid_owner[tile_idx] in [0, 1] else 0.0
 
             # player presence
-            player_present = 0.0
-            if player_grid_position is not None and [x + 1, y + 1] == player_grid_position:
-                player_present = 1.0
+            player_present = 1.0 if player_grid_position is not None and [x + 1, y + 1] == player_grid_position else 0.0
 
             # enemy presence
-            enemy_present = 0.0
-            if enemy_grid_position is not None and [x + 1, y + 1] == enemy_grid_position:
-                enemy_present = 1.0
+            enemy_present = 1.0 if enemy_grid_position is not None and [x + 1, y + 1] == enemy_grid_position else 0.0
 
             # Combine features
             grid_tile_features = torch.cat([
@@ -431,9 +431,11 @@ def get_gamestate_tensor(
                 torch.tensor([grid_owner_value, player_present, enemy_present], dtype=torch.float32)  # length 3
             ], dim=0)  # total length 16
 
-            grid[0, x, y, :] = grid_tile_features
+            for f in range(16):
+                grid[0, f, y, x] = grid_tile_features[f]
     else:
         print("Warning: grid_tiles or grid_owner is None. Setting grid to zeros.")
+
 
     gamestate['grid'] = grid  # Shape: (1, 6, 3, 16)
 
@@ -464,7 +466,13 @@ def get_gamestate_tensor(
     enemy_charge_tensor = torch.tensor([enemy_charge / 2.0], dtype=torch.float32) if enemy_charge is not None else torch.tensor([0.0], dtype=torch.float32)
     gamestate['player_charge'] = player_charge_tensor  # Shape: (1,)
     gamestate['enemy_charge'] = enemy_charge_tensor    # Shape: (1,)
-
+    
+    # 6.5 player_chip_button and player_shoot_button
+    player_chip_button_tensor = torch.tensor([player_chip_button], dtype=torch.float32) if player_chip_button is not None else torch.tensor([0.0], dtype=torch.float32)
+    player_shoot_button_tensor = torch.tensor([player_shoot_button], dtype=torch.float32) if player_shoot_button is not None else torch.tensor([0.0], dtype=torch.float32)
+    gamestate['player_chip_button'] = player_chip_button_tensor  # Shape: (1,)
+    gamestate['player_shoot_button'] = player_shoot_button_tensor    # Shape: (1,)
+    
     # 7. player_chip_hand
     def process_chip_hand(chip_hand, name='player_chip_hand'):
         """
