@@ -307,7 +307,10 @@ class BattleNetworkModel(nn.Module):
             output = self.fc(lstm_last_output)  # Shape: (batch_size, output_size)
 
             return output
-
+import base64
+import io
+#Image
+from PIL import Image
 def get_gamestate_tensor(
     tensor_params
     # screen_image=None,  # (C, H, W) tensor or None
@@ -380,16 +383,24 @@ def get_gamestate_tensor(
     gamestate = {}
 
     # 1. screen_image
-    # if screen_image is not None:
-    #     # Expecting a tensor of shape (C, H, W)
-    #     if not isinstance(screen_image, torch.Tensor):
-    #         screen_image = torch.tensor(screen_image, dtype=torch.float32)
-    #     else:
-    #         screen_image = screen_image.float()
-    #     # Add batch dimension
-    #     gamestate['screen_image'] = screen_image.unsqueeze(0)  # Shape: (1, C, H, W)
-    # else:
-    #     gamestate['screen_image'] = None
+    if screen_image is not None:
+        # Expecting a tensor of shape (C, H, W)
+        if not isinstance(screen_image, torch.Tensor):
+            #get the image from the string
+            screen_image = screen_image.encode('utf-8')
+            screen_image = base64.b64decode(screen_image)
+            screen_image = Image.open(io.BytesIO(screen_image))
+            # convert to greyscale 240x160
+            screen_image = screen_image.convert('L')
+            screen_image = screen_image.resize((240, 160))
+            screen_image = np.array(screen_image)
+            screen_image = torch.tensor(screen_image, dtype=torch.float32)
+        else:
+            screen_image = screen_image.float()
+        # Add batch dimension
+        gamestate['screen_image'] = screen_image.unsqueeze(0)  # Shape: (1, C, H, W)
+    else:
+        gamestate['screen_image'] = None
 
     # 2. cust_gage: Normalize between 0 and 1
     if cust_gage is not None:

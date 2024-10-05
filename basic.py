@@ -49,6 +49,8 @@ import torch.nn.functional as F
 
 import time
 from collections import defaultdict
+from asyncio import Lock as AsyncLock
+
 
 # Initialize global dictionaries for tracking per-instance state
 window_entry_time = {}
@@ -110,6 +112,15 @@ grid_experiences = defaultdict(list)
 
 shoot_experiences = defaultdict(list)
 
+# Define a global dictionary to track ongoing attacks per port
+attack_timers = {}  # key: port, value: asyncio.Task
+
+# Define the timeout duration in seconds (adjust as needed or load from config)
+ATTACK_TIMEOUT = float(os.getenv("ATTACK_TIMEOUT", 1.0))  # Default is 5 seconds
+
+# Initialize an asynchronous lock for thread-safe access to attack_timers
+attack_timers_lock = AsyncLock()
+
 
 # replay_count = 0
 # battle_count = 1
@@ -156,6 +167,49 @@ INSTANCES = [
     },
     # Additional instances can be added here
 ]
+
+if do_replays:
+    # Get all replay files with 'bn6' in their name
+    replay_files = glob.glob(os.path.join(REPLAYS_DIR, '*bn6*.tangoreplay'))
+    print(f"Found {len(replay_files)} replay files.")
+    processed_replays = []
+    #read from processed replay file
+    if os.path.exists('processed_replays.txt'):
+        with open('processed_replays.txt', 'r') as f:
+            processed_replays = f.read().splitlines()
+            
+    #remove processed replays from replay_files
+    replay_files = [replay for replay in replay_files if os.path.basename(replay) not in processed_replays]
+    if not replay_files:
+        print("No replay files found.")
+        exit()
+        
+    port = 12844
+    #shuffle the replay_files/home/lee/Documents/Tango/replaysOrig/
+    random.shuffle(replay_files)
+    #create an instance for battle_count * 2 replays
+    for replay_file in replay_files:
+        if replay_file not in processed_replays:
+            replay_path = os.path.join(REPLAYS_DIR, replay_file)
+            instance = {
+            'address': '127.0.0.1',
+            'port': port,
+            'rom_path': 'bn6,0',
+            'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
+            'name': 'Instance 1',
+            'replay_path': replay_path,
+            'init_link_code': 'arena1',
+            'is_player': False  # Set to True if you don't want this instance to send inputs
+            }
+            INSTANCES.append(instance)
+            processed_replays.append(replay_file)
+            port += 1
+            if port >= 12844 + replay_count:
+                break
+    #write a file with all processed replays
+    with open('processed_replays.txt', 'w') as f:
+        for replay in processed_replays:
+            f.write(replay + '\n')
 
 # Paths
 SAVES_DIR = '/home/lee/Documents/Tango/saves'
@@ -497,7 +551,7 @@ def predict(port, current_data_point, inside_window, tensor_params):
     global window_entry_time, previous_sent_dict, previous_inside_window_dict, INSTANCES, gridstate_model, shoot_model
     current_time = time.time()
 
-    #skip chip window
+    # Skip chip window logic remains unchanged
     if inside_window.item() == 1.0:
         print(f"Port {port}: Inside chip window.")
         elapsed_time = current_time - window_entry_time.get(port, current_time)
@@ -505,120 +559,213 @@ def predict(port, current_data_point, inside_window, tensor_params):
             if force_skip_chip_window:
                 if previous_sent_dict[port] == 0:
                     previous_sent_dict[port] = 1
-                    # print(f"Port {port}: Sending first key in sequence.")
                     return {'type': 'key_press', 'key': '0000000000001000'}
                 elif previous_sent_dict[port] == 1:
                     previous_sent_dict[port] = 2
-                    # print(f"Port {port}: Sending second key in sequence.")
                     return {'type': 'key_press', 'key': '0000000000001000'}
                 elif previous_sent_dict[port] == 2:
                     previous_sent_dict[port] = 0
-                    # print(f"Port {port}: Sending third key in sequence.")
                     return {'type': 'key_press', 'key': '0000000000000001'}
-                    
-
     else:
-        # Get confidence score using the model's method
-        confidence = gridstate_model.get_confidence_score(current_data_point)
+        # Initialize variables to track the best target tile
+        best_confidence = -float('inf')
+        best_target_position = None
+        current_position = tensor_params['player_grid_position']
         
-        shoot_confidence = shoot_model.get_confidence_score(current_data_point)
+
+        average_confidence = 0
+        confidences = []
+        # Iterate over all possible grid tiles (assuming grid_x: 1-6, grid_y: 1-3)
+        for target_x in range(1, 7):
+            for target_y in range(1, 4):
+                target_position = [target_x, target_y]
+                offset = [target_position[0] - current_position[0], target_position[1] - current_position[1]]
         
-        shoot_bit = '0' if not tensor_params['player_shoot_button'] else '1'
+                # Skip if the target position is the current position (no movement needed)
+                # if offset == [0, 0]:
+                #     continue
         
-        input_string='0000000000000000'
-        press_confidence = 0
-        release_confidence = 0
+                # Check if movement to this offset is possible
+                if not can_move_offset(offset, tensor_params):
+                    continue
         
-        release_params = tensor_params.copy()
-        release_params['player_shoot_button'] = False
-        release_confidence = shoot_model.get_confidence_score(get_gamestate_tensor(release_params))
+                # Calculate the confidence score for moving to this offset
+                confidence = get_offset_confidence(offset, tensor_params)
+                confidences.append((offset, confidence))
+                # Update the best target if this confidence is higher
+                if confidence > best_confidence:
+                    best_confidence = confidence
+                    best_target_position = target_position
         
-        press_params = tensor_params.copy()
-        press_params['player_shoot_button'] = True
-        press_confidence = shoot_model.get_confidence_score(get_gamestate_tensor(press_params))
+        # Calculate the average confidence excluding zeros
+        non_zero_confidences = [confidence for offset, confidence in confidences if confidence != 0]
+        if non_zero_confidences:
+            average_confidence = sum(non_zero_confidences) / len(non_zero_confidences)
         
-        if press_confidence > shoot_confidence:
-            shoot_bit = '1'
-            # print('shoot')
-        elif release_confidence > shoot_confidence:
+        # Print the complete grid of confidences with deviations
+        print("==============================")
+        for y in range(1, 4):
+            row = ""
+            for x in range(1, 7):
+                offset = [x - current_position[0], y - current_position[1]]
+                confidence = next((conf for off, conf in confidences if off == offset), 0)
+                deviation = confidence - average_confidence
+        
+                # Determine color based on deviation
+                if confidence == 0:
+                    color = "\033[90m"  # Grey for zero confidence
+                elif deviation < 0:
+                    color = "\033[91m"  # Red for below average
+                elif deviation == 0:
+                    color = "\033[97m"  # White for average
+                else:
+                    color = "\033[92m"  # Green for above average
+        
+                # Highlight the best confidence to be green
+                if confidence == best_confidence:
+                    row += f"\t\033[92m{confidence:.6f}\033[0m "
+                else:
+                    row += f"\t{color}{confidence:.6f}\033[0m "
+            print(row)
+        # Move the cursor up 4 rows to overwrite the previous grid
+        print("\033[4A", end="")
+
+        # After evaluating all tiles, decide on the movement
+        if best_target_position:
+            # Determine the required direction(s) to move towards the best target
+            direction_offsets = [best_target_position[0] - current_position[0],
+                                 best_target_position[1] - current_position[1]]
+
+            # Initialize input string with no keys pressed
+            input_string = '0000000000000000'
+
+            # Determine which keys to press based on the direction offsets
+            if direction_offsets[0] < 0:
+                # Need to move left
+                input_string = input_string[:15 - KEY_BIT_POSITIONS['LEFT']] + '1' + input_string[15 - KEY_BIT_POSITIONS['LEFT'] + 1:]
+            elif direction_offsets[0] > 0:
+                # Need to move right
+                input_string = input_string[:15 - KEY_BIT_POSITIONS['RIGHT']] + '1' + input_string[15 - KEY_BIT_POSITIONS['RIGHT'] + 1:]
+
+            if direction_offsets[1] < 0:
+                # Need to move up
+                input_string = input_string[:15 - KEY_BIT_POSITIONS['UP']] + '1' + input_string[15 - KEY_BIT_POSITIONS['UP'] + 1:]
+            elif direction_offsets[1] > 0:
+                # Need to move down
+                input_string = input_string[:15 - KEY_BIT_POSITIONS['DOWN']] + '1' + input_string[15 - KEY_BIT_POSITIONS['DOWN'] + 1:]
+
+            # Incorporate shoot button logic as per existing code
             shoot_bit = '0'
-            # print('release')
-        
-        print(press_confidence - release_confidence)
-        
-        #set 
-        input_string = input_string[:15 -KEY_BIT_POSITIONS['X']] + shoot_bit + input_string[15 - KEY_BIT_POSITIONS['X']+1:]
-        # print(input_string)
+            press_confidence = 0
+            release_confidence = 0
 
-        if confidence is None:
-            print(f"Port {port}: Unable to compute confidence score.")
+            release_params = tensor_params.copy()
+            release_params['player_shoot_button'] = False
+            release_confidence = shoot_model.get_confidence_score(get_gamestate_tensor(release_params))
+
+            press_params = tensor_params.copy()
+            press_params['player_shoot_button'] = True
+            press_confidence = shoot_model.get_confidence_score(get_gamestate_tensor(press_params))
+
+            if press_confidence > 0.5 and not tensor_params['player_shoot_button']:
+                shoot_bit = '1'
+
+            # Set the shoot bit in the input string
+            input_string = input_string[:15 - KEY_BIT_POSITIONS['X']] + shoot_bit + input_string[15 - KEY_BIT_POSITIONS['X'] + 1:]
+
+            # Return the key press command
+            return {'type': 'key_press', 'key': input_string}
+
+        else:
+            # If no optimal target found, stay still or perform a default action
             return {'type': 'key_press', 'key': '0000000000000000'}
-
-        # print(f"Port {port}: Confidence score for current position: {confidence}")
-        
-        #generate new grid states based on the tensor params for the player moving up, down, left, right, and staying still
-        
-        possible_states = []
-        
-        # print(tensor_params['player_grid_position'])
-        
-        left_confidence = get_offset_confidence([-1,0], tensor_params)
-        right_confidence = get_offset_confidence([1,0], tensor_params)
-        up_confidence = get_offset_confidence([0,-1], tensor_params)
-        down_confidence = get_offset_confidence([0,1], tensor_params)
-        
-        possible_states.append([[0,0], confidence])
-        possible_states.append([[-1,0], left_confidence])
-        possible_states.append([[1,0], right_confidence])
-        possible_states.append([[0,-1], up_confidence])
-        possible_states.append([[0,1], down_confidence])
-        possible_states = sorted(possible_states, key=lambda x: x[1], reverse=True)
-        
-        
-        #sort the possible states by confidence
-        # print(possible_states)
-        
-        #print confidence of stay, up down left right to 2 decimals
-        # print(f"Position: [{tensor_params['player_grid_position']}] Conidences: Stay[{confidence:.6f}] Left[{left_confidence:.6f}] Right[{right_confidence:.6f}] Up[{up_confidence:.6f}] Down[{down_confidence:.6f}] Shoot[{press_confidence:.6f}] Release[{release_confidence:.6f}]")
-        
-        #perform the most confident action
-        offset = possible_states[0][0]
-        # if offset[0] == 0 and offset[1] == 0:
-            #stay
-            # print('stay')
-        if offset[0] == -1 and offset[1] == 0:
-            #move left
-            # print('left')
-            input_string = input_string[:15 -KEY_BIT_POSITIONS['LEFT']] + '1' + input_string[15 - KEY_BIT_POSITIONS['LEFT']+1:]
-        elif offset[0] == 1 and offset[1] == 0:
-            #move right
-            # print('right')
-            input_string = input_string[:15 -KEY_BIT_POSITIONS['RIGHT']] + '1' + input_string[15 - KEY_BIT_POSITIONS['RIGHT']+1:]
-        elif offset[0] == 0 and offset[1] == -1:
-            #move up
-            # print('up')
-            input_string = input_string[:15 -KEY_BIT_POSITIONS['UP']] + '1' + input_string[15 - KEY_BIT_POSITIONS['UP']+1:]
-        elif offset[0] == 0 and offset[1] == 1:
-            #move down
-            # print('down')
-            input_string = input_string[:15 -KEY_BIT_POSITIONS['DOWN']] + '1' + input_string[15 - KEY_BIT_POSITIONS['DOWN']+1:]
-
-        return {'type': 'key_press', 'key': input_string}
-
 
     return {'type': 'key_press', 'key': '0000000000000000'}
 
+
+async def punish_if_no_reward(port, data_point):
+    """
+    Waits for ATTACK_TIMEOUT seconds and punishes the shoot_model
+    if no reward has been received for the attack on the given port.
+    """
+    await asyncio.sleep(ATTACK_TIMEOUT)
+    async with attack_timers_lock:
+        # Check if the attack is still ongoing (i.e., no reward received)
+        if port in attack_timers and attack_timers[port] == asyncio.current_task():
+            # Apply punishment to the shoot_model
+            punishment_reward = -1.0  # Define the punishment value as needed
+            shoot_experiences[port].append([data_point, punishment_reward])
+            shoot_model.train_batch([shoot_experiences[port][-1]])
+            print(f"Port {port}: No reward received within {ATTACK_TIMEOUT} seconds. Punished shoot_model.")
+            
+            # Remove the attack from the tracking dictionary
+            del attack_timers[port]
+
+
+def get_final_move_offset(offset, tensor_params):
+    current_position = tensor_params['player_grid_position']
+    while True:
+        next_position = [current_position[0] + offset[0], current_position[1] + offset[1]]
+        
+        # Check if next position x is between 1-6 and y is between 1-3
+        if next_position[0] < 1 or next_position[0] > 6 or next_position[1] < 1 or next_position[1] > 3:
+            break
+        
+        # Check if we can move to the next position
+        if not can_move_offset([next_position[0] - current_position[0], next_position[1] - current_position[1]], tensor_params):
+            break
+        
+        # Check the grid state to see if the next position is ice
+        grid_state = tensor_params['grid_state']
+        grid_state = [grid_state[i:i+6] for i in range(0, len(grid_state), 6)]
+        if grid_state[next_position[1]-1][next_position[0]-1] != 7:
+            current_position = next_position
+            break
+        
+        current_position = next_position
+    
+    return current_position
+
+def can_move_offset(offset, tensor_params):
+    offset_position = [tensor_params['player_grid_position'][0] + offset[0], tensor_params['player_grid_position'][1] + offset[1]]
+    
+    # Check if offset position x is between 1-6 and y is between 1-3
+    if offset_position[0] < 1 or offset_position[0] > 6 or offset_position[1] < 1 or offset_position[1] > 3:
+        return False
+    
+    # Check the grid owner of the offset position
+    owners = tensor_params['grid_owner_state']
+    owners = [owners[i:i+6] for i in range(0, len(owners), 6)]
+    offset_owner = owners[offset_position[1]-1][offset_position[0]-1]
+    if offset_owner == 1:
+        return False
+    
+    # Check the grid state to see if you can move here
+    grid_state = tensor_params['grid_state']
+    grid_state = [grid_state[i:i+6] for i in range(0, len(grid_state), 6)]
+    cannot_access_states = [0, 1]
+    if grid_state[offset_position[1]-1][offset_position[0]-1] in cannot_access_states:
+        return False
+    
+    return True
+
 def get_offset_confidence(offset, tensor_params):
     global gridstate_model
-    offset_position = [tensor_params['player_grid_position'][0] + offset[0], tensor_params['player_grid_position'][1] + offset[1]]
-    #check if offset position x is between 1-6 and y is between 1-3
-    if offset_position[0] < 1 or offset_position[0] > 6 or offset_position[1] < 1 or offset_position[1] > 3:
+    
+    if not can_move_offset(offset, tensor_params):
         return 0
+    
+    final_position = get_final_move_offset(offset, tensor_params)
     offset_tensor = tensor_params.copy()
-    offset_tensor['player_grid_position'] = offset_position
+    offset_tensor['player_grid_position'] = final_position
     gamestate = get_gamestate_tensor(offset_tensor)
-    #get left press confidence
+    
+    
+    # Get left press confidence
     confidence = gridstate_model.get_confidence_score(gamestate)
+    
+    # print(f"Final position: {final_position} Confidence: {confidence:.6f}")
+    
     return confidence
 
 max_reward = 1
@@ -745,8 +892,14 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                     game_instance['inside_window'] = current_inside_window
                     game_instance['player_charge'] = current_player_charge
                     game_instance['enemy_charge'] = current_enemy_charge
+                    
+                    #detect if the player just used a chip (value is different) if so, then set the player_active_chip to the previous chip for 1 second
+                    
                     game_instance['player_chip'] = current_player_chip
                     game_instance['enemy_chip'] = current_enemy_chip
+                    
+                    
+                    
                     game_instance['player_emotion'] = current_player_emotion
                     game_instance['enemy_emotion'] = current_enemy_emotion
                     game_instance['player_game_emotion'] = current_player_game_emotion
@@ -864,10 +1017,10 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         
 
 
-                    if(current_reward !=0):
-                        print(f"Port {port}: Reward: {current_reward}")
-                    if(current_punishment !=0):
-                        print(f"Port {port}: Punishment: {current_punishment}")
+                    # if(current_reward !=0):
+                    #     print(f"Port {port}: Reward: {current_reward}")
+                    # if(current_punishment !=0):
+                    #     print(f"Port {port}: Punishment: {current_punishment}")
 
 
 
@@ -948,7 +1101,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
 
 
                     tensor_params = {
-                        "screen_data": screen_data,
+                        # "screen_image": screen_data['image'],
                         "cust_gage": cust_gage,  # validated 2
                         "grid_state": grid_state,  # validated 2
                         "grid_owner_state": grid_owner_state,  # validated 2
@@ -976,6 +1129,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         "player_beasted_over": game_instance['player_beasted_over'],
                         "enemy_beasted_over": game_instance['enemy_beasted_over'],
                     }
+                    
 
                     gamestate_tensor = get_gamestate_tensor(
                         tensor_params
@@ -1092,6 +1246,18 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             )
                             # print(f"Port {port}: Sending command: {command['key']}")
                             await send_input_command(writer, command, port)
+                            
+                            # If an attack was made, start the punishment timer
+                            # if started_attack:
+                            #     async with attack_timers_lock:
+                            #         if port in attack_timers:
+                            #             # If there's already an ongoing attack, you might choose to ignore or handle it
+                            #             print(f"Port {port}: Attack already in progress.")
+                            #         else:
+                            #             # Schedule the punishment coroutine
+                            #             punishment_task = asyncio.create_task(punish_if_no_reward(port, data_point))
+                            #             attack_timers[port] = punishment_task
+                                
                         else:
                             data_point['action'] = current_input  # Store the current input
                             # print(f"Port {port}: Sending command: {current_input}")
@@ -1104,42 +1270,74 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             # If we received a reward or punishment, perform online training
                             # Assign reward to the current data_point
                             data_buffers[port].append(data_point)
-                            if current_reward != 0 or current_punishment != 0:
+                            if current_reward != 0 or current_punishment != 0 and not game_instance.get('is_player', False):#is not player
                                 # Compute reward
                                 reward_value = (current_reward / max_reward) - (current_punishment / max_punishment)
                                 grid_experiences[port].append([data_point, reward_value])
+                                #train
+                                # average_loss, num_trained = gridstate_model.train_batch(grid_experiences[port][-1:])
                                 
                                 # Apply discounted rewards to all experiences
-                                gamma = 0.99
-                                grid_experiences[port] = apply_discounted_rewards(grid_experiences[port], gamma)
-                                shoot_experiences[port] = apply_discounted_rewards(shoot_experiences[port], gamma)
+                                # gamma = 0.99
+                                # grid_experiences[port] = apply_discounted_rewards(grid_experiences[port], gamma)
+                                # shoot_experiences[port] = apply_discounted_rewards(shoot_experiences[port], gamma)
                                 
-                                # Train on the last batch of window_size
-                                if len(grid_experiences[port]) > window_size:
-                                    batch = grid_experiences[port][-window_size:]
-                                else:
-                                    batch = grid_experiences[port]
+                                # # Train on the last batch of window_size
+                                # if len(grid_experiences[port]) > window_size:
+                                #     batch = grid_experiences[port][-window_size:]
+                                # else:
+                                #     batch = grid_experiences[port]
                                 
-                                average_loss, num_trained = gridstate_model.train_batch(batch)
+                                # average_loss, num_trained = gridstate_model.train_batch(batch)
                                 
                                 if reward_value > 0:
+                                    # print(reward_value)
                                     shoot_experiences[port].append([data_point, reward_value])
-                                    #train on shoot experiences
-                                    if len(shoot_experiences[port]) > window_size:
-                                        batch = shoot_experiences[port][-window_size:]
-                                    else:
-                                        batch = shoot_experiences[port]
+                                    # #train on shoot experiences
+                                    # if len(shoot_experiences[port]) > window_size:
+                                    #     batch = shoot_experiences[port][-window_size:]
+                                    # else:
+                                    #     batch = shoot_experiences[port]
                                     
-                                    average_loss, num_trained = shoot_model.train_batch(batch)
+                                    # average_loss, num_trained = shoot_model.train_batch(batch)
+                                
+                                
+                                exploration_batch = []
+                                #if being punished on this square, give half of the punishment reward to the movable tiles to encourage dodging
+                                if reward_value < 0:
+                                    offsets = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+                                    for offset in offsets:
+                                        #check can_move_offset
+                                        final_offset = get_final_move_offset(offset, tensor_params)
+                                        # print(f"Port {port}: Final Offset: {final_offset}")
+                                        if final_offset != tensor_params['player_grid_position']:
+                                            #train with half punishment reward
+                                            move_reward = -reward_value/2
+                                            move_data_point = tensor_params.copy()
+                                            move_data_point['player_grid_position'] = final_offset#[move_data_point['player_grid_position'][0] + final_offset[0], move_data_point['player_grid_position'][1] + offset[1]]
+                                            
+                                            #training with adjusted position
+                                            # print("====================================================================")
+                                            # print(f"Port {port}: Training with adjusted position: {move_data_point['player_grid_position']}")
+                                            data = get_gamestate_tensor(move_data_point)
+                                            grid_experiences[port].append([data, move_reward])
+                                            exploration_batch.append([data, move_reward])
 
+                                # if len(exploration_batch) > 0:
+                                #     average_loss, num_trained = gridstate_model.train_batch(exploration_batch)
 
                                 # Reset rewards
                                 current_reward = 0
                                 current_punishment = 0
-                            else:
-                                grid_experiences[port].append([data_point, 0.001])
-                                #train on the current experience
-                                gridstate_model.train_batch(grid_experiences[port][-1:])
+                            
+                                #train on all data
+                                print(f"Port {port}: Training on all data. {len(grid_experiences[port])}")
+                                gridstate_model.train_batch(grid_experiences[port])
+                            # else:
+                            #     grid_experiences[port].append([data_point, 0.00001])
+                            #     #train on the current experience
+                            #     gridstate_model.train_batch(grid_experiences[port][-1:])
+                                
                                 #train on random batch of 100
                                 # if len(grid_experiences[port]) > 100:
                                 #     batch = grid_experiences[port][-100:]
