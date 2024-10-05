@@ -12,8 +12,89 @@ import h5py
 import os
 from datetime import datetime, timezone
 
+# Define your default gamestate for padding
+def get_default_gamestate():
+    return {
+        'cust_gage': torch.tensor([0.0], dtype=torch.float32),
+        'grid': torch.zeros(1, 6, 3, 16, dtype=torch.float32),
+        'player_health': torch.tensor([1.0], dtype=torch.float32),
+        'enemy_health': torch.tensor([1.0], dtype=torch.float32),
+        'player_chip': F.one_hot(torch.tensor(400, dtype=torch.long), num_classes=401).float().unsqueeze(0),
+        'enemy_chip': F.one_hot(torch.tensor(400, dtype=torch.long), num_classes=401).float().unsqueeze(0),
+        'player_charge': torch.tensor([0.0], dtype=torch.float32),
+        'enemy_charge': torch.tensor([0.0], dtype=torch.float32),
+        'player_chip_hand': [F.one_hot(torch.tensor(400, dtype=torch.long), num_classes=401).float().unsqueeze(0) for _ in range(5)],
+        'player_folder': [torch.zeros(1, 431, dtype=torch.float32) for _ in range(30)],
+        'enemy_folder': [torch.zeros(1, 431, dtype=torch.float32) for _ in range(30)],
+        'player_custom': torch.zeros(1, 200, dtype=torch.float32),
+        'enemy_custom': torch.zeros(1, 200, dtype=torch.float32),
+        'player_emotion_state': torch.zeros(1, 27, dtype=torch.float32),
+        'enemy_emotion_state': torch.zeros(1, 27, dtype=torch.float32),
+        'player_used_crosses': torch.zeros(1, 10, dtype=torch.float32),
+        'enemy_used_crosses': torch.zeros(1, 10, dtype=torch.float32),
+        'player_beasted_out': torch.tensor([0.0], dtype=torch.float32),
+        'enemy_beasted_out': torch.tensor([0.0], dtype=torch.float32),
+        'player_beasted_over': torch.tensor([0.0], dtype=torch.float32),
+        'enemy_beasted_over': torch.tensor([0.0], dtype=torch.float32)
+    }
+
+def safe_cat(tensors, dim=0):
+    """
+    Safely concatenates a list or tuple of tensors along the specified dimension.
+    
+    Args:
+        tensors (list or tuple of torch.Tensor or torch.Tensor): 
+            The tensors to concatenate. Can be a single tensor or a list/tuple of tensors.
+        dim (int): The dimension along which to concatenate.
+    
+    Returns:
+        torch.Tensor: The concatenated tensor.
+    
+    Raises:
+        ValueError: If tensors is neither a list/tuple nor a single tensor.
+        TypeError: If elements within tensors are not torch.Tensor instances.
+    """
+    if isinstance(tensors, torch.Tensor):
+        # Single tensor, return as is or add a new dimension if needed
+        return tensors
+    elif isinstance(tensors, (list, tuple)):
+        if len(tensors) == 0:
+            raise ValueError("safe_cat received an empty list/tuple of tensors.")
+        if not all(isinstance(t, torch.Tensor) for t in tensors):
+            raise TypeError("All elements in tensors must be torch.Tensor instances.")
+        return torch.cat(tensors, dim=dim)
+    else:
+        raise ValueError("safe_cat expects a torch.Tensor or a list/tuple of torch.Tensor instances.")
+  
+# Function to prepare the sequence of gamestates
+def prepare_inference_sequence(data_buffer, current_data_point, memory=10):
+    """
+    Prepares a sequence of gamestates for model inference.
+    
+    Args:
+        data_buffer (deque or list): Historical gamestates.
+        current_data_point (dict): Current gamestate.
+        memory (int): Number of past gamestates to include.
+    
+    Returns:
+        list of dict: Sequence of gamestates of length 'memory'.
+    """
+    sequence = list(data_buffer)  # Convert deque to list if necessary
+    sequence.append(current_data_point)
+    
+    
+    # If sequence is shorter than memory, pad with default gamestates at the beginning
+    while len(sequence) < memory:
+        sequence.insert(0, get_default_gamestate())
+    
+    # If sequence is longer than memory, trim the oldest gamestates
+    if len(sequence) > memory:
+        sequence = sequence[-memory:]
+    
+    return sequence
+    
 class BattleNetworkModel(nn.Module):
-    def __init__(self, image_option='None', memory=1, scale=1.0, dropout_p=0.5):
+    def __init__(self, image_option='None', memory=1, scale=1.0, dropout_p=0.5, output_size=8):
         """
         Initializes the BattleNetworkModel.
 
@@ -117,141 +198,171 @@ class BattleNetworkModel(nn.Module):
             nn.ReLU(),
             nn.BatchNorm1d(self.lstm_hidden_size // 2),
             nn.Dropout(p=self.dropout_p),
-            nn.Linear(self.lstm_hidden_size // 2, 16),
+            nn.Linear(self.lstm_hidden_size // 2, output_size),
             nn.Sigmoid()  # Output probabilities between 0 and 1 for each button
         )
         
     def forward(self, gamestates):
-        """
-        Forward pass of the model.
+            """
+            Forward pass of the model.
 
-        Args:
-            gamestates (list of dict): List of gamestates, length equal to self.memory.
-                                       Each gamestate is a dictionary containing all the required inputs.
+            Args:
+                gamestates (list of dict): List of gamestates, length equal to self.memory.
+                                        Each gamestate is a dictionary containing all the required inputs.
 
-        Returns:
-            Tensor: Output probabilities for the 16 buttons. Shape: (batch_size, 16)
-        """
-        batch_size = gamestates[0]['cust_gage'].size(0)
-        gamestate_features = []
+            Returns:
+                Tensor: Output probabilities for the 16 buttons. Shape: (batch_size, 16)
+            """
+            batch_size = gamestates[0]['cust_gage'].size(0)
+            gamestate_features = []
 
-        for i in range(self.memory):
-            gamestate = gamestates[i]
-            features = []
+            for i in range(self.memory):
+                gamestate = gamestates[i]
+                features = []
 
-            # Process image if included
-            if self.image_option != 'None':
-                image = gamestate['screen_image']  # Shape: (batch_size, C, H, W)
-                image_features = self.image_conv(image)  # Shape: (batch_size, conv_output_size)
-                features.append(image_features)
+                # Process image if included
+                if self.image_option != 'None':
+                    image = gamestate['screen_image']  # Shape: (batch_size, C, H, W)
+                    image_features = self.image_conv(image)  # Shape: (batch_size, conv_output_size)
+                    features.append(image_features)
 
-            # Process grid data
-            grid_data = gamestate['grid']  # Shape: (batch_size, 6, 3, 16)
-            grid_data = grid_data.view(batch_size, -1)  # Flatten to (batch_size, 6*3*16)
-            features.append(grid_data)
+                # Process grid data
+                grid_data = gamestate['grid']  # Shape: (batch_size, 6, 3, 16)
+                grid_data = grid_data.view(batch_size, -1)  # Flatten to (batch_size, 6*3*16)
+                features.append(grid_data)
 
-            # Process other inputs
-            other_features = []
+                # Process other inputs
+                other_features = []
 
-            # cust_gage: (batch_size,)
-            other_features.append(gamestate['cust_gage'].unsqueeze(1))  # Shape: (batch_size, 1)
+                # cust_gage: (batch_size,)
+                other_features.append(gamestate['cust_gage'].unsqueeze(1))  # Shape: (batch_size, 1)
 
-            # player_health, enemy_health: (batch_size,), (batch_size,)
-            other_features.append(gamestate['player_health'].unsqueeze(1))
-            other_features.append(gamestate['enemy_health'].unsqueeze(1))
+                # player_health, enemy_health: (batch_size,), (batch_size,)
+                other_features.append(gamestate['player_health'].unsqueeze(1))
+                other_features.append(gamestate['enemy_health'].unsqueeze(1))
 
-            # player_chip, enemy_chip: (batch_size, 401), (batch_size, 401)
-            other_features.append(gamestate['player_chip'])  # Already one-hot encoded
-            other_features.append(gamestate['enemy_chip'])
+                # player_chip, enemy_chip: (batch_size, 401), (batch_size, 401)
+                other_features.append(gamestate['player_chip'])  # Already one-hot encoded
+                other_features.append(gamestate['enemy_chip'])
 
-            # player_charge, enemy_charge: (batch_size,), (batch_size,)
-            other_features.append(gamestate['player_charge'].unsqueeze(1))
-            other_features.append(gamestate['enemy_charge'].unsqueeze(1))
+                # player_charge, enemy_charge: (batch_size,), (batch_size,)
+                other_features.append(gamestate['player_charge'].unsqueeze(1))
+                other_features.append(gamestate['enemy_charge'].unsqueeze(1))
 
-            # player_chip_hand: list of 5 one-hot encoded tensors of size (batch_size, 401)
-            # Concatenate along the feature dimension
-            player_chip_hand = torch.cat(gamestate['player_chip_hand'], dim=1)  # Shape: (batch_size, 5*401)
-            other_features.append(player_chip_hand)
+                # player_chip_hand: list of 5 one-hot encoded tensors of size (batch_size, 401)
+                # Use safe_cat to concatenate along the feature dimension
+                player_chip_hand = safe_cat(gamestate['player_chip_hand'], dim=1)  # Shape: (batch_size, 5*401)
+                other_features.append(player_chip_hand)
 
-            # player_folder, enemy_folder: list of 30 folder_chips each
-            # Each folder_chip has 431 features
-            # Concatenate all folder_chips
-            player_folder = torch.cat(gamestate['player_folder'], dim=1)  # Shape: (batch_size, 30*431)
-            enemy_folder = torch.cat(gamestate['enemy_folder'], dim=1)  # Shape: (batch_size, 30*431)
-            other_features.append(player_folder)
-            other_features.append(enemy_folder)
+                # player_folder, enemy_folder: list of 30 folder_chips each
+                # Use safe_cat to concatenate along the feature dimension
+                #shuffle the order of player_folder and enemy_folder
+                # np.random.shuffle(gamestate['player_folder'])
+                # np.random.shuffle(gamestate['enemy_folder'])
+                          
+                player_folder = safe_cat(gamestate['player_folder'], dim=1)  # Shape: (batch_size, 30*431)
+                enemy_folder = safe_cat(gamestate['enemy_folder'], dim=1)    # Shape: (batch_size, 30*431)
+                other_features.append(player_folder)
+                other_features.append(enemy_folder)
 
-            # player_custom, enemy_custom: (batch_size, 200), (batch_size, 200)
-            other_features.append(gamestate['player_custom'])
-            other_features.append(gamestate['enemy_custom'])
+                # player_custom, enemy_custom: (batch_size, 200), (batch_size, 200)
+                other_features.append(gamestate['player_custom'])
+                other_features.append(gamestate['enemy_custom'])
 
-            # player_emotion_state, enemy_emotion_state: (batch_size, 27), (batch_size, 27)
-            other_features.append(gamestate['player_emotion_state'])
-            other_features.append(gamestate['enemy_emotion_state'])
+                # player_emotion_state, enemy_emotion_state: (batch_size, 27), (batch_size, 27)
+                other_features.append(gamestate['player_emotion_state'])
+                other_features.append(gamestate['enemy_emotion_state'])
 
-            # player_used_crosses, enemy_used_crosses: (batch_size, 10), (batch_size, 10)
-            other_features.append(gamestate['player_used_crosses'])
-            other_features.append(gamestate['enemy_used_crosses'])
+                # player_used_crosses, enemy_used_crosses: (batch_size, 10), (batch_size, 10)
+                other_features.append(gamestate['player_used_crosses'])
+                other_features.append(gamestate['enemy_used_crosses'])
 
-            # player_beasted_out, enemy_beasted_out: (batch_size,), (batch_size,)
-            other_features.append(gamestate['player_beasted_out'].unsqueeze(1))
-            other_features.append(gamestate['enemy_beasted_out'].unsqueeze(1))
+                # player_beasted_out, enemy_beasted_out: (batch_size,), (batch_size,)
+                other_features.append(gamestate['player_beasted_out'].unsqueeze(1))
+                other_features.append(gamestate['enemy_beasted_out'].unsqueeze(1))
 
-            # player_beasted_over, enemy_beasted_over: (batch_size,), (batch_size,)
-            other_features.append(gamestate['player_beasted_over'].unsqueeze(1))
-            other_features.append(gamestate['enemy_beasted_over'].unsqueeze(1))
+                # player_beasted_over, enemy_beasted_over: (batch_size,), (batch_size,)
+                other_features.append(gamestate['player_beasted_over'].unsqueeze(1))
+                other_features.append(gamestate['enemy_beasted_over'].unsqueeze(1))
 
-            # Concatenate all other features
-            other_features = torch.cat(other_features, dim=1)  # Shape: (batch_size, other_input_size)
-            features.append(other_features)
+                # Concatenate all other features using safe_cat
+                other_features = safe_cat(other_features, dim=1)  # Shape: (batch_size, other_input_size)
+                features.append(other_features)
 
-            # Concatenate all features for this gamestate
-            gamestate_feature = torch.cat(features, dim=1)  # Shape: (batch_size, gamestate_feature_size)
-            gamestate_features.append(gamestate_feature)
+                # Concatenate all features for this gamestate using safe_cat
+                gamestate_feature = safe_cat(features, dim=1)  # Shape: (batch_size, gamestate_feature_size)
+                gamestate_features.append(gamestate_feature)
 
-        # Stack gamestate features to form a sequence
-        # Shape: (batch_size, memory, gamestate_feature_size)
-        gamestate_sequence = torch.stack(gamestate_features, dim=1)
+            # Stack gamestate features to form a sequence using safe_cat
+            # Shape: (batch_size, memory, gamestate_feature_size)
+            gamestate_sequence = torch.stack(gamestate_features, dim=1)
 
-        # Pass the sequence through the LSTM
-        lstm_out, _ = self.lstm(gamestate_sequence)  # lstm_out shape: (batch_size, memory, lstm_hidden_size)
+            # Pass the sequence through the LSTM
+            lstm_out, _ = self.lstm(gamestate_sequence)  # lstm_out shape: (batch_size, memory, lstm_hidden_size)
 
-        # Use the output from the last timestep
-        lstm_last_output = lstm_out[:, -1, :]  # Shape: (batch_size, lstm_hidden_size)
+            # Use the output from the last timestep
+            lstm_last_output = lstm_out[:, -1, :]  # Shape: (batch_size, lstm_hidden_size)
 
-        # Pass through fully connected layers to get the final output
-        output = self.fc(lstm_last_output)  # Shape: (batch_size, 16)
+            # Pass through fully connected layers to get the final output
+            output = self.fc(lstm_last_output)  # Shape: (batch_size, output_size)
 
-        return output
-
+            return output
 
 def get_gamestate_tensor(
-    screen_image=None,  # (C, H, W) tensor or None
-    cust_gage=None,     # float (0-64)
-    grid_tiles=None,    # list of 18 integers (0-12)
-    grid_owner=None,    # list of 18 floats (0-1)
-    player_grid_position=None,  # list of 2 integers [x, y]
-    enemy_grid_position=None,   # list of 2 integers [x, y]
-    player_health=None,         # float (0-1)
-    enemy_health=None,          # float (0-1)
-    player_chip=None,           # integer (0-400)
-    enemy_chip=None,            # integer (0-400)
-    player_charge=None,         # float (0-1)
-    enemy_charge=None,          # float (0-1)
-    player_chip_hand=None,      # list of 5 integers (0-400) or None
-    player_folder=None,         # list of 30 dicts with keys 'chip', 'code', 'used', 'regged', 'tagged' or None
-    enemy_folder=None,          # list of 30 dicts with keys 'chip', 'code', 'used', 'regged', 'tagged' or None
-    player_custom=None,         # list of 200 floats (0 or 1) or None
-    enemy_custom=None,          # list of 200 floats (0 or 1) or None
-    player_emotion_state=None,  # integer (0-26)
-    enemy_emotion_state=None,   # integer (0-26)
-    player_used_crosses=None,  # list of integers (1-10)
-    enemy_used_crosses=None,   # list of integers (1-10)
-    player_beasted_out=None,    # bool
-    enemy_beasted_out=None,     # bool
-    player_beasted_over=None,   # bool
-    enemy_beasted_over=None,    # bool
+    tensor_params
+    # screen_image=None,  # (C, H, W) tensor or None
+    # cust_gage=None,     # float (0-64)
+    # grid_tiles=None,    # list of 18 integers (0-12)
+    # grid_owner=None,    # list of 18 floats (0-1)
+    # player_grid_position=None,  # list of 2 integers [x, y]
+    # enemy_grid_position=None,   # list of 2 integers [x, y]
+    # player_health=None,         # float (0-1)
+    # enemy_health=None,          # float (0-1)
+    # player_chip=None,           # integer (0-400)
+    # enemy_chip=None,            # integer (0-400)
+    # player_charge=None,         # float (0-1)
+    # enemy_charge=None,          # float (0-1)
+    # player_chip_hand=None,      # list of 5 integers (0-400) or None
+    # player_folder=None,         # list of 30 dicts with keys 'chip', 'code', 'used', 'regged', 'tagged' or None
+    # enemy_folder=None,          # list of 30 dicts with keys 'chip', 'code', 'used', 'regged', 'tagged' or None
+    # player_custom=None,         # list of 200 floats (0 or 1) or None
+    # enemy_custom=None,          # list of 200 floats (0 or 1) or None
+    # player_emotion_state=None,  # integer (0-26)
+    # enemy_emotion_state=None,   # integer (0-26)
+    # player_used_crosses=None,  # list of integers (1-10)
+    # enemy_used_crosses=None,   # list of integers (1-10)
+    # player_beasted_out=None,    # bool
+    # enemy_beasted_out=None,     # bool
+    # player_beasted_over=None,   # bool
+    # enemy_beasted_over=None,    # bool
 ):
+    #set values from param object instead
+    screen_image = tensor_params['screen_image'] if 'screen_image' in tensor_params else None
+    cust_gage = tensor_params['cust_gage']
+    grid_tiles = tensor_params['grid_state']
+    grid_owner = tensor_params['grid_owner_state']
+    player_grid_position = tensor_params['player_grid_position']
+    enemy_grid_position = tensor_params['enemy_grid_position']
+    player_health = tensor_params['player_health']
+    enemy_health = tensor_params['enemy_health']
+    player_chip = tensor_params['player_chip']
+    enemy_chip = tensor_params['enemy_chip']
+    player_charge = tensor_params['player_charge']
+    enemy_charge = tensor_params['enemy_charge']
+    player_chip_hand = tensor_params['player_chip_hand']
+    player_folder = tensor_params['player_folder']
+    enemy_folder = tensor_params['enemy_folder']
+    player_custom = tensor_params['player_custom']
+    enemy_custom = tensor_params['enemy_custom']
+    player_emotion_state = tensor_params['player_emotion_state']
+    enemy_emotion_state = tensor_params['enemy_emotion_state']
+    player_used_crosses = tensor_params['player_used_crosses']
+    enemy_used_crosses = tensor_params['enemy_used_crosses']
+    player_beasted_out = tensor_params['player_beasted_out']
+    enemy_beasted_out = tensor_params['enemy_beasted_out']
+    player_beasted_over = tensor_params['player_beasted_over']
+    enemy_beasted_over = tensor_params['enemy_beasted_over']
+    
     """
     Converts a single game state into the tensor format expected by the model.
     Logs the shapes and types of all inputs for verification.
@@ -661,11 +772,11 @@ def test_battle_network_model():
         for key in gamestates_list[0].keys():
             if isinstance(gamestates_list[0][key], (list, tuple)):
                 # For list-based fields like player_chip_hand, player_folder, enemy_folder
-                # Stack the tensors along a new batch dimension
-                batched_gamestate[key] = [torch.cat([g[key][i] for g in gamestates_list], dim=0) for i in range(len(gamestates_list[0][key]))]
+                # Use safe_cat to concatenate along the batch dimension
+                batched_gamestate[key] = [safe_cat([g[key][i] for g in gamestates_list], dim=0) for i in range(len(gamestates_list[0][key]))]
             else:
-                # For tensor fields
-                batched_gamestate[key] = torch.cat([g[key] for g in gamestates_list], dim=0)  # Shape: (batch_size, ...)
+                # For tensor fields, use safe_cat directly
+                batched_gamestate[key] = safe_cat([g[key] for g in gamestates_list], dim=0)  # Shape: (batch_size, ...)
         return batched_gamestate
 
     # Load all sequences and batch them

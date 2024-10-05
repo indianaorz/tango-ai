@@ -613,36 +613,36 @@ def get_planning_input_from_replay(instance, GAMMA, device):
         instance['cross_target'] = 0
     instance['target_list'] = selected_chip_indices
     
-    # Epsilon-Greedy Strategy: With probability GAMMA, select a random action
-    if random.random() < GAMMA:
-        # Determine cross_target
-        used_crosses_count = len(instance['player_used_crosses'])
-        if used_crosses_count > 0:
-            cross_target = random.randint(0, used_crosses_count - 1)
-        else:
-            cross_target = 0  # Default to 'None'
+    # # Epsilon-Greedy Strategy: With probability GAMMA, select a random action
+    # if random.random() < GAMMA:
+    #     # Determine cross_target
+    #     used_crosses_count = len(instance['player_used_crosses'])
+    #     if used_crosses_count > 0:
+    #         cross_target = random.randint(0, used_crosses_count - 1)
+    #     else:
+    #         cross_target = 0  # Default to 'None'
         
-        # Determine target_list: sample up to 5 unique indices from visible chips
-        chip_visible = instance['chip_visible_count']
-        if chip_visible >= 5:
-            target_list = random.sample(range(chip_visible), 5)
-        else:
-            target_list = random.sample(range(chip_visible), chip_visible)
+    #     # Determine target_list: sample up to 5 unique indices from visible chips
+    #     chip_visible = instance['chip_visible_count']
+    #     if chip_visible >= 5:
+    #         target_list = random.sample(range(chip_visible), 5)
+    #     else:
+    #         target_list = random.sample(range(chip_visible), chip_visible)
         
-        # Ensure the selected cross is within the range of available crosses
-        cross_target = min(cross_target, used_crosses_count - 1)
+    #     # Ensure the selected cross is within the range of available crosses
+    #     cross_target = min(cross_target, used_crosses_count - 1)
         
-        # Ensure the selected chips are within the range of visible chips
-        for i in range(len(target_list)):
-            target_list[i] = min(target_list[i], chip_visible - 1)
+    #     # Ensure the selected chips are within the range of visible chips
+    #     for i in range(len(target_list)):
+    #         target_list[i] = min(target_list[i], chip_visible - 1)
         
-        # Assign the random selections to the instance
-        instance['cross_target'] = cross_target - 1  # Adjusting as per original logic
-        if instance['cross_target'] < 0:
-            instance['cross_target'] = 0
-        instance['target_list'] = target_list
+    #     # Assign the random selections to the instance
+    #     instance['cross_target'] = cross_target - 1  # Adjusting as per original logic
+    #     if instance['cross_target'] < 0:
+    #         instance['cross_target'] = 0
+    #     instance['target_list'] = target_list
         
-        print(f"Port {instance.get('port', 'N/A')}: Gamma applied. Random cross_target: {cross_target}, target_list: {target_list}")
+    #     print(f"Port {instance.get('port', 'N/A')}: Gamma applied. Random cross_target: {cross_target}, target_list: {target_list}")
     
     return inputs, instance['cross_target'], instance['target_list']
 

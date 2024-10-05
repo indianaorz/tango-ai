@@ -229,9 +229,11 @@ def main():
         num_workers=0,  # Reduce to 0 to prevent multiple workers
         collate_fn=custom_collate_fn  # Use the custom collate function
     )
+    
 
     # Initialize the model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
     
     #load the latest checkpoint if it exists and note which epoch it was on
     checkpoint_files = glob.glob(os.path.join(checkpoint_dir, f"*.pt"))
@@ -277,6 +279,9 @@ def main():
             optimizer.zero_grad()
 
             try:
+                #skip if the batch size is 1
+                if batched_sequences[0]['grid'].shape[0] == 1:
+                    continue
                 # Forward pass
                 outputs = model(batched_sequences)  # Shape: (batch_size, 16)
 

@@ -1,5 +1,8 @@
 use crate::global::{
-    set_beast_out_selectable, set_chip_code, set_chip_count_visible, set_chip_selected_count, set_chip_slot, set_cust_gage, set_enemy_game_emotion_state, set_inside_cross_window, set_is_offerer, set_player_chip_folder, set_player_emotion_state, set_player_game_emotion_state, set_selected_chip_index, set_selected_cross_index, set_selected_menu_index
+    set_beast_out_selectable, set_chip_code, set_chip_count_visible, set_chip_selected_count, set_chip_slot,
+    set_cust_gage, set_enemy_game_emotion_state, set_inside_cross_window, set_is_offerer, set_player_chip_folder,
+    set_player_emotion_state, set_player_game_emotion_state, set_selected_chip_index, set_selected_cross_index,
+    set_selected_menu_index,
 };
 use crate::{audio, config, game, gui, net, rom, stats, video};
 use egui::debug_text::print;
@@ -19,17 +22,17 @@ use std::fs::File;
 
 use std::sync::LazyLock;
 
-pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0) * 8.0;
+pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0); // * 8.0;
 
 // session.rs
 use crate::global::{
     add_punishment, add_reward, clear_punishments, clear_rewards, get_frame_count, get_player_health_index,
     set_enemy_charge, set_enemy_chip_folder, set_enemy_code_folder, set_enemy_grid_position, set_enemy_health,
-    set_enemy_position, set_enemy_reg_chip, set_enemy_selected_chip, set_enemy_tag_folder, set_frame_count,
-    set_grid_owner_state, set_grid_state, set_is_player_inside_window, set_local_input, set_player_charge,
-    set_player_code_folder, set_player_grid_position, set_player_health, set_player_health_index, set_player_position,
-    set_enemy_navi_cust_parts, set_player_navi_cust_parts,
-    set_player_reg_chip, set_player_selected_chip, set_player_tag_folder, set_winner, RewardPunishment,
+    set_enemy_navi_cust_parts, set_enemy_position, set_enemy_reg_chip, set_enemy_selected_chip, set_enemy_tag_folder,
+    set_frame_count, set_grid_owner_state, set_grid_state, set_is_player_inside_window, set_local_input,
+    set_player_charge, set_player_code_folder, set_player_grid_position, set_player_health, set_player_health_index,
+    set_player_navi_cust_parts, set_player_position, set_player_reg_chip, set_player_selected_chip,
+    set_player_tag_folder, set_winner, RewardPunishment,
 };
 use crate::global::{PUNISHMENTS, REWARDS}; // Import the global variables
 
@@ -616,10 +619,9 @@ impl Session {
         let logging_enabled_clone = Arc::clone(&logging_enabled);
         let command4_prev_state_clone = Arc::clone(&command4_prev_state);
 
-        let commands_enabled = Arc::new(AtomicBool::new(true));
+        let commands_enabled = Arc::new(AtomicBool::new(false));
         let local_player_index_for_frame = Arc::clone(&local_player_index_arc);
         let mut is_left_player = -1;
-
 
         // Wrap the health variables in Arc<Mutex<T>>
         let last_player_health = Arc::new(Mutex::new(0u16));
@@ -642,7 +644,7 @@ impl Session {
 
             move |mut core, video_buffer, mut thread_handle| {
                 let mut is_left_player = is_left_player; // Create a mutable copy of is_left_player
-                
+
                 // Lock the Mutex to access and modify the health values
                 let mut last_player_health = last_player_health.lock();
                 let mut last_opponent_health = last_opponent_health.lock();
@@ -684,6 +686,7 @@ impl Session {
 
                 set_cust_gage(core.raw_read_8(0x20352A1, -1) as u16);
 
+                set_player_emotion_state(core.raw_read_8(0x020352CC, -1) as u16);
                 // //search all raw 16 values for ones that equal 196
                 // let found_addresses = search_all_specific_values(&mut core);
                 // println!("Found {} addresses with value 196", found_addresses.len());
@@ -696,7 +699,6 @@ impl Session {
                 // println!("Player Charge state: {}", core.raw_read_8(0x0203419D, -1));
                 //set enemy and player charge globally
 
-                set_player_emotion_state(core.raw_read_8(0x020352CC, -1) as u16);
                 // println!("Player emotion state: {}", core.raw_read_8(0x020352CC, -1) as u16);
 
                 // 0203A9E6 = 100 -> 20
@@ -727,7 +729,6 @@ impl Session {
                 set_player_grid_position((player_grid_positionX2 as u16, player_grid_positionY2 as u16));
                 set_enemy_grid_position((player_grid_positionX1 as u16, player_grid_positionY1 as u16));
 
-                
                 // println!("Player game emotion state: {}", core.raw_read_8(0x02035290, -1) as u16);
                 // println!("P2 emotion state: {}", core.raw_read_8(0x0203CE2C, -1) as u16);
                 //set enemy emotion state
@@ -861,18 +862,15 @@ impl Session {
                     let server_health_address = 0x0203A9D4; // Server side health
                     let client_health_address = 0x0203AAAC; // Client side health
 
-                    if local_player_index == 1{
+                    if local_player_index == 1 {
                         set_player_game_emotion_state(core_ref.raw_read_8(0x0203CE90, -1) as u16);
                         set_enemy_game_emotion_state(core_ref.raw_read_8(0x0203CE2C, -1) as u16);
-                    }
-                    else{
+                    } else {
                         set_player_game_emotion_state(core_ref.raw_read_8(0x0203CE2C, -1) as u16);
                         set_enemy_game_emotion_state(core_ref.raw_read_8(0x0203CE90, -1) as u16);
                     }
-                    
+
                     if is_left_player == 1 {
-
-
                         set_enemy_position((enemy_x, enemy_y));
                         set_player_position((player_x, player_y));
 
@@ -883,9 +881,6 @@ impl Session {
 
                         set_player_charge(core_ref.raw_read_8(0x0203409D, -1) as u16);
                         set_enemy_charge(core_ref.raw_read_8(0x0203419D, -1) as u16);
-
-
-
 
                         let current_player_health = core_ref.raw_read_16(server_health_address, -1);
                         let current_opponent_health = core_ref.raw_read_16(client_health_address, -1);
@@ -899,7 +894,7 @@ impl Session {
 
                         // Check if opponent's health has decreased (reward)
                         if current_opponent_health != *last_opponent_health && *last_opponent_health != 0 {
-                            let damage = *last_opponent_health- current_opponent_health;
+                            let damage = *last_opponent_health - current_opponent_health;
                             // Record reward in global REWARDS
                             add_reward(RewardPunishment { damage });
                         }
@@ -917,10 +912,7 @@ impl Session {
                             // Exit the application after sending the winner message
                             std::process::exit(0);
                         }
-
                     } else {
-
-
                         set_enemy_position((player_x, player_y));
                         set_player_position((enemy_x, enemy_y));
 
@@ -931,7 +923,6 @@ impl Session {
 
                         set_enemy_charge(core_ref.raw_read_8(0x0203409D, -1) as u16);
                         set_player_charge(core_ref.raw_read_8(0x0203419D, -1) as u16);
-
 
                         let current_player_health = core_ref.raw_read_16(client_health_address, -1);
                         let current_opponent_health = core_ref.raw_read_16(server_health_address, -1);
@@ -945,14 +936,13 @@ impl Session {
 
                         // Check if opponent's health has decreased (reward)
                         if current_opponent_health != *last_opponent_health && *last_opponent_health != 0 {
-                            let damage = *last_opponent_health- current_opponent_health;
+                            let damage = *last_opponent_health - current_opponent_health;
                             // Record reward in global REWARDS
                             add_reward(RewardPunishment { damage });
                         }
                         // Update last known health values
                         *last_player_health = current_player_health;
                         *last_opponent_health = current_opponent_health;
-
 
                         set_player_health(current_player_health);
                         set_enemy_health(current_opponent_health);
@@ -963,7 +953,6 @@ impl Session {
                             // Exit the application after sending the winner message
                             std::process::exit(0);
                         }
-
                     }
 
                     if commands_enabled.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1168,7 +1157,6 @@ impl Session {
         // Log the Navi Cust IDs
         println!("Local Player Navi Cust IDs: {:?}", own_navi_cust_ids);
         println!("Opponent Player Navi Cust IDs: {:?}", opponent_navi_cust_ids);
-        
 
         set_player_navi_cust_parts(own_navi_cust_ids);
         set_enemy_navi_cust_parts(opponent_navi_cust_ids);
@@ -1506,7 +1494,7 @@ impl Session {
                     }
 
                     // Check if opponent's health has decreased (reward)
-                    if current_opponent_health < LAST_OPPONENT_HEALTH && LAST_OPPONENT_HEALTH != 0{
+                    if current_opponent_health < LAST_OPPONENT_HEALTH && LAST_OPPONENT_HEALTH != 0 {
                         let damage = LAST_OPPONENT_HEALTH - current_opponent_health;
                         // Record reward in global REWARDS
                         add_reward(RewardPunishment { damage });
@@ -1676,9 +1664,10 @@ impl Session {
                     // Retrieve the health addresses
                     let player_health_addr = *PLAYER_HEALTH_ADDRESS.lock();
                     let opponent_health_addr = *OPPONENT_HEALTH_ADDRESS.lock();
-                    set_player_charge(core_ref.raw_read_8(0x02036948, -1) as u16);
-                    set_enemy_charge(core_ref.raw_read_8(0x02036A10, -1) as u16);
+                    // set_player_charge(core_ref.raw_read_8(0x02036948, -1) as u16);
+                    // set_enemy_charge(core_ref.raw_read_8(0x02036A10, -1) as u16);
 
+                    set_cust_gage(core_ref.raw_read_8(0x20352A1, -1) as u16);
                     set_player_emotion_state(core_ref.raw_read_8(0x020352CC, -1) as u16);
                     // println!("Player window emotion state: {}", core_ref.raw_read_8(0x020352CC, -1) as u16);
 
@@ -1841,17 +1830,26 @@ impl Session {
                         let player_grid_positionY2 = core_ref.raw_read_8(0x020384FB, -1);
                         // println!("Player grid position2: {}, {}", player_grid_positionX2, player_grid_positionY2);
 
+                        if is_offerer{
+                            set_player_game_emotion_state(core_ref.raw_read_8(0x0203CE90, -1) as u16);
+                            set_enemy_game_emotion_state(core_ref.raw_read_8(0x0203CE2C, -1) as u16);
+                        }
+                        else{
+                            set_player_game_emotion_state(core_ref.raw_read_8(0x0203CE2C, -1) as u16);
+                            set_enemy_game_emotion_state(core_ref.raw_read_8(0x0203CE90, -1) as u16);
+                        }
+
                         if get_player_health_index() == 0 {
                             set_player_position((player1_x, player1_y));
                             set_enemy_position((player2_x, player2_y));
+
+                            set_player_charge(core_ref.raw_read_8(0x0203409D, -1) as u16);
+                            set_enemy_charge(core_ref.raw_read_8(0x0203419D, -1) as u16);
 
                             // println!("First Chip P1: {}", core.raw_read_16(0x203A9DA, -1));
                             set_player_selected_chip(core_ref.raw_read_16(0x203A9DA, -1));
                             // println!("First Chip P2: {}", core.raw_read_16(0x203AAB2, -1));
                             set_enemy_selected_chip(core_ref.raw_read_16(0x203AAB2, -1));
-
-                            set_player_game_emotion_state(core.raw_read_8(0x0203CE90, -1) as u16);
-                            set_enemy_game_emotion_state(core.raw_read_8(0x0203CE2C, -1) as u16);
 
                             set_player_grid_position((player_grid_positionX1 as u16, player_grid_positionY1 as u16));
                             set_enemy_grid_position((player_grid_positionX2 as u16, player_grid_positionY2 as u16));
@@ -1861,13 +1859,16 @@ impl Session {
                             set_player_position((player2_x, player2_y));
                             set_enemy_position((player1_x, player1_y));
 
+                            set_player_charge(core_ref.raw_read_8(0x0203419D, -1) as u16);
+                            set_enemy_charge(core_ref.raw_read_8(0x0203409D, -1) as u16);
+
                             // println!("First Chip P2: {}", core.raw_read_16(0x203A9DA, -1));
                             set_enemy_selected_chip(core_ref.raw_read_16(0x203A9DA, -1));
                             // println!("First Chip P1: {}", core.raw_read_16(0x203AAB2, -1));
                             set_player_selected_chip(core_ref.raw_read_16(0x203AAB2, -1));
 
-                            set_player_game_emotion_state(core.raw_read_8(0x0203CE2C, -1) as u16);
-                            set_enemy_game_emotion_state(core.raw_read_8(0x0203CE90, -1) as u16);
+
+
 
                             set_player_grid_position((player_grid_positionX2 as u16, player_grid_positionY2 as u16));
                             set_enemy_grid_position((player_grid_positionX1 as u16, player_grid_positionY1 as u16));
@@ -2000,7 +2001,6 @@ impl Session {
         // Log the Navi Cust IDs
         println!("Local Player Navi Cust IDs: {:?}", own_navi_cust_ids);
         println!("Opponent Player Navi Cust IDs: {:?}", opponent_navi_cust_ids);
-
 
         set_player_navi_cust_parts(own_navi_cust_ids);
         set_enemy_navi_cust_parts(opponent_navi_cust_ids);

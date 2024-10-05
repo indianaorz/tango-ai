@@ -33,7 +33,7 @@ from utils import (
 import threading
 import queue
 
-from battle_network_model import get_gamestate_tensor, BattleNetworkModel
+from battle_network_model import get_gamestate_tensor, BattleNetworkModel,prepare_inference_sequence
 
 print("Saving data points to disk.")
 planning_data_dir = get_root_dir() + "/data/planning_data"
@@ -91,47 +91,56 @@ APP_PATH = "./dist/tango-x86_64-linux.AppImage"
 env_common = os.environ.copy()
 env_common["INIT_LINK_CODE"] = "valuesearch"
 env_common["AI_MODEL_PATH"] = "ai_model"
-GAMMA = float(os.getenv("GAMMA", 0.1))  # Default gamma is 0.05
-learning_rate = 1e-5
+GAMMA = 0.0#5#float(os.getenv("GAMMA", 0.1))  # Default gamma is 0.05
+learning_rate = 1e-4
 
 # Initialize maximum health values
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
 replay_count = 0
-battle_count = 0
-include_orig = True
+battle_count = 1
+include_orig = False
 do_replays = False
+save_data = False
+prune = False
+
+# replay_count = 8
+# battle_count = 0
+# include_orig = False
+# do_replays = True
+# save_data = True
+# prune = False
 
 INSTANCES = []
 # Define the server addresses and ports for each instance
 INSTANCES = [
-    {
-        'address': '127.0.0.1',
-        'port': 12344,
-        'rom_path': 'bn6,0',
-        # 'rom_path': 'bn6,1',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
-        # 'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar 1.sav',
-        'name': 'Instance 1',
-        # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
-        # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-IndianaOrz-round1-p2.tangoreplay',
-        # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006015542-lunazoe-bn6-vs-IndianaOrz-round3-p2.tangoreplay',#player 2 cross change emotion state check fix needed
-        # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006020253-lunazoe-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
-        'init_link_code': 'arena1',
-        'is_player': True  # Set to True if you don't want this instance to send inputs
-    },
-    {
-        'address': '127.0.0.1',
-        'port': 12345,
-        # 'rom_path': 'bn6,0',
-        'rom_path': 'bn6,1',
-        # 'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
-        'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar 1.sav',
-        'name': 'Instance 2',
-        'init_link_code': 'arena1',
-        'is_player': True  # Set to False if you want this instance to send inputs
-    },
+    # {
+    #     'address': '127.0.0.1',
+    #     'port': 12344,
+    #     'rom_path': 'bn6,0',
+    #     # 'rom_path': 'bn6,1',
+    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
+    #     # 'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar 1.sav',
+    #     'name': 'Instance 1',
+    #     # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
+    #     # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20230929001213-ummm-bn6-vs-IndianaOrz-round1-p2.tangoreplay',
+    #     # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006015542-lunazoe-bn6-vs-IndianaOrz-round3-p2.tangoreplay',#player 2 cross change emotion state check fix needed
+    #     'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006020253-lunazoe-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
+    #     'init_link_code': 'arena1',
+    #     'is_player': False  # Set to True if you don't want this instance to send inputs
+    # },
+    # {
+    #     'address': '127.0.0.1',
+    #     'port': 12345,
+    #     # 'rom_path': 'bn6,0',
+    #     'rom_path': 'bn6,1',
+    #     # 'save_path': '/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav',
+    #     'save_path': '/home/lee/Documents/Tango/saves/BN6 Falzar 1.sav',
+    #     'name': 'Instance 2',
+    #     'init_link_code': 'arena1',
+    #     'is_player': False  # Set to False if you want this instance to send inputs
+    # },
     # Additional instances can be added here
 ]
 
@@ -348,6 +357,30 @@ KEY_BIT_POSITIONS = {
 }
 
 
+# Define button mapping
+BUTTONS = [
+    ('MENU2', 15-9),    # 0000001000000000
+    ('MENU', 15-8),     # 0000000100000000
+    ('DOWN', 15-7),     # 0000000010000000
+    ('UP', 15-6),       # 0000000001000000
+    ('LEFT', 15-5),     # 0000000000100000
+    ('RIGHT', 15-4),    # 0000000000010000
+    ('SHOOT', 15-1),    # 0000000000000010
+    ('CHIP', 15-0)      # 0000000000000001
+]
+
+def convert_button_16_bit_string(button_name):
+    """
+    Converts the button name to a 16-bit binary string.
+    """
+    bit_pos = next((pos for name, pos in BUTTONS if name == button_name), None)
+    if bit_pos is not None:
+        return format(1 << bit_pos, '016b')
+    else:
+        raise ValueError(f"Button '{button_name}' not found in BUTTONS.")
+
+
+
 # Initialize the input tally dictionary with all keys set to 0
 input_tally = {key: 0 for key in KEY_BIT_POSITIONS.keys()}
 input_tally_lock = Lock()  # Lock for thread-safe updates
@@ -397,25 +430,28 @@ else:
 
 from planning_model import PlanningModel, get_planning_input_from_replay
 
+inference_battle_model = None
+
 # Function to load the AI models
 # Initialize Separate Models for Inference and Training
-def load_models(image_memory=1):
+
+def load_models(image_memory=1, learning_rate=1e-3):
     """
     Loads separate Inference and Training models for both Planning and Battle.
     If checkpoints do not exist, initializes new models.
     Utilizes the configuration parameters.
     """
     global inference_planning_model, training_planning_model
-    global inference_battle_model, training_battle_model
+    global inference_battle_model
     global optimizer_planning, optimizer_battle
     global latest_checkpoint_number  # Access the global variable
     
     # Define the root directory
     root_dir = get_root_dir()
-
+    
     # Load Training Planning Model
     training_planning_checkpoint_path = get_latest_checkpoint(model_type='planning', image_memory=image_memory)
-
+    
     if training_planning_checkpoint_path:
         training_planning_model = PlanningModel().to(device)
         checkpoint_training_planning = torch.load(training_planning_checkpoint_path, map_location=device)
@@ -431,55 +467,91 @@ def load_models(image_memory=1):
         # Initialize new Training Planning Model
         training_planning_model = PlanningModel().to(device)
         print("No Training Planning Model checkpoint found. Initialized a new Training Planning Model.")
-
+    
     training_planning_model.train()  # Set to train mode
+    
+    # Load Training Battle Models for Each Button
+    # training_battle_models = {}
+    # for button_name, bit_pos in BUTTONS:
+    #     training_battle_checkpoint_path = get_latest_checkpoint(model_type='battle', image_memory=image_memory, button=button_name)
+        
+    #     if training_battle_checkpoint_path:
+    #         model = BattleNetworkModel(memory=image_memory).to(device)
+    #         checkpoint_training_battle = torch.load(training_battle_checkpoint_path, map_location=device)
+    #         if 'model_state_dict' in checkpoint_training_battle:
+    #             model.load_state_dict(checkpoint_training_battle['model_state_dict'])
+    #             print(f"Training Battle Model for {button_name} loaded from {training_battle_checkpoint_path}")
+    #             # Extract the checkpoint number
+    #             latest_number = extract_number_from_checkpoint(training_battle_checkpoint_path)
+    #             latest_checkpoint_number['battle'] = latest_number
+    #         else:
+    #             # Load directly if 'model_state_dict' is not present
+    #             model.load_state_dict(torch.load(training_battle_checkpoint_path))
+    #             latest_number = extract_number_from_checkpoint(training_battle_checkpoint_path)
+    #             latest_checkpoint_number['battle'] = latest_number
+    #     else:
+    #         # Initialize new Training Battle Model
+    #         model = BattleNetworkModel(memory=image_memory).to(device)
+    #         print(f"No Training Battle Model checkpoint found for {button_name}. Initialized a new Training Battle Model.")
+        
+    #     model.train()  # Set to train mode
+    #     training_battle_models[button_name] = model
+    
+    # Initialize Inference Battle Models as copies of Training Battle Models
+    # inference_battle_models = {}
+    # for button_name, model in training_battle_models.items():
+    #     inference_model = BattleNetworkModel(memory=image_memory).to(device)
+    #     inference_model.load_state_dict(model.state_dict())
+    #     inference_model.eval()
+    #     # inference_model.half()  # Use half precision if desired
+    #     inference_battle_models[button_name] = inference_model
+    
+    # Load the unified model
+    unified_model = BattleNetworkModel(image_option='None', memory=image_memory, scale=1.0, dropout_p=0.5, output_size=8)
 
 
-    # Load Training Battle Model
+    checkpoint_dir = os.path.join(root_dir, f"checkpoints/battle/{image_memory}")
+    unified_checkpoint_dir = os.path.join(checkpoint_dir)  # Example directory
+
+
+    # Find the latest checkpoint for the unified model
+    checkpoint_files = glob.glob(os.path.join(unified_checkpoint_dir, f"*.pt"))
+    if not checkpoint_files:
+        print(f"No checkpoints found for the unified model in {unified_checkpoint_dir}.")
+        return
+    checkpoint_files.sort(key=os.path.getmtime)
+    latest_checkpoint = checkpoint_files[-1]
+    print(f"Loading unified model checkpoint from {latest_checkpoint}")
+    try:
+        unified_model.load_state_dict(torch.load(latest_checkpoint, map_location=device))
+    except Exception as e:
+        print(f"Error loading unified model: {e}")
+        return
+
+    unified_model.to(device)
+    unified_model.eval()
+    
+    #load the unified single model
     training_battle_checkpoint_path = get_latest_checkpoint(model_type='battle', image_memory=image_memory)
-
-    if training_battle_checkpoint_path:
-        training_battle_model = BattleNetworkModel(memory=image_memory).to(device)
-        checkpoint_training_battle = torch.load(training_battle_checkpoint_path, map_location=device)
-        if 'model_state_dict' in checkpoint_training_battle:
-            training_battle_model.load_state_dict(checkpoint_training_battle['model_state_dict'])
-            print(f"Training Battle Model loaded from {training_battle_checkpoint_path}")
-            # Extract the checkpoint number
-            latest_number = extract_number_from_checkpoint(training_battle_checkpoint_path)
-            latest_checkpoint_number['battle'] = latest_number
-        else:
-            #load from the checkpoint
-            training_battle_model.load_state_dict(torch.load(training_battle_checkpoint_path))
-            latest_number = extract_number_from_checkpoint(training_battle_checkpoint_path)
-            latest_checkpoint_number['battle'] = latest_number
-    else:
-        # Initialize new Training Battle Model
-        training_battle_model = BattleNetworkModel(memory=image_memory).to(device)
-        print("No Training Battle Model checkpoint found. Initialized a new Training Battle Model.")
-
-    training_battle_model.train()  # Set to train mode
-
-    # Initialize Inference Battle Model as a copy of Training Battle Model
-    # inference_battle_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
-    # inference_battle_model.load_state_dict(training_battle_model.state_dict())
-    # inference_battle_model.eval()  # Set to eval mode
-    # # Initialize Inference Planning Model as a copy of Training Planning Model
-    # inference_planning_model = GameInputPredictor(image_memory=image_memory, config=config).to(device)
-    # inference_planning_model.load_state_dict(training_planning_model.state_dict())
-    # inference_planning_model.eval()  # Set to eval mode
-
-    #just set the inference model to the train model
-    inference_battle_model = training_battle_model
-    inference_planning_model = training_planning_model
-
-    inference_battle_model.eval()
+    
+    
+    # Assign to global inference models
+    inference_battle_model = unified_model
+    print(f"Unified Model loaded from {latest_checkpoint}")
+    
+    # Initialize Inference Planning Model as a copy of Training Planning Model
+    inference_planning_model = PlanningModel().to(device)
+    inference_planning_model.load_state_dict(training_planning_model.state_dict())
     inference_planning_model.eval()
-    inference_battle_model.half()
     # inference_planning_model.half()
-
+    
     # Initialize separate optimizers for Training Models
     optimizer_planning = optim.Adam(training_planning_model.parameters(), lr=learning_rate)
-    optimizer_battle = optim.Adam(training_battle_model.parameters(), lr=learning_rate)
+    # optimizer_battle = {button: optim.Adam(model.parameters(), lr=learning_rate) for button, model in training_battle_models.items()}
+    
+    print("All models loaded and initialized successfully.")
+
+
 
 def get_new_checkpoint_path(model_type='battle', image_memory=1, battle_count=4, replay_count = 0):
     """
@@ -524,7 +596,7 @@ load_models(IMAGE_MEMORY)
 
 
 # Define optimizer and loss function
-optimizer = optim.Adam(training_battle_model.parameters(), lr=learning_rate)
+# optimizer = optim.Adam(training_battle_model.parameters(), lr=learning_rate)
 criterion = nn.BCEWithLogitsLoss(reduction='none')
 scaler = GradScaler()
 
@@ -600,9 +672,7 @@ from planning_model import get_planning_input_from_instance, encode_used_crosses
 # Function to perform inference with the AI model
 # previous_sent = 0
 
-def predict(port, frames, position_tensor, inside_window, player_health, enemy_health,
-            player_charge_seq, enemy_charge_seq, current_player_charge, current_enemy_charge,
-            previous_inputs_tensor, health_memory_tensor, current_player_chip, current_enemy_chip):
+def predict(port, current_data_point, inside_window):
     """
     Predict the next action based on a sequence of frames and additional game state information.
     Chooses between Planning and Battle models based on `inside_window`.
@@ -974,33 +1044,10 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
     if inside_window.item() == 1.0:
         return {'type': 'key_press', 'key': '0000000000000000'}
     
-
-    # Preprocess and stack frames
-    preprocessed_frames = []
-    for img in frames:
-        if img is None:
-            print("Encountered None in frames. Skipping inference.")
-            return {'type': 'key_press', 'key': '0000000000000000'}  # No action
-        img = img.convert('RGB')
-        img = transform(img).unsqueeze(0).to(device)
-        preprocessed_frames.append(img)
-
-    try:
-        stacked_frames = torch.stack(preprocessed_frames, dim=2).to(device)  # Shape: (1, 3, D, 160, 240)
-    except Exception as e:
-        print(f"Error stacking frames: {e}")
-        return {'type': 'key_press', 'key': '0000000000000000'}
-
+    
     predicted_input_str = None
     model_type = "Battle_Model"  # Default model
 
-     # Check additional inputs
-    if position_tensor is not None:
-        assert not torch.isnan(position_tensor).any(), "Position tensor contains NaN"
-    if player_charge_seq is not None:
-        assert not torch.isnan(player_charge_seq).any(), "Player charge sequence contains NaN"
-    if enemy_charge_seq is not None:
-        assert not torch.isnan(enemy_charge_seq).any(), "Enemy charge sequence contains NaN"
 
     # Select model based on inside_window
     if inside_window.item() == 1.0:
@@ -1013,7 +1060,7 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
         model_type = "Battle_Model"
 
     # If there's no model, perform the random action
-    if selected_model is None:
+    if model_type != "Battle_Model" and selected_model is None:
         print(f"Gamma condition met (gamma={GAMMA}). Taking a random action.")
         random_command = generate_random_action()
         # If inside_window ignore inputs for A, S, or X
@@ -1028,104 +1075,101 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
         return {'type': 'key_press', 'key': random_command}
     
     max_prob = 0
+    memory= get_image_memory() 
+    
     if model_type == "Battle_Model":
         # Acquire the appropriate lock before performing model inference
-        with selected_lock:
+        
+         # Prepare the sequence
+        sequence = prepare_inference_sequence(data_buffers[port], current_data_point, memory=memory)
+        
+        # Ensure the sequence has exactly 'memory' gamestates
+        assert len(sequence) == memory, f"Sequence length {len(sequence)} != memory {memory}"
+        
+        # Move sequence data to device
+        # Each gamestate in the sequence is a dict; models expect a list of gamestates
+        sequence_device = []
+        for gamestate in sequence:
+            gamestate_device = {}
+            for key, value in gamestate.items():
+                if key in ['action', 'reward']:
+                    continue  # Skip action and reward if not needed for inference
+                if isinstance(value, list):
+                    # If the value is a list of tensors, move each tensor to device
+                    gamestate_device[key] = [tensor.to(device) for tensor in value]
+                else:
+                    # Move tensor to device
+                    gamestate_device[key] = value.to(device)
+            sequence_device.append(gamestate_device)
+        
+        # Initialize a dictionary to hold predicted probabilities for each button
+        button_predictions = {}
+        
+        # with torch.no_grad():
+        #     predictions = {}
+            # for button_name, bit_pos in BUTTONS:
+            #     model = inference_battle_models.get(button_name)
+            #     if not model:
+            #         print(f"No inference model loaded for button: {button_name}. Skipping.")
+            #         continue
+            #     try:
+            #         # Forward pass
+            #         output = model(sequence_device)  # Adjust based on your model's forward method
+            #         # predictions[button_name] = output
+            #         predicted_prob = output.item()  # Get the prediction for the last gamestate
+            #         button_predictions[button_name] = predicted_prob
+            #         max_prob = max(max_prob, predicted_prob)
+            #     except Exception as e:
+            #         print(f"Error during forward pass for {button_name}: {e}")
+            #         button_predictions[button_name] = 0.0  # Default to no press on error
+        # Perform inference
+        with torch.no_grad():
+            # print("\n--- Inference Results ---")
             try:
-                with torch.no_grad():
-                    with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
-                        # Prepare additional inputs based on configuration
-                        additional_inputs = {}
-
-                        if input_memory_size > 0 and previous_inputs_tensor is not None:
-                            additional_inputs['previous_inputs'] = previous_inputs_tensor  # Shape: (1, input_memory_size * 16)
-
-                        # Include health_memory if health_memory_size is set
-                        if health_memory_size > 0 and health_memory_tensor is not None:
-                            additional_inputs['health_memory'] = health_memory_tensor  # Shape: (1, 2 * health_memory_size)
-
-                        if config['input_features'].get('include_position', False):
-                            additional_inputs['position'] = position_tensor  # Shape based on config
-                        if config['input_features'].get('temporal_charge', 0) > 0:
-                            additional_inputs['player_charge_temporal'] = player_charge_seq  # Shape: (1, temporal_charge)
-                            additional_inputs['enemy_charge_temporal'] = enemy_charge_seq    # Shape: (1, temporal_charge)
-                            
-                            # Convert scalar charges to tensors
-                            additional_inputs['player_charge'] = torch.tensor(
-                                [current_player_charge], dtype=torch.float32, device=device
-                            )  # Shape: (1,)
-                            additional_inputs['enemy_charge'] = torch.tensor(
-                                [current_enemy_charge], dtype=torch.float32, device=device
-                            )  # Shape: (1,)
-                        else:
-                            if config['input_features'].get('include_player_charge', False):
-                                additional_inputs['player_charge'] = torch.tensor(
-                                    [current_player_charge], dtype=torch.float32, device=device
-                                )  # Shape: (1,)
-                            if config['input_features'].get('include_enemy_charge', False):
-                                additional_inputs['enemy_charge'] = torch.tensor(
-                                    [current_enemy_charge], dtype=torch.float32, device=device
-                                )  # Shape: (1,)
-
-                        # Process player_chip
-                        if config['input_features'].get('include_player_chip', False):
-                            player_chip_tensor = process_chip(current_player_chip)
-                            additional_inputs['player_chip'] = player_chip_tensor  # Shape: (1, 400)
-
-                        # Process enemy_chip
-                        if config['input_features'].get('include_enemy_chip', False):
-                            enemy_chip_tensor = process_chip(current_enemy_chip)
-                            additional_inputs['enemy_chip'] = enemy_chip_tensor  # Shape: (1, 400)
-                            
-                        # Perform inference
-                        outputs = selected_model(
-                            stacked_frames,
-                            **additional_inputs
-                        )
-                        probs = torch.sigmoid(outputs)
-                        probs = probs.cpu().numpy()[0]
-                        # Get threshold based on model type
-                        if model_type == "Planning_Model":
-                            command_threshold = get_threshold_plan()
-                        else:
-                            command_threshold = get_threshold()
-
-                        # Convert probabilities to binary input string based on threshold
-                        predicted_inputs = (probs >= command_threshold).astype(int)
-                        predicted_input_str = ''.join(map(str, predicted_inputs))
-                        # Convert probabilities to binary input string based on threshold
-                        # Determine the number of actions to select
-                        # This could be a fixed number or dynamically determined
-                        # For example, selecting at least one action
-                        # k = max(1, int(np.sum(probs > command_threshold)))  # Adjust based on your needs
-
-                        # Select top K probabilities
-                        # predicted_inputs = select_top_k(probs, k=2)
-                        # predicted_input_str = ''.join(map(str, predicted_inputs))
-                        # Usage within your code
-                        max_prob = np.max(probs)
-                        # threshold = adaptive_threshold(probs, percentile=85)
-                        # predicted_inputs = (probs >= threshold).astype(int)
-                        # predicted_input_str = ''.join(map(str, predicted_inputs))
-
-                        # if max_prob < command_threshold:
-                        #     predicted_input_str = '0000000000000000'
-                        
+                outputs = inference_battle_model(sequence_device)  # Shape: (batch_size=1, 8)
+                predicted_probs = outputs.squeeze(0)  # Shape: (8,)
             except Exception as e:
-                print(f"Error during inference with {model_type}: {e}")
-                return {'type': 'key_press', 'key': '0000000000000000'}  # Return no key press on failure
+                print(f"Error during forward pass: {e}")
+                return
 
-    # print(f"{predicted_input_str} from {model_type} | {max_prob:.3f}")
+            # Define a threshold or use adaptive thresholding
+            # Example using a fixed threshold
+            # Define a threshold for button presses
+            command_threshold = 0.01  # Adjust based on your requirements
+
+            # Initialize the binary command string with all '0's
+            predicted_input_list = list("0000000000000000")
+
+            # Track the maximum probability for logging
+            max_prob = torch.max(predicted_probs).item()
+            # Define button names in the order of the output
+            button_names = [btn[0] for btn in BUTTONS]
+            # Map each predicted probability to its corresponding button
+            for idx, btn in enumerate(button_names):
+                prob = predicted_probs[idx].item()
+                predicted = '1' if prob >= command_threshold else '0'
+                bit_pos = BUTTONS[idx][1]
+                predicted_input_list[bit_pos] = predicted
+
+            # Convert the list back to a string
+            predicted_input_str = ''.join(predicted_input_list)
+
+            # Display the results
+            # print(f"\nPredicted Button Presses: {predicted_input_str}")
+            # print(f"Predicted Probabilities: {predicted_probs.cpu().numpy()}")
+            # print(f"Maximum Probability in this Command: {max_prob:.3f}")
+            
+            print(f"Port {port}: Predicted Input: {predicted_input_str} | {max_prob:.3f}")
 
         # --- Start of Tally Update ---
-        with input_tally_lock:
-            for key, bit_pos in KEY_BIT_POSITIONS.items():
-                if predicted_inputs[15 - bit_pos] == 1:
-                    input_tally[key] += 1
+        # with input_tally_lock:
+        #     for key, bit_pos in KEY_BIT_POSITIONS.items():
+        #         if predicted_inputs[15 - bit_pos] == 1:
+        #             input_tally[key] += 1
 
         #never allow sending the pause command when out of the window
-        if inside_window.item() == 0.0 and predicted_input_str[15 - KEY_BIT_POSITIONS['RETURN']] == '1':
-            predicted_input_str = '0000000000000000'
+        # if inside_window.item() == 0.0 and predicted_input_str[15 - KEY_BIT_POSITIONS['RETURN']] == '1':
+        #     predicted_input_str = '0000000000000000'
         # Decide whether to take a random action based on GAMMA
         if random.random() < GAMMA:
             # print(f"Gamma condition met (gamma={GAMMA}). Taking a random action.")
@@ -1140,10 +1184,10 @@ def predict(port, frames, position_tensor, inside_window, player_health, enemy_h
             if inside_window.item() == 0.0 and random_command[15 - KEY_BIT_POSITIONS['RETURN']] == '1':
                 random_command = '0000000000000000'
             return {'type': 'key_press', 'key': random_command}
-        else:
+        # else:
             #no pausing 0000000000001000 while not inside window
-            return {'type': 'key_press', 'key': predicted_input_str}
-    
+        return {'type': 'key_press', 'key': predicted_input_str}
+
 
 def adaptive_threshold(probs, percentile=75):
     """
@@ -1186,7 +1230,7 @@ max_reward = 1
 max_punishment = 1
 # Function to receive messages from the game and process them
 async def receive_messages(reader, writer, port, training_data_dir, config):
-    global max_reward, max_punishment
+    global max_reward, max_punishment, prune
     buffer = ""
     current_input = None
     current_reward = 0
@@ -1343,6 +1387,11 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                     
                     
                     # Find the closest x values from the mapping
+                    
+                    if(current_player_position is None):
+                        current_player_position = [0,0]
+                    if(current_enemy_position is None):
+                        current_enemy_position = [0,0]
                     closest_player_x = get_closest_x(current_player_position[0], x_mapping.values())
                     closest_enemy_x = get_closest_x(current_enemy_position[0], x_mapping.values())
                     
@@ -1415,8 +1464,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             game_instance['player_folder'].append({'chip': player_chip_folder[i], 'code': player_code_folder[i], 'used': False, 'tagged': player_tagged, 'regged': player_regged})
                             game_instance['enemy_folder'].append({'chip': enemy_chip_folder[i], 'code': enemy_code_folder[i], 'used': False, 'tagged': enemy_tagged, 'regged': enemy_regged})
                         # print player chip folder and enemy code folder from instance
-                        print(f"Port {port}: Player Chip Folder: {game_instance['player_folder']}")
-                        print(f"Port {port}: Enemy Chip Folder: {game_instance['enemy_folder']}")
+                        # print(f"Port {port}: Player Chip Folder: {game_instance['player_folder']}")
+                        # print(f"Port {port}: Enemy Chip Folder: {game_instance['enemy_folder']}")
                         
 
 
@@ -1491,8 +1540,6 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         player_charge_sliding_windows[port].append(current_player_charge)
                         enemy_charge_sliding_windows[port].append(current_enemy_charge)
                     
-                    # Process position based on configuration
-                    position_tensor = process_position(current_player_position, current_enemy_position, config)
 
                     # Compute additional tensors
                     inside_window_tensor = torch.tensor([current_inside_window], dtype=torch.float32, device=device).unsqueeze(0)  # Shape: (1, 1)
@@ -1512,31 +1559,40 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
 
                     gamestate_tensor = get_gamestate_tensor(
                         screen_data,
-                        cust_gage,#validated
-                        grid_state,#validated
-                        grid_owner_state,#validated
-                        player_grid_position,#validated
-                        enemy_grid_position,#validated
-                        normalized_player_health,#validated
-                        normalized_enemy_health,#validated
-                        current_player_chip, #validated
-                        current_enemy_chip, #validated
-                        current_player_charge, #validated
-                        current_enemy_charge, #validated
-                        game_instance['current_hand'] if 'current_hand' in game_instance else None,#validated
-                        game_instance['player_folder'],#validated
-                        game_instance['enemy_folder'],#validated
-                        own_navi_cust,#validated
-                        enemy_navi_cust,#validated
-                        current_player_game_emotion,#validated
-                        current_enemy_game_emotion,#validated
-                        game_instance['player_used_crosses'],#validated
-                        game_instance['enemy_used_crosses'],#validated
+                        cust_gage,#validated 2
+                        grid_state,#validated 2
+                        grid_owner_state,#validated 2
+                        player_grid_position,#validated 2
+                        enemy_grid_position,#validated 2
+                        normalized_player_health,#validated2
+                        normalized_enemy_health,#validated2
+                        current_player_chip, #validated2
+                        current_enemy_chip, #validated2
+                        current_player_charge, #validated2
+                        current_enemy_charge, #validated2
+                        game_instance['current_hand'] if 'current_hand' in game_instance else None,#validated2
+                        game_instance['player_folder'],#validated2
+                        game_instance['enemy_folder'],#validated2
+                        own_navi_cust,#validated2
+                        enemy_navi_cust,#validated2
+                        current_player_game_emotion,#validated2
+                        current_enemy_game_emotion,#validated2
+                        game_instance['player_used_crosses'],#validated2
+                        game_instance['enemy_used_crosses'],#validated 2
                         game_instance['player_beasted_out'],#validated
                         game_instance['enemy_beasted_out'],#validated
                         game_instance['player_beasted_over'],
                         game_instance['enemy_beasted_over'],
                     )
+                    
+                    #print out count of one tensors in player folder
+                    # print(f"Port {port}: PLAYER: {gamestate_tensor['player_chip_hand']}")
+                    
+                    #print out argmax of each tensor in player_chip_hand
+                    # for i in range(0, len(gamestate_tensor['player_chip_hand'])):
+                    #     print(f"Port {port}: {i}: {torch.argmax(gamestate_tensor['player_chip_hand'][i])}")
+                    
+                    
 
 
                     # Update health memory buffers
@@ -1689,7 +1745,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             if not game_instance.get('is_player', False) and not is_replay:
                                 command = predict(
                                     port,
-                                    data_point
+                                    data_point,
+                                    inside_window_tensor,
                                 )
                                 #final check to make sure the action doesn't contain the pause button while outside the window
                                 if current_inside_window == 0 and command['key'][15 - KEY_BIT_POSITIONS['RETURN']] == '1': 
@@ -1703,6 +1760,56 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             # print(command['key'])
                             
                             if inside_window_tensor.item() == 0.0:
+                                # Append data_point to buffer
+                                max_reward = 200#max(max_reward, current_reward)
+                                max_punishment = 200#max(max_punishment, current_punishment)
+                                # If we received a reward or punishment, perform online training
+                                # Assign reward to the current data_point
+                                data_buffers[port].append(data_point)
+                                if current_reward != 0 or current_punishment != 0:
+                                    
+                                    # Compute reward for the data_point
+                                    reward_value = (current_reward / max_reward) - (current_punishment / max_punishment)
+                                    # print(f"Port {port}: Assigning reward: {reward_value}")
+
+                                    #assign datapoint if not assigned
+                                    if 'reward' not in data_buffers[port][-1]:
+                                        data_buffers[port][-1]['reward'] = reward_value
+                                    else:
+                                        data_point['reward'] += reward_value    
+
+                                    # Apply discounted rewards to past data points
+                                    gamma = 0.99  # Discount factor
+                                    for i, past_data_point in enumerate(reversed(data_buffers[port][-window_size:])):
+                                        discounted_reward = reward_value * (gamma ** i)
+                                        if 'reward' in past_data_point:
+                                            past_data_point['reward'] += discounted_reward
+                                        else:
+                                            past_data_point['reward'] = discounted_reward
+
+                                    # Reset rewards
+                                    current_reward = 0
+                                    current_punishment = 0
+
+                                # Pruning Logic Starts Here
+                                # Remove data points older than window_size that have no reward assigned
+                                # print( len(data_buffers[port]))
+                                # if prune:
+                                #     if len(data_buffers[port]) > window_size:
+                                #         # Calculate how many data points to prune
+                                #         num_to_prune = len(data_buffers[port]) - window_size
+                                #         pruned_count = 0
+                                #         i = 0
+                                #         while pruned_count < num_to_prune and i < len(data_buffers[port]):
+                                #             if 'reward' not in data_buffers[port][i]:
+                                #                 del data_buffers[port][i]
+                                #                 pruned_count += 1
+                                #             else:
+                                #                 i += 1
+
+                                current_reward = 0
+                                current_punishment = 0
+                                
                                 if port in window_entry_time:
                                     del window_entry_time[port]
                                 previous_sent_dict[port] = 0
@@ -1710,8 +1817,15 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                     #use the selected indicies to set the current hand's chip data
                                     #create a list of the data from chip slots at each selected indicies
                                     #game_instance['chip_slots'] game_instance['selected_chip_indices']
-                                    selected_chips = [game_instance['player_chips'][i][0] for i in game_instance['selected_chip_indices']]
-                                    #remove selected chips which are higher than the amount selected count
+                                    #ensure there are any selected chips
+                                    selected_chips = []
+                                    for i in game_instance['selected_chip_indices']:
+                                        if 0 <= i < len(game_instance['player_chips']):
+                                            selected_chips.append(game_instance['player_chips'][i][0])
+                                        else:
+                                            # Handle the error, e.g., log a warning or skip the index
+                                            print(f"Warning: Index {i} is out of range for player_chips.")                                    
+                                            #remove selected chips which are higher than the amount selected count
                                     selected_chips = selected_chips[:game_instance['chip_selected_count']]
                                     print(f"Port {port}: Selected Chips: {selected_chips}")
                                     game_instance['current_hand'] = selected_chips
@@ -1730,56 +1844,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 previous_inside_window_dict[port] = 0.0
 
                             previous_inside_window_dict[port] = inside_window_tensor.item()
-                            # Append data_point to buffer
-                            data_buffers[port].append(data_point)
                            
-                            max_reward = 200#max(max_reward, current_reward)
-                            max_punishment = 200#max(max_punishment, current_punishment)
-                            # If we received a reward or punishment, perform online training
-                            # Assign reward to the current data_point
-                            if current_reward != 0 or current_punishment != 0:
-                                # Compute reward for the data_point
-                                reward_value = (current_reward / max_reward) - (current_punishment / max_punishment)
-                                # print(f"Port {port}: Assigning reward: {reward_value}")
-
-                                #assign datapoint if not assigned
-                                if 'reward' not in data_buffers[port][-1]:
-                                    data_buffers[port][-1]['reward'] = reward_value
-                                else:
-                                    data_point['reward'] += reward_value    
-
-                                # Apply discounted rewards to past data points
-                                gamma = 0.99  # Discount factor
-                                for i, past_data_point in enumerate(reversed(data_buffers[port])):
-                                    discounted_reward = reward_value * (gamma ** i)
-                                    if 'reward' in past_data_point:
-                                        past_data_point['reward'] += discounted_reward
-                                    else:
-                                        past_data_point['reward'] = discounted_reward
-
-                                # Reset rewards
-                                current_reward = 0
-                                current_punishment = 0
-
-                            # Pruning Logic Starts Here
-                            # Remove data points older than window_size that have no reward assigned
-                            # print( len(data_buffers[port]))
-                            # if len(data_buffers[port]) > window_size:
-                            #     # Calculate how many data points to prune
-                            #     num_to_prune = len(data_buffers[port]) - window_size
-                            #     pruned_count = 0
-                            #     i = 0
-                            #     while pruned_count < num_to_prune and i < len(data_buffers[port]):
-                            #         if 'reward' not in data_buffers[port][i]:
-                            #             del data_buffers[port][i]
-                            #             pruned_count += 1
-                            #         else:
-                            #             i += 1
-
-                            
-                            # Reset rewards/punishments
-                            current_reward = 0
-                            current_punishment = 0
+                           
 
 
                         current_player_health = None
@@ -1853,10 +1919,11 @@ def saving_thread_function(batch_size=100000000, max_wait_time=1.0):
         batch_size (int): Number of training data items per batch.
         max_wait_time (float): Maximum time (in seconds) to wait before processing a batch.
     """
-    global training_battle_model, training_planning_model, optimizer_battle, optimizer_planning
+    global training_planning_model, optimizer_battle, optimizer_planning
     
     # Initialize the progress bar
     progress_bar = tqdm(desc="Training Progress", unit="batch")
+    
     
     while True:
         start_time = time.time()
@@ -1929,11 +1996,11 @@ def saving_thread_function(batch_size=100000000, max_wait_time=1.0):
 import random
 
 def save_data_to_hdf5(port, data_buffer, model_type="Battle_Model", log=True):
-    global training_battle_model, training_planning_model, optimizer_battle, optimizer_planning
+    global training_planning_model, optimizer_battle, optimizer_planning
 
     # Select the appropriate training model and lock
     if model_type == "Battle_Model":
-        selected_model = training_battle_model
+        # selected_model = training_battle_model
         selected_lock = training_battle_lock
         selected_optimizer = optimizer_battle
     elif model_type == "Planning_Model":
@@ -1944,8 +2011,8 @@ def save_data_to_hdf5(port, data_buffer, model_type="Battle_Model", log=True):
         raise ValueError(f"Unknown model_type: {model_type}")
 
     with selected_lock:
-        selected_model = selected_model.float()
-        selected_model.train()  # Switch to train mode
+        # selected_model = selected_model.float()
+        # selected_model.train()  # Switch to train mode
 
         batch_size = len(data_buffer)
         if batch_size == 0:
@@ -1992,6 +2059,9 @@ def save_data_to_hdf5(port, data_buffer, model_type="Battle_Model", log=True):
 
             # Now, convert batched_features to tensors
             for key in batched_features:
+                #make sure everything is on the same device
+                for i in range(len(batched_features[key])):
+                    batched_features[key][i] = batched_features[key][i].to(device)
                 batched_features[key] = torch.cat(batched_features[key], dim=0)  # Concatenate along batch dimension
 
             # Convert batched_actions to tensor
@@ -2190,53 +2260,6 @@ async def handle_connection(instance, config):
                 print(f"Error closing connection to {instance['name']} on port {instance['port']}: {e}")
         print(f"Connection to {instance['name']} on port {instance['port']} closed.")
 
-def process_position(player_position, enemy_position, config):
-    """
-    Processes player and enemy positions based on the position_type in the config.
-
-    Args:
-        player_position (list or tuple): [x, y] coordinates of the player.
-        enemy_position (list or tuple): [x, y] coordinates of the enemy.
-        config (dict): Configuration dictionary loaded from config.yaml.
-
-    Returns:
-        torch.Tensor or None: Processed position tensor or None if not included.
-    """
-    if not config['input_features'].get('include_position', False):
-        return None
-
-    position_type = config['input_features'].get('position_type', 'grid')
-
-    if position_type == 'float':
-        # Expecting [player_x, player_y, enemy_x, enemy_y]
-        if (player_position and enemy_position and 
-            isinstance(player_position, (list, tuple)) and 
-            isinstance(enemy_position, (list, tuple)) and 
-            len(player_position) == 2 and 
-            len(enemy_position) == 2):
-            position = [
-                float(player_position[0]),
-                float(player_position[1]),
-                float(enemy_position[0]),
-                float(enemy_position[1])
-            ]
-        else:
-            # print(f"Invalid positions: player_position={player_position}, enemy_position={enemy_position}. Using zeros.")
-            position = [0.0, 0.0, 0.0, 0.0]
-
-        position_tensor = torch.tensor([position], dtype=torch.float32, device=device)  # Shape: (1, 4)
-        return position_tensor
-
-    elif position_type == 'grid':
-        # Assuming compute_grid returns a (6, 3) grid
-        player_grid = compute_grid(player_position)  # (6,3)
-        enemy_grid = compute_grid(enemy_position)    # (6,3)
-        # Flatten and concatenate to form a (1, 36) tensor
-        position = torch.cat((player_grid, enemy_grid), dim=1).view(1, -1)  # Shape: (1, 36)
-        return position
-
-    else:
-        raise ValueError(f"Unknown position_type: {position_type}")
 
 import asyncio
 
@@ -2400,11 +2423,28 @@ async def main():
     # Start mouse monitoring task
     # monitor_task = asyncio.create_task(monitor_mouse_over_instances(INSTANCES))
 
+    
 
 
     # Wait for all connection tasks to complete
     await asyncio.gather(*connection_tasks)
     print("All instances have completed. Exiting program.")
+    #prune all datapoints which have not been rewarded
+    prune_count = 0
+    if prune:
+        #loop through instances ports
+        for port, buffer in data_buffers.items():
+            for data_point in buffer:
+                if 'reward' not in data_point:
+                    del data_point
+                    prune_count += 1
+                #or if the abs of the reward is < 0.1
+                elif abs(data_point['reward']) < 0.1:
+                    del data_point
+                    prune_count += 1
+                    
+    print(f"Pruned {prune_count} data points.")
+    
     WIN_REWARD = 0.5
     REPLAY_REWARD = 0.5
     # Determine winners and losers based on final_health
@@ -2480,13 +2520,13 @@ async def main():
     # print("Data points saved to disk.")
 
      # Start the training thread... testing to see if we can do this after the instances have been closed
-    
-    training_thread = threading.Thread(target=saving_thread_function, daemon=True)
-    training_thread.start()
+    if save_data:
+        training_thread = threading.Thread(target=saving_thread_function, daemon=True)
+        training_thread.start()
 
-    # # # At the end, before exiting, signal the training thread to stop
-    training_queue.put(None)  # Sentinel value to stop the thread
-    training_thread.join() # Wait for the thread to finish
+        # # # At the end, before exiting, signal the training thread to stop
+        training_queue.put(None)  # Sentinel value to stop the thread
+        training_thread.join() # Wait for the thread to finish
 
     # # --- Start of Tally Display ---
     # print("\n--- Input Tally ---")
@@ -2508,7 +2548,7 @@ async def main():
     #     for data_point in buffer:
     #         print(f"Port {port}: \n{data_point} ")
     # # Save the models
-    save_models()
+    # save_models()
 
 import h5py
 import numpy as np
@@ -2672,7 +2712,7 @@ def save_models():
     # Save Training Battle Model
     if 'training_battle_model' in globals() and training_battle_model is not None:
         battle_checkpoint_path = get_new_checkpoint_path(model_type='battle', image_memory=IMAGE_MEMORY, battle_count=battle_count)
-        torch.save({'model_state_dict': training_battle_model.state_dict()}, battle_checkpoint_path)
+        torch.save(training_battle_model.state_dict(), battle_checkpoint_path)
         print(f"Training Battle Model saved to {battle_checkpoint_path}")
         # Manage checkpoints
         battle_checkpoint_dir = get_checkpoint_dir(model_type='battle', image_memory=IMAGE_MEMORY)

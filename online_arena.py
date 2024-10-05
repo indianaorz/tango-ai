@@ -313,7 +313,7 @@ async def main():
         current_step += 1
         
         
-        perform_final_training(wandb_run, True)
+        # perform_final_training(wandb_run, True)
         print("Cycle completed. Waiting for the next cycle...")
         await asyncio.sleep(1)  # Adjust the delay time as needed
 

@@ -8,29 +8,32 @@ def get_root_dir():
     return '../TANGO'#'/home/lee/tango' #'../TANGO'#'/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO'
 
 def get_image_memory():
-    return 5
+    return 10
 
 def get_exponental_amount():
-    return 2
+    return 1
 
 
 def get_threshold():
-    return 0.25
+    return 0.7
 
 def get_threshold_plan():
-    return 0.25
+    return 0.7
 
 def inference_fps():
     return 60
 
 default_checkpoint_path = get_root_dir() + '/checkpoints'
 #checkpoint path
-def get_checkpoint_dir(model_type='planning', image_memory=1):
+def get_checkpoint_dir(model_type='planning', image_memory=1, button=None):
     """
     Constructs the checkpoint directory path based on model type and image memory.
     """
     root_dir = get_root_dir()
-    checkpoint_dir = os.path.join(root_dir, 'checkpoints', model_type, str(image_memory))
+    if button:
+        checkpoint_dir = os.path.join(root_dir, 'checkpoints', model_type, str(image_memory), button)
+    else:
+        checkpoint_dir = os.path.join(root_dir, 'checkpoints', model_type, str(image_memory))
     os.makedirs(checkpoint_dir, exist_ok=True)
     return checkpoint_dir
 
@@ -66,27 +69,68 @@ def extract_number_from_checkpoint(checkpoint_path):
     else:
         raise ValueError(f"Invalid checkpoint filename: {checkpoint_path}")
     
-def get_latest_checkpoint(model_type='planning', image_memory=1, append = 0):
+import os
+import glob
+
+def get_latest_checkpoint(model_type='planning', image_memory=1, append=0, button=None):
     """
-    Returns the path to the latest checkpoint for the specified model type and image memory.
+    Returns the path to the latest checkpoint for the specified model type, image memory, and optionally a button.
     If no checkpoint exists, returns None.
+
+    Args:
+        model_type (str): Type of the model ('planning' or 'battle').
+        image_memory (int): The memory parameter used in the model.
+        append (int, optional): Number to append to the checkpoint number. Defaults to 0.
+        button (str, optional): Name of the button (e.g., 'MENU', 'SHOOT'). Defaults to None.
+
+    Returns:
+        str or None: Path to the latest checkpoint file or None if no checkpoint is found.
     """
-    checkpoint_dir = get_checkpoint_dir(model_type, image_memory)
-    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, '*.pt'))
-    if not checkpoint_files:
-        print(f"No checkpoint files found in {checkpoint_dir}")
+    # Construct the checkpoint directory path
+    checkpoint_dir = get_checkpoint_dir(model_type, image_memory, button)
+    
+    # Check if the checkpoint directory exists
+    if not os.path.isdir(checkpoint_dir):
+        if button:
+            print(f"No checkpoint directory found for model_type='{model_type}', image_memory={image_memory}, button='{button}' in {checkpoint_dir}.")
+        else:
+            print(f"No checkpoint directory found for model_type='{model_type}', image_memory={image_memory} in {checkpoint_dir}.")
         return None
+
+    # Find all checkpoint files with .pt extension
+    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, '*.pt'))
+    
+    if not checkpoint_files:
+        if button:
+            print(f"No checkpoint files found for button '{button}' in {checkpoint_dir}.")
+        else:
+            print(f"No checkpoint files found in {checkpoint_dir}.")
+        return None
+    
+    # Select the latest checkpoint based on creation time
     latest_checkpoint = max(checkpoint_files, key=os.path.getctime)
-    #get the number at the end of the checkpoint and add append to it
-    number = extract_number_from_checkpoint(latest_checkpoint) + append
-    latest_checkpoint = latest_checkpoint.replace(str(extract_number_from_checkpoint(latest_checkpoint)), str(number))
+    
+    # Extract the number from the checkpoint filename
+    original_number = extract_number_from_checkpoint(latest_checkpoint)
+    
+    # Compute the new number by adding the append value
+    number = original_number + append
+    
+    # Replace the original number with the new number in the checkpoint path
+    # This assumes that the number appears only once in the filename and is unique
+    # Modify this logic if your filenames have multiple numbers or a different structure
+    checkpoint_filename = os.path.basename(latest_checkpoint)
+    new_checkpoint_filename = checkpoint_filename.replace(str(original_number), str(number))
+    latest_checkpoint = os.path.join(checkpoint_dir, new_checkpoint_filename)
+    
     return latest_checkpoint
 
+
 def get_latest_checkpoint_plus1(model_type='planning', image_memory=1):
-    return get_latest_checkpoint(model_type, image_memory, 10)
+    return get_latest_checkpoint(model_type, image_memory, 10, None)
 
 def get_latest_checkpoint_plus10(model_type='planning', image_memory=1):
-    return get_latest_checkpoint(model_type, image_memory, 10)
+    return get_latest_checkpoint(model_type, image_memory, 10, None)
 
 def get_new_checkpoint_path(model_type='planning', image_memory=1):
     """
