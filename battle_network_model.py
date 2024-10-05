@@ -350,6 +350,8 @@ def get_gamestate_tensor(
     enemy_health = tensor_params['enemy_health']
     player_chip = tensor_params['player_chip']
     enemy_chip = tensor_params['enemy_chip']
+    player_active_chip = tensor_params['player_active_chip']
+    enemy_active_chip = tensor_params['enemy_active_chip']
     player_charge = tensor_params['player_charge']
     enemy_charge = tensor_params['enemy_charge']
     player_chip_button = tensor_params['player_chip_button']
@@ -470,6 +472,18 @@ def get_gamestate_tensor(
         
     gamestate['player_chip'] = player_chip_tensor  # Shape: (1, 401)
     gamestate['enemy_chip'] = enemy_chip_tensor    # Shape: (1, 401)
+    
+    #5.5 player_active_chip and enemy_active_chip
+    if player_active_chip is not None and 0 <= player_active_chip <= 400:
+        player_active_chip_tensor = F.one_hot(torch.tensor(player_active_chip, dtype=torch.long), num_classes=401).float().unsqueeze(0)
+    else:
+        player_active_chip_tensor = F.one_hot(torch.tensor(400, dtype=torch.long), num_classes=401).float().unsqueeze(0)
+    if enemy_active_chip is not None and 0 <= enemy_active_chip <= 400:
+        enemy_active_chip_tensor = F.one_hot(torch.tensor(enemy_active_chip, dtype=torch.long), num_classes=401).float().unsqueeze(0)
+    else:
+        enemy_active_chip_tensor = F.one_hot(torch.tensor(400, dtype=torch.long), num_classes=401).float().unsqueeze(0)
+    gamestate['player_active_chip'] = player_active_chip_tensor
+    gamestate['enemy_active_chip'] = enemy_active_chip_tensor
 
     # 6. player_charge and enemy_charge
     #player and enemy charge come in as values from 0-2, we need to make it a single float from 0-1

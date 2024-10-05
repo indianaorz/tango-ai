@@ -768,6 +768,27 @@ def get_offset_confidence(offset, tensor_params):
     
     return confidence
 
+async def handle_chip_timer(instance, chip_type):
+    """
+    Waits for 1 second and then resets the active chip to 0.
+    """
+    try:
+        await asyncio.sleep(3)
+        if chip_type == 'player':
+            instance['player_active_chip'] = 0
+            if 'player_chip_timer_task' in instance:
+                instance['player_chip_timer_task'] = None
+                print(f"Port {instance['port']}: Player active chip reset to 0.")
+        elif chip_type == 'enemy':
+            instance['enemy_active_chip'] = 0
+            if 'enemy_chip_timer_task' in instance:
+                instance['enemy_chip_timer_task'] = None
+                print(f"Port {instance['port']}: Enemy active chip reset to 0.")
+    except asyncio.CancelledError:
+        # Timer was cancelled because another chip was used
+        print(f"Port {instance['port']}: {chip_type.capitalize()} chip timer cancelled.")
+
+
 max_reward = 1
 max_punishment = 1
 # Function to receive messages from the game and process them
@@ -895,10 +916,51 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                     
                     #detect if the player just used a chip (value is different) if so, then set the player_active_chip to the previous chip for 1 second
                     
+                    
+                     # Detect chip usage for player
+                    new_player_chip = current_player_chip
+                    #if player chip isn't null
+                    if 'player_chip' in game_instance:
+                        if new_player_chip != game_instance['player_chip']:
+                            # Update active chip to previous chip
+                            game_instance['player_active_chip'] = game_instance['player_chip']
+                            print(f"Port {port}: Player used chip. Active chip set to {game_instance['player_active_chip']}.")
+
+                            # Cancel existing timer if any
+                            if 'player_chip_timer_task' in game_instance and game_instance['player_chip_timer_task'] is not None:
+                                game_instance['player_chip_timer_task'].cancel()
+
+                            # Start a new timer
+                            game_instance['player_chip_timer_task'] = asyncio.create_task(
+                                handle_chip_timer(game_instance, 'player')
+                            )
+
+                            # Update previous chip value
+                            game_instance['player_chip'] = new_player_chip
+
+                    # Detect chip usage for enemy
+                    new_enemy_chip = current_enemy_chip
+                    if 'enemy_chip' in game_instance:
+                        if new_enemy_chip != game_instance['enemy_chip']:
+                            # Update active chip to previous chip
+                            game_instance['enemy_active_chip'] = game_instance['enemy_chip']
+                            print(f"Port {port}: Enemy used chip. Active chip set to {game_instance['enemy_active_chip']}.")
+
+                            # Cancel existing timer if any
+                            if 'enemy_chip_timer_task' in game_instance and  game_instance['enemy_chip_timer_task'] is not None:
+                                game_instance['enemy_chip_timer_task'].cancel()
+
+                            # Start a new timer
+                            game_instance['enemy_chip_timer_task'] = asyncio.create_task(
+                                handle_chip_timer(game_instance, 'enemy')
+                            )
+
+                            # Update previous chip value
+                            game_instance['enemy_chip'] = new_enemy_chip
+                    
+                    
                     game_instance['player_chip'] = current_player_chip
                     game_instance['enemy_chip'] = current_enemy_chip
-                    
-                    
                     
                     game_instance['player_emotion'] = current_player_emotion
                     game_instance['enemy_emotion'] = current_enemy_emotion
@@ -1099,7 +1161,6 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                     player_health_tensor = torch.tensor([normalized_player_health], dtype=torch.float32, device=device).unsqueeze(0)  # Shape: (1, 1)
                     enemy_health_tensor = torch.tensor([normalized_enemy_health], dtype=torch.float32, device=device).unsqueeze(0)    # Shape: (1, 1)
 
-
                     tensor_params = {
                         # "screen_image": screen_data['image'],
                         "cust_gage": cust_gage,  # validated 2
@@ -1111,6 +1172,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         "enemy_health": normalized_enemy_health,  # validated 2
                         "player_chip": current_player_chip,  # validated 2
                         "enemy_chip": current_enemy_chip,  # validated 2
+                        "player_active_chip": game_instance['player_active_chip'] if 'player_active_chip' in game_instance else 0,  # validated 2
+                        "enemy_active_chip": game_instance['enemy_active_chip'] if 'enemy_active_chip' in game_instance else 0,  # validated 2
                         "player_charge": current_player_charge,  # validated 2
                         "enemy_charge": current_enemy_charge,  # validated 2
                         "player_shoot_button": current_input[14] == '1',
@@ -1278,15 +1341,15 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 # average_loss, num_trained = gridstate_model.train_batch(grid_experiences[port][-1:])
                                 
                                 # Apply discounted rewards to all experiences
-                                # gamma = 0.99
-                                # grid_experiences[port] = apply_discounted_rewards(grid_experiences[port], gamma)
-                                # shoot_experiences[port] = apply_discounted_rewards(shoot_experiences[port], gamma)
+                                gamma = 0.99
+                                grid_experiences[port] = apply_discounted_rewards(grid_experiences[port], gamma)
+                                shoot_experiences[port] = apply_discounted_rewards(shoot_experiences[port], gamma)
                                 
-                                # # Train on the last batch of window_size
-                                # if len(grid_experiences[port]) > window_size:
-                                #     batch = grid_experiences[port][-window_size:]
-                                # else:
-                                #     batch = grid_experiences[port]
+                                # Train on the last batch of window_size
+                                if len(grid_experiences[port]) > window_size:
+                                    batch = grid_experiences[port][-window_size:]
+                                else:
+                                    batch = grid_experiences[port]
                                 
                                 # average_loss, num_trained = gridstate_model.train_batch(batch)
                                 

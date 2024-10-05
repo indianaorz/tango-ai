@@ -22,7 +22,9 @@ config = {
         'include_player_emotion_state': True,
         'include_enemy_emotion_state': True,
         'include_player_used_crosses': True,
-        'include_enemy_used_crosses': True
+        'include_enemy_used_crosses': True,
+        'include_player_active_chip': True,
+        'include_enemy_active_chip': True,
     }
 
 class GridStateEvaluator(nn.Module):
@@ -43,7 +45,6 @@ class GridStateEvaluator(nn.Module):
             self.screen_pool = nn.MaxPool2d(kernel_size=2, stride=2)
             self.screen_output_dim = self._compute_screen_output_dim()
 
-        # Compute the input dimension for fc1
         self.additional_features_size = self._compute_additional_features_size()
         fc1_input_dim = 256 * 1 * 2 + self.additional_features_size
         if self.config.get('include_screen_image', False):
@@ -86,6 +87,13 @@ class GridStateEvaluator(nn.Module):
 
         if self.config.get('include_enemy_chip', False):
             size += 401  # enemy_chip
+            
+        # Add sizes for active chips
+        if self.config.get('include_player_active_chip', False):
+            size += 401  # player_active_chip
+
+        if self.config.get('include_enemy_active_chip', False):
+            size += 401  # enemy_active_chip
 
         if self.config.get('include_player_chip_hand', False):
             size += self.config.get('player_chip_hand_size', 0)  # player_chip_hand_size specified in config
@@ -224,6 +232,26 @@ class GridStateEvaluator(nn.Module):
                     features.extend(list(enemy_chip))
             else:
                 features.extend([0.0] * 401)  # Default padding if missing
+
+        if self.config.get('include_player_active_chip', False):
+            player_active_chip = current_data_point.get('player_active_chip', None)
+            if player_active_chip is not None:
+                if isinstance(player_active_chip, torch.Tensor):
+                    features.extend(player_active_chip.view(-1).tolist())
+                else:
+                    features.extend(list(player_active_chip))
+            else:
+                features.extend([0.0] * 401)
+        
+        if self.config.get('include_enemy_active_chip', False):
+            enemy_active_chip = current_data_point.get('enemy_active_chip', None)
+            if enemy_active_chip is not None:
+                if isinstance(enemy_active_chip, torch.Tensor):
+                    features.extend(enemy_active_chip.view(-1).tolist())
+                else:
+                    features.extend(list(enemy_active_chip))
+            else:
+                features.extend([0.0] * 401)
 
         if self.config.get('include_player_chip_hand', False):
             player_chip_hand = current_data_point.get('player_chip_hand', None)
