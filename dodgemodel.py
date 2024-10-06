@@ -28,7 +28,7 @@ config = {
     }
 
 class GridStateEvaluator(nn.Module):
-    def __init__(self, learning_rate=1e-3, config=config):
+    def __init__(self, learning_rate=1e-5, config=config):
         super(GridStateEvaluator, self).__init__()
         self.config = config if config is not None else {}
 

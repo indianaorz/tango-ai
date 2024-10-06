@@ -32,6 +32,8 @@ from utils import (
 
 import threading
 import queue
+import pickle
+
 
 from battle_network_model import get_gamestate_tensor, BattleNetworkModel,prepare_inference_sequence
 
@@ -82,6 +84,12 @@ CHIP_WINDOW_TIMER = float(os.getenv("CHIP_WINDOW_TIMER", 0.0))  # Default is 5 s
 REPLAYS_DIR = '/home/lee/Documents/Tango/replaysOrig'
 
 
+CHECKPOINTS_DIR = os.path.join(get_root_dir(), "checkpoints")
+MODELS_DIR = os.path.join(CHECKPOINTS_DIR, "models")
+TRAINING_DATA_DIR = os.path.join(CHECKPOINTS_DIR, "training_data")
+os.makedirs(MODELS_DIR, exist_ok=True)
+os.makedirs(TRAINING_DATA_DIR, exist_ok=True)
+
 
 # Initialize locks for thread safety
 # planning_model_lock = Lock()
@@ -100,17 +108,21 @@ learning_rate = 1e-4
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
-replay_count = 0
+replay_count = 8
 battle_count = 0
 include_orig =True
-do_replays = False
-save_data = False
+do_replays = True
+save_data = True
+load_data = True
 prune = False
 
 #grid experience for ports
 grid_experiences = defaultdict(list)
 
 shoot_experiences = defaultdict(list)
+
+player_chip_active_experiences = defaultdict(list)
+enemy_chip_active_experiences = defaultdict(list)
 
 # Define a global dictionary to track ongoing attacks per port
 attack_timers = {}  # key: port, value: asyncio.Task
@@ -440,39 +452,41 @@ shoot_model = None
 from dodgemodel import GridStateEvaluator
 
 def load_models(image_memory=1, learning_rate=1e-3):
-    global gridstate_model
+    """
+    Loads the state dictionaries for gridstate_model and shoot_model from their respective checkpoint files.
+    If a checkpoint doesn't exist, initializes a new model.
+    
+    Args:
+        image_memory (int): Not used in this context but retained for compatibility.
+        learning_rate (float): Learning rate for the optimizer.
+    """
+    global gridstate_model, shoot_model
     global latest_checkpoint_number  # Access the global variable
     
-    # Define the root directory
-    root_dir = get_root_dir()
-    # Initialize the device
+    # Define the device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
-
-    # Initialize the model
+    print(f"[INFO] Using device: {device}")
+    
+    # Initialize gridstate_model
     gridstate_model = GridStateEvaluator().to(device)
-
-    # Path to the model checkpoint
-    checkpoint_path = 'grideval.pth'
-
-    # Load the model weights if the checkpoint exists
-    if os.path.exists(checkpoint_path):
-        gridstate_model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    grid_checkpoint_path = 'grideval.pth'
+    if os.path.exists(grid_checkpoint_path):
+        gridstate_model.load_state_dict(torch.load(grid_checkpoint_path, map_location=device))
         gridstate_model.eval()
-        print(f"Loaded model checkpoint from {checkpoint_path}")
+        print(f"[LOAD] gridstate_model loaded from {grid_checkpoint_path}")
     else:
-        print("No checkpoint found. Initializing a new model.")
-        
-    #load shootmodel
-    global shoot_model
+        print("[WARN] No checkpoint found for gridstate_model. Initializing a new model.")
+    
+    # Initialize shoot_model
     shoot_model = GridStateEvaluator().to(device)
-    checkpoint_path = 'shooteval.pth'
-    if os.path.exists(checkpoint_path):
-        shoot_model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    shoot_checkpoint_path = 'shooteval.pth'
+    if os.path.exists(shoot_checkpoint_path):
+        shoot_model.load_state_dict(torch.load(shoot_checkpoint_path, map_location=device))
         shoot_model.eval()
-        print(f"Loaded model checkpoint from {checkpoint_path}")
+        print(f"[LOAD] shoot_model loaded from {shoot_checkpoint_path}")
     else:
-        print("No checkpoint found. Initializing a new model.")
+        print("[WARN] No checkpoint found for shoot_model. Initializing a new model.")
+
         
 
     
@@ -619,7 +633,7 @@ def predict(port, current_data_point, inside_window, tensor_params):
                 elif deviation == 0:
                     color = "\033[97m"  # White for average
                 else:
-                    color = "\033[92m"  # Green for above average
+                    color = "\033[97m"  # Green for above average
         
                 # Highlight the best confidence to be green
                 if confidence == best_confidence:
@@ -749,6 +763,22 @@ def can_move_offset(offset, tensor_params):
     
     return True
 
+def check_owner(offset, tensor_params):
+    offset_position = [tensor_params['player_grid_position'][0] + offset[0], tensor_params['player_grid_position'][1] + offset[1]]
+    
+    # Check if offset position x is between 1-6 and y is between 1-3
+    if offset_position[0] < 1 or offset_position[0] > 6 or offset_position[1] < 1 or offset_position[1] > 3:
+        return False
+    
+    # Check the grid owner of the offset position
+    owners = tensor_params['grid_owner_state']
+    owners = [owners[i:i+6] for i in range(0, len(owners), 6)]
+    offset_owner = owners[offset_position[1]-1][offset_position[0]-1]
+    if offset_owner == 1:
+        return False
+    
+    return True
+
 def get_offset_confidence(offset, tensor_params):
     global gridstate_model
     
@@ -769,18 +799,57 @@ def get_offset_confidence(offset, tensor_params):
     return confidence
 
 async def handle_chip_timer(instance, chip_type):
+    global gridstate_model
     """
     Waits for 1 second and then resets the active chip to 0.
     """
     try:
-        await asyncio.sleep(3)
+        timer_name = chip_type + '_timer_on'
+        instance[timer_name] = True
+        await asyncio.sleep(2)
+        instance[timer_name] = False
         if chip_type == 'player':
             instance['player_active_chip'] = 0
+            experiences = player_chip_active_experiences[instance['port']]
+            #assign the reward
+            reward = instance['player_timer_reward'] if 'player_timer_reward' in instance else -1 #player missed, punish
+            #reset
+            instance['player_timer_reward'] = 0
+            #clamp
+            reward = max(-1, min(1, reward))
+            #train on the experiences
+            average, num = gridstate_model.train_batch(experiences, reward)
+            print (f"Port {instance['port']}: Player active chip reset to 0. Loss: {average:.6f} Reward {reward} Num: {num}")
+            
+            #move the experiences to the main experiences
+            grid_experiences[instance['port']].extend(experiences)
+            
+            #clear the player_chip_active_experiences
+            player_chip_active_experiences[instance['port']] = []
+            
             if 'player_chip_timer_task' in instance:
                 instance['player_chip_timer_task'] = None
                 print(f"Port {instance['port']}: Player active chip reset to 0.")
         elif chip_type == 'enemy':
             instance['enemy_active_chip'] = 0
+            experiences = enemy_chip_active_experiences[instance['port']]
+            #assign the reward
+            reward = instance['enemy_timer_reward'] if 'enemy_timer_reward' in instance else 1 #enemy missed, reward
+            #reset instance['enemy_timer_reward']
+            instance['enemy_timer_reward'] = 0
+            #clamp
+            reward = max(-1, min(1, reward))
+            #train on the experiences
+            average, num =  gridstate_model.train_batch(experiences, reward)
+            print(f"Port {instance['port']}: Enemy active chip trained on {num} experiences withloss {average} on reward {reward}")
+            
+            #move the experiences to the main experiences
+            grid_experiences[instance['port']].extend(experiences)
+            
+            #clear the enemy_chip_active_experiences
+            enemy_chip_active_experiences[instance['port']] = []
+            
+            
             if 'enemy_chip_timer_task' in instance:
                 instance['enemy_chip_timer_task'] = None
                 print(f"Port {instance['port']}: Enemy active chip reset to 0.")
@@ -793,7 +862,7 @@ max_reward = 1
 max_punishment = 1
 # Function to receive messages from the game and process them
 async def receive_messages(reader, writer, port, training_data_dir, config):
-    global max_reward, max_punishment, prune, gridstate_model, grid_experiences, shoot_experiences
+    global max_reward, max_punishment, prune, gridstate_model, grid_experiences, shoot_experiences,player_chip_active_experiences,enemy_chip_active_experiences
     buffer = ""
     current_input = None
     current_reward = 0
@@ -1332,11 +1401,34 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             max_punishment = 200#max(max_punishment, current_punishment)
                             # If we received a reward or punishment, perform online training
                             # Assign reward to the current data_point
+                            
+                            if 'player_timer_on' in game_instance and game_instance['player_timer_on']:
+                                #the player timer is on, add all experiences to the player_chip_experiences
+                                player_chip_active_experiences[port].append([data_point, 0])
+                            if 'enemy_timer_on' in game_instance and game_instance['enemy_timer_on']:
+                                enemy_chip_active_experiences[port].append([data_point, 0])
+                                
+                                    
                             data_buffers[port].append(data_point)
                             if current_reward != 0 or current_punishment != 0 and not game_instance.get('is_player', False):#is not player
                                 # Compute reward
                                 reward_value = (current_reward / max_reward) - (current_punishment / max_punishment)
                                 grid_experiences[port].append([data_point, reward_value])
+                                
+                                
+                                
+                                if 'player_timer_on' in game_instance and game_instance['player_timer_on']:
+                                    #the player timer is on, add all experiences to the player_chip_experiences
+                                    if not 'player_timer_reward' in game_instance:
+                                        game_instance['player_timer_reward'] = 0
+                                    game_instance['player_timer_reward'] += reward_value
+                                if 'enemy_timer_on' in game_instance and game_instance['enemy_timer_on']:
+                                    if not 'enemy_timer_reward' in game_instance:
+                                        game_instance['enemy_timer_reward'] = 0
+                                    game_instance['enemy_timer_reward'] += reward_value
+                                
+                                
+                                
                                 #train
                                 # average_loss, num_trained = gridstate_model.train_batch(grid_experiences[port][-1:])
                                 
@@ -1366,25 +1458,49 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 
                                 
                                 exploration_batch = []
-                                #if being punished on this square, give half of the punishment reward to the movable tiles to encourage dodging
+                                # If being punished on this square, assign -reward_value to ALL accessible grid positions to encourage dodging
                                 if reward_value < 0:
-                                    offsets = [(0, 1), (0, -1), (1, 0), (-1, 0)]
-                                    for offset in offsets:
-                                        #check can_move_offset
-                                        final_offset = get_final_move_offset(offset, tensor_params)
-                                        # print(f"Port {port}: Final Offset: {final_offset}")
-                                        if final_offset != tensor_params['player_grid_position']:
-                                            #train with half punishment reward
-                                            move_reward = -reward_value/2
-                                            move_data_point = tensor_params.copy()
-                                            move_data_point['player_grid_position'] = final_offset#[move_data_point['player_grid_position'][0] + final_offset[0], move_data_point['player_grid_position'][1] + offset[1]]
+                                    # clamp reward_value
+                                    reward_value = abs(reward_value)
+                                    # Define the grid dimensions
+                                    GRID_WIDTH = 6
+                                    GRID_HEIGHT = 3
+
+                                    for x in range(1, GRID_WIDTH + 1):  # Columns 1 to 6
+                                        for y in range(1, GRID_HEIGHT + 1):  # Rows 1 to 3
+                                            target_position = [x, y]
                                             
-                                            #training with adjusted position
-                                            # print("====================================================================")
-                                            # print(f"Port {port}: Training with adjusted position: {move_data_point['player_grid_position']}")
-                                            data = get_gamestate_tensor(move_data_point)
-                                            grid_experiences[port].append([data, move_reward])
-                                            exploration_batch.append([data, move_reward])
+                                            # Skip the current position to avoid redundant punishment
+                                            if target_position == tensor_params['player_grid_position']:
+                                                continue
+
+                                            # Calculate the offset required to move from current position to target_position
+                                            offset = [x - tensor_params['player_grid_position'][0],
+                                                    y - tensor_params['player_grid_position'][1]]
+
+                                            # Check if movement to this offset is possible
+                                            if check_owner(offset, tensor_params):
+                                                # Assign the punishment reward (positive value since reward_value is negative)
+                                                move_reward = 1#-reward_value / 2  # Converts negative reward to positive punishment
+
+                                                # Create a new data point with the updated player position
+                                                move_data_point = tensor_params.copy()
+                                                move_data_point['player_grid_position'] = target_position
+
+                                                # Convert the updated game state to a tensor suitable for the model
+                                                data = get_gamestate_tensor(move_data_point)
+
+                                                # Append the experience to grid_experiences for training
+                                                grid_experiences[port].append([data, move_reward])
+
+                                                # Also append to exploration_batch for potential batch processing or logging
+                                                exploration_batch.append([data, move_reward])
+                                                
+                                                # print(f"Port {port}: Rewarding move to {target_position} with reward {move_reward}")
+
+                                    # Optional: Log the exploration_batch size for monitoring purposes
+                                    # print(f"Port {port}: Exploration batch size after punishment: {len(exploration_batch)}")
+
 
                                 # if len(exploration_batch) > 0:
                                 #     average_loss, num_trained = gridstate_model.train_batch(exploration_batch)
@@ -1392,14 +1508,33 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 # Reset rewards
                                 current_reward = 0
                                 current_punishment = 0
-                            
+                                
+                                #train on exploration batch
+                                if len(exploration_batch) > 0:
+                                    average_loss, num_trained = gridstate_model.train_batch(exploration_batch)
+                                    print(f"Port {port}: Exploration Average Loss: {average_loss}, Num Trained: {num_trained}")
+                                    
+                                #train on last data
+                                average_loss, num_trained = gridstate_model.train_batch(grid_experiences[port][-1:])
+                                print(f"Port {port}: Average Loss: {average_loss}, Num Trained: {num_trained}")
                                 #train on all data
-                                print(f"Port {port}: Training on all data. {len(grid_experiences[port])}")
-                                gridstate_model.train_batch(grid_experiences[port])
+                                #train on random 100 experiences and everything in the exploration batch
+                                #randomly sample 100 experiences
+                                # random_batch = random.sample(grid_experiences[port], min(1000, len(grid_experiences[port])))
+                                # train_batch = random_batch + exploration_batch
+                                # train_batch.append(grid_experiences[port][-1])
+                                # print("Training on batch")
+                                # average_loss, num_trained = gridstate_model.train_batch(train_batch)
+                                # print(f"Port {port}: Average Loss: {average_loss}, Num Trained: {num_trained}")
+                                
                             # else:
-                            #     grid_experiences[port].append([data_point, 0.00001])
+                            #     grid_experiences[port].append([data_point, 0.0001])
                             #     #train on the current experience
-                            #     gridstate_model.train_batch(grid_experiences[port][-1:])
+                            #     average_loss, num_trained = gridstate_model.train_batch(grid_experiences[port][-1:])
+                                #print green colored log
+                                # print(f"\033[92mPort {port}: Average Loss: {average_loss}, Num Trained: {num_trained}\033[0m")
+                                #don't add to history of the terminal, place 5 lines back
+                                # print(f"\033[5A\033[92mPort {port}: Average Loss: {average_loss}, Num Trained: {num_trained}\033[0m")
                                 
                                 #train on random batch of 100
                                 # if len(grid_experiences[port]) > 100:
@@ -1763,6 +1898,8 @@ async def main():
     
     # # Optionally, log the entire config.yaml
     # wandb.config.update(config)
+    if load_data:
+        load_training_data()
 
     # Start game instances
     start_instances()
@@ -1873,12 +2010,13 @@ async def main():
 
      # Start the training thread... testing to see if we can do this after the instances have been closed
     if save_data:
-        training_thread = threading.Thread(target=saving_thread_function, daemon=True)
-        training_thread.start()
+        save_training_data()
+        # training_thread = threading.Thread(target=saving_thread_function, daemon=True)
+        # training_thread.start()
 
-        # # # At the end, before exiting, signal the training thread to stop
-        training_queue.put(None)  # Sentinel value to stop the thread
-        training_thread.join() # Wait for the thread to finish
+        # # # # At the end, before exiting, signal the training thread to stop
+        # training_queue.put(None)  # Sentinel value to stop the thread
+        # training_thread.join() # Wait for the thread to finish
 
     # # --- Start of Tally Display ---
     # print("\n--- Input Tally ---")
@@ -1900,7 +2038,82 @@ async def main():
     #     for data_point in buffer:
     #         print(f"Port {port}: \n{data_point} ")
     # # Save the models
-    # save_models()
+    save_models()
+    
+def save_training_data():
+    """
+    Saves the grid_experiences and shoot_experiences dictionaries to disk using pickle.
+    Each port's experiences are saved in separate files for better organization.
+    """
+    global grid_experiences, shoot_experiences
+    try:
+        # Save grid_experiences
+        grid_path = os.path.join(TRAINING_DATA_DIR, "grid_experiences.pkl")
+        with open(grid_path, 'wb') as f:
+            pickle.dump(grid_experiences, f)
+        print(f"[SAVE] grid_experiences saved to {grid_path}")
+
+        # Save shoot_experiences
+        shoot_path = os.path.join(TRAINING_DATA_DIR, "shoot_experiences.pkl")
+        with open(shoot_path, 'wb') as f:
+            pickle.dump(shoot_experiences, f)
+        print(f"[SAVE] shoot_experiences saved to {shoot_path}")
+
+    except Exception as e:
+        print(f"[ERROR] Failed to save training data: {e}")
+
+
+def load_training_data():
+    """
+    Loads the grid_experiences and shoot_experiences dictionaries from disk using pickle.
+    If the files do not exist, initializes empty defaultdicts.
+    """
+    global grid_experiences, shoot_experiences
+    try:
+        # Load grid_experiences
+        grid_path = os.path.join(TRAINING_DATA_DIR, "grid_experiences.pkl")
+        if os.path.exists(grid_path):
+            with open(grid_path, 'rb') as f:
+                grid_experiences = pickle.load(f)
+            print(f"[LOAD] grid_experiences loaded from {grid_path}")
+        else:
+            print("[WARN] No existing grid_experiences found. Initializing empty defaultdict.")
+            grid_experiences = defaultdict(list)
+
+        # Load shoot_experiences
+        shoot_path = os.path.join(TRAINING_DATA_DIR, "shoot_experiences.pkl")
+        if os.path.exists(shoot_path):
+            with open(shoot_path, 'rb') as f:
+                shoot_experiences = pickle.load(f)
+            print(f"[LOAD] shoot_experiences loaded from {shoot_path}")
+        else:
+            print("[WARN] No existing shoot_experiences found. Initializing empty defaultdict.")
+            shoot_experiences = defaultdict(list)
+
+    except Exception as e:
+        print(f"[ERROR] Failed to load training data: {e}")
+        # Initialize empty if loading fails
+        grid_experiences = defaultdict(list)
+        shoot_experiences = defaultdict(list)
+
+    
+def save_models():
+    """
+    Saves the state dictionaries of gridstate_model and shoot_model to their respective checkpoint files.
+    """
+    global gridstate_model, shoot_model
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    grid_checkpoint_path = 'grideval.pth'
+    shoot_checkpoint_path = 'shooteval.pth'
+    
+    try:
+        torch.save(gridstate_model.state_dict(), grid_checkpoint_path)
+        torch.save(shoot_model.state_dict(), shoot_checkpoint_path)
+        print(f"[SAVE] gridstate_model saved to {grid_checkpoint_path}")
+        print(f"[SAVE] shoot_model saved to {shoot_checkpoint_path}")
+    except Exception as e:
+        print(f"[ERROR] Failed to save models: {e}")
+
 
 if __name__ == '__main__':
     try:
