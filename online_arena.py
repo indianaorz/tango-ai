@@ -55,7 +55,7 @@ def run_battle_instances(gamma):
         print(f"Launching battle instances with GAMMA={gamma:.4f}")
         
         # Run fight_and_learn.py as a subprocess
-        subprocess.run(["python3", "fight_and_learn.py"], check=True, env=env)
+        subprocess.run(["python3", "basic.py"], check=True, env=env)
     except subprocess.CalledProcessError as e:
         print(f"Battle instances terminated with an error: {e}")
     except Exception as e:

@@ -24,6 +24,9 @@ from threading import Lock
 import pyautogui
 import subprocess
 import glob
+
+from tqdm import tqdm
+                                    
 # from train import GameInputPredictor  # Import the model class
 from utils import (
     get_image_memory, get_exponential_sample,
@@ -108,10 +111,10 @@ learning_rate = 1e-4
 max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
-replay_count = 8
+replay_count = 0
 battle_count = 0
 include_orig =True
-do_replays = True
+do_replays = False
 save_data = True
 load_data = True
 prune = False
@@ -128,7 +131,7 @@ enemy_chip_active_experiences = defaultdict(list)
 attack_timers = {}  # key: port, value: asyncio.Task
 
 # Define the timeout duration in seconds (adjust as needed or load from config)
-ATTACK_TIMEOUT = float(os.getenv("ATTACK_TIMEOUT", 1.0))  # Default is 5 seconds
+ATTACK_TIMEOUT = float(os.getenv("ATTACK_TIMEOUT", 0.5))  # Default is 5 seconds
 
 # Initialize an asynchronous lock for thread-safe access to attack_timers
 attack_timers_lock = AsyncLock()
@@ -164,7 +167,7 @@ INSTANCES = [
         # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006015542-lunazoe-bn6-vs-IndianaOrz-round3-p2.tangoreplay',#player 2 cross change emotion state check fix needed
         # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006020253-lunazoe-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
         'init_link_code': 'arena1',
-        'is_player': True  # Set to True if you don't want this instance to send inputs
+        'is_player': False  # Set to True if you don't want this instance to send inputs
     },
     {
         'address': '127.0.0.1',
@@ -469,7 +472,8 @@ def load_models(image_memory=1, learning_rate=1e-3):
     
     # Initialize gridstate_model
     gridstate_model = GridStateEvaluator().to(device)
-    grid_checkpoint_path = 'grideval.pth'
+    checkpoint_path = os.path.join(get_root_dir(), "checkpoints")
+    grid_checkpoint_path = os.path.join(checkpoint_path, 'grideval.pth')
     if os.path.exists(grid_checkpoint_path):
         gridstate_model.load_state_dict(torch.load(grid_checkpoint_path, map_location=device))
         gridstate_model.eval()
@@ -479,7 +483,8 @@ def load_models(image_memory=1, learning_rate=1e-3):
     
     # Initialize shoot_model
     shoot_model = GridStateEvaluator().to(device)
-    shoot_checkpoint_path = 'shooteval.pth'
+    
+    shoot_checkpoint_path = os.path.join(checkpoint_path,'shooteval.pth')
     if os.path.exists(shoot_checkpoint_path):
         shoot_model.load_state_dict(torch.load(shoot_checkpoint_path, map_location=device))
         shoot_model.eval()
@@ -565,6 +570,329 @@ def predict(port, current_data_point, inside_window, tensor_params):
     global window_entry_time, previous_sent_dict, previous_inside_window_dict, INSTANCES, gridstate_model, shoot_model
     current_time = time.time()
 
+
+    current_instance = next((instance for instance in INSTANCES if instance['port'] == port), None)
+    
+      # Detect entering or exiting the window
+    if inside_window.item() == 1.0 and previous_inside_window_dict[port] == 0.0:
+        #just entered window, set plan and reset values
+        current_instance = next((inst for inst in INSTANCES if inst['port'] == port), None)
+
+        current_instance['set_cross'] = False
+        current_instance['target_index'] = 0
+        current_instance['press_count'] = 0
+        current_instance['last_pressed_time'] = current_time +0.1
+
+        #todo: get from model
+        # current_instance['cross_target'] = 4
+        
+        cross_target = random.randint(-1, 5)
+        # current_instance['target_list'] = [5,6,0,11,3, 10]
+
+        chip_slots = current_instance['chip_slots']
+        chip_codes = current_instance['chip_codes']
+        
+        chips_visible = current_instance['chip_visible_count']
+
+        chip_data = []
+        #convert codes and slots to the appropriate format. 
+        for i in range(len(chip_slots)):
+            if i >= chips_visible:
+                break
+            #if the code is event, add to the chip_data
+            if chip_codes[i] % 2 == 0:
+                chip_data.append((chip_slots[i], chip_codes[i] / 2))
+            else:
+                #if the code is odd, add to the chip_data
+                chip_data.append((chip_slots[i] + 256, (chip_codes[i] - 1) / 2))
+        print(chip_data)
+        
+        #set game instance chip data
+        current_instance['player_chips'] = chip_data
+        
+        # inputs, cross_target, target_list = get_planning_input_from_instance(inference_planning_model, current_instance, GAMMA, device)
+        # target_list_input = []
+        # for i in range(len(target_list)):
+        #     target_list_input.append(target_list[i])
+            
+        
+        # #log the inputs and outputs to the port for training
+        # data_point = {
+        #     'inputs': inputs,
+        #     'cross_target': cross_target + 1,
+        #     'target_list': target_list_input
+        # }
+        # planning_data_buffers[port].append(data_point)
+        
+        #set values higher than chip visible to 0
+        # for i in range(len(target_list)):
+        #     if target_list[i] >= chips_visible:
+        #         target_list[i] = 0
+                
+                
+        # #get the min index of any chip_data with a slot value > 360
+        # min_null = 1000
+        # for i in range(len(chip_data)):
+        #     if chip_data[i][0] > 360:
+        #         min_null = i
+        #         print(f"detected null at [{i}]")
+        #         break
+            
+        # #set values higher than min_null to 0 as well
+        # for i in range(len(target_list)):
+        #     if target_list[i] >= min_null:
+        #         target_list[i] = 0
+        
+        # #remove all 0 values from the target_list
+        # target_list = list(filter(lambda a: a != 0, target_list))
+        # #subtract 1 from all values from the target list
+        # target_list = list(map(lambda a: a - 1, target_list))
+        
+        
+        # current_instance['target_list'] = target_list
+        print(f"Port {port}: Cross Target: {cross_target}")
+        # print(f"Port {port}: Target List: {target_list}")
+        
+
+
+        #randomly select value for cross_target
+        #get count of available crosses
+        used_crosses = len(current_instance['player_used_crosses']) - 1
+        # print(used_crosses)
+        current_instance['cross_target'] = random.randint(-1, 5-used_crosses)
+
+        # #randomly select target_list
+        # current_instance['target_list'] = random.sample(range(chips_visible), 5)
+
+        # #prune the same nubmers
+        # current_instance['target_list'] = list(set(current_instance['target_list']))
+
+        # #shuffle
+        # random.shuffle(current_instance['target_list'])
+
+        # #if the list contains less than 5 items, 25 percent chance to add 11 to the list
+        # if len(current_instance['target_list']) < 5:
+        #     if random.random() > 0.75:
+        #         current_instance['target_list'].append(11)
+        #         print("Added beast out to the list")
+
+        # #print the random targets and cross
+        # print(f"Port {port}: Cross Target: {current_instance['cross_target']}")
+        # print(f"Port {port}: Target List: {current_instance['target_list']}")
+
+        #add 10 to the end of the list
+        current_instance['target_list'] = []
+        current_instance['target_list'].append(10)
+
+
+        
+        #check if planning_data_buffers has content
+        if planning_data_buffers[port]:
+            # print(f"Port {port}: Entering planning window. Training Planning Model.")
+            max_round_damage[port] = 500#max(max_round_damage[port], current_round_damage[port])
+            # Normalize the damage
+            if max_round_damage[port] > 0:
+                normalized_damage = current_round_damage[port] / max_round_damage[port]
+            else:
+                normalized_damage = 0.0
+            # print(f"Port {port}: Normalized Damage = {normalized_damage}")
+            
+            # Assign the normalized damage as the reward to all collected data points
+            # with training_planning_lock:
+            for data_point in planning_data_buffers[port]:
+                if not data_point.get('assigned_reward', False):
+                    data_point['reward'] = normalized_damage  # Assign positive reward
+                    # Train the Planning Model with the collected data points
+                    # if planning_data_buffers[port]:
+                        # asyncio.create_task(asyncio.to_thread(
+                        #     save_data_to_hdf5,
+                        #     port,
+                        #     planning_data_buffers[port],
+                        #     model_type="Planning_Model"
+                        # ))
+                        # training_queue.put((port, list(data_buffers[port]), "Planning_Model", True))
+                        # print(f"Port {port}: Submitted {len(planning_data_buffers[port])} data points for Planning Model training.")
+                    # Clear the buffer after trainingbeast_flags_encoded
+                    # planning_data_buffers[port].clear()
+                    data_point['assigned_reward']=True
+                    current_round_damage[port] = 0.0
+
+        window_entry_time[port] = current_time
+        
+        current_round_damage[port] = 0.0
+        # Ensure the planning data buffer is empty
+        # planning_data_buffers[port].clear()
+        # data_point['assigned_reward']=True
+        # print(f"Port {port}: Entered window. Timer started.")
+
+
+    if inside_window.item() == 1.0 and 'cross_target' in current_instance:
+        #automate the window
+        # print(f"Port {port}: Inside window. Navigating the menu.")
+
+        cross_target = current_instance['cross_target']
+        target_list = current_instance['target_list']
+
+        #navigate the menu based on the selected index
+        current_index = current_instance['selected_menu_index']
+        current_cross_index = current_instance['selected_cross_index']
+        current_inside_cross_window = current_instance['inside_cross_window']
+        # print(f"Port {port}: Inside window. Navigating the menu.")
+        # print(f"Port {port}: Current Index: {current_index}")
+        # print(f"Port {port}: Current Cross Index: {current_cross_index}")
+        # print(f"Port {port}: Inside Cross Window: {current_inside_cross_window}")
+
+        
+        if 'set_cross' not in current_instance:
+            current_instance['set_cross'] = False
+
+        #set instance's current target index if not set
+        if 'target_index' not in current_instance:
+            current_instance['target_index'] = 0
+        
+        #get the target index if in range
+        if current_instance['target_index'] < len(target_list):
+            target_index = target_list[current_instance['target_index']]
+        else:
+            #done selecting
+            # print(f"Port {port}: Done selecting. Sending key press.")
+            return {'type': 'key_press', 'key': '0000000000000000'}
+
+        #set last pressed time if it isn't set
+        if 'last_pressed_time' not in current_instance:
+            current_instance['last_pressed_time'] = 0
+        # do nothing if it hasn't been 1 second since last time
+        # print(f"Port {port}: Target Index: {target_index}. current_index: {current_index}")
+        time_difference = current_time - current_instance['last_pressed_time']
+        if  time_difference < 0.25 and time_difference > 0.1:
+            # print(f"Port {port}: Skipping key press. Not enough time elapsed.")
+            return {'type': 'key_press', 'key': '0000000000000000'}
+        
+
+
+        if cross_target != -1 and current_instance['set_cross'] == False:
+            if current_inside_cross_window == 0:
+                #press up to get in the menu
+                # print(f"Port {port}: Moving up. Target index: {cross_target}. Current index: {current_cross_index}")
+                current_instance['last_pressed_time'] = current_time    
+                return {'type': 'key_press', 'key': '0000000001000000'}
+            else:
+                if cross_target < current_cross_index:
+                    current_instance['press_count'] = 0
+                    # print(f"Port {port}: Moving up. Target index: {cross_target}. Current index: {current_cross_index}")
+                    current_instance['last_pressed_time'] = current_time    
+                    return {'type': 'key_press', 'key': '0000000001000000'}
+                elif cross_target > current_cross_index:
+                    current_instance['press_count'] = 0
+                    # print(f"Port {port}: Moving down. Target index: {cross_target}. Current index: {current_cross_index}")
+                    current_instance['last_pressed_time'] = current_time    
+                    return {'type': 'key_press', 'key': '0000000010000000'}
+                elif cross_target == current_cross_index:
+                    # print(f"Port {port}: Target index reached. Sending key press.")
+                    #increment target index for the instance
+                    if 'press_count' not in current_instance:
+                        current_instance['press_count'] = 0
+                    
+                    if current_instance['press_count'] < 25:
+                        current_instance['press_count'] += 1
+                        return {'type': 'key_press', 'key': '0000000000000000'}  
+                    else:
+                        current_instance['press_count'] += 1
+                        if current_instance['press_count'] > 30:
+                            current_instance['set_cross'] = True
+                            current_instance['press_count'] = 0
+                        if current_instance['press_count'] % 2 == 0:
+                            return {'type': 'key_press', 'key': '0000000000000001'}
+                        else:
+                            return {'type': 'key_press', 'key': '0000000000000000'}  
+
+        else:
+            if current_index == target_index:
+                # print(f"Port {port}: Target index reached. Sending key press.")
+                #increment target index for the instance
+                if 'press_count' not in current_instance:
+                    current_instance['press_count'] = 0
+                if current_instance['press_count'] > 50:
+                    current_instance['press_count'] = 0
+                    current_instance['target_index'] = (current_instance['target_index'] + 1)
+                    # print(f"Port {port}: Incremented target index to {current_instance['target_index']}")
+                    current_instance['last_pressed_time'] = current_time
+                    return {'type': 'key_press', 'key': '0000000000000000'}
+                
+                elif current_instance['press_count'] % 2 == 0:
+                    current_instance['press_count'] += 1
+                    return {'type': 'key_press', 'key': '0000000000000000'}  
+                else:
+                    current_instance['press_count'] += 1
+                    return {'type': 'key_press', 'key': '0000000000000001'}
+                
+                # current_instance['target_index'] = (current_instance['target_index'] + 1)
+                # print(f"Port {port}: Incremented target index to {current_instance['target_index']}")
+                # current_instance['last_pressed_time'] = current_time  
+            else:
+                #on top row (0-4), move right
+                #when 10 is the target index, move right
+                if current_inside_cross_window != 0:
+                    # print(f"Port {port}: Backing out of cross window. Target index: {target_index}. Current index: {current_index}")
+                    current_instance['last_pressed_time'] = current_time    
+                    return {'type': 'key_press', 'key': '0000000000000010'}
+                elif target_index == 10 and current_index != 10:
+                    # print(f"Port {port}: Moving to okay. Target index: {target_index}. Current index: {current_index}")
+                    current_instance['last_pressed_time'] = current_time    
+                    return {'type': 'key_press', 'key': '0000000000001000'}
+                elif target_index != 10 and current_index == 10 and target_index != 11:
+                    # print(f"Port {port}: Moving left. Target index: {target_index}. Current index: {current_index}")
+                    current_instance['last_pressed_time'] = current_time    
+                    return {'type': 'key_press', 'key': '0000000000100000'}
+                elif target_index == 11 and current_index != 10 and current_index != 11:
+                    # print(f"Port {port}: Moving right. Target index: {target_index}. Current index: {current_index}")
+                    current_instance['last_pressed_time'] = current_time    
+                    return {'type': 'key_press', 'key': '0000000000010000'}
+                elif target_index != 11 and current_index == 11:
+                    # print(f"Port {port}: Moving up. Target index: {target_index}. Current index: {current_index}")
+                    current_instance['last_pressed_time'] = current_time    
+                    return {'type': 'key_press', 'key': '0000000001000000'}
+                elif target_index == 11 and current_index == 10 and current_index != 11:
+                    # print(f"Port {port}: Moving down. Target index: {target_index}. Current index: {current_index}")
+                    current_instance['last_pressed_time'] = current_time    
+                    return {'type': 'key_press', 'key': '0000000010000000'}
+                elif current_index < target_index and target_index < 5 and current_index < 5:
+                    # print(f"Port {port}: Moving right. Target index: {target_index}. Current index: {current_index}")
+                    current_instance['last_pressed_time'] = current_time
+                    return {'type': 'key_press', 'key': '0000000000010000'}
+                #on top row (0-4), move left
+                elif current_index > target_index and target_index < 5 and current_index < 5:
+                    # print(f"Port {port}: Moving left. Target index: {target_index}. Current index: {current_index}")
+                    current_instance['last_pressed_time'] = current_time
+                    return {'type': 'key_press', 'key': '0000000000100000'}
+                #on bottom row (5-9), move right
+                elif current_index < target_index and target_index >= 5 and current_index >= 5:
+                    # print(f"Port {port}: Moving right. Target index: {target_index}. Current index: {current_index}")
+                    current_instance['last_pressed_time'] = current_time
+                    return {'type': 'key_press', 'key': '0000000000010000'}
+                #on bottom row (5-9), move left
+                elif current_index > target_index and target_index >= 5 and current_index >= 5:
+                    # print(f"Port {port}: Moving left. Target index: {target_index}. Current index: {current_index}")
+                    current_instance['last_pressed_time'] = current_time
+                    return {'type': 'key_press', 'key': '0000000000100000'}
+                #on top row (0-2), move down
+                elif current_index < target_index and target_index >= 5 and current_index < 5 and current_index <=0:
+                    # print(f"Port {port}: Moving down. Target index: {target_index}. Current index: {current_index}")
+                    current_instance['last_pressed_time'] = current_time
+                    return {'type': 'key_press', 'key': '0000000010000000'}
+                #on top row >0, move left
+                elif current_index < target_index and target_index >= 5 and current_index < 5 and current_index >0:
+                    # print(f"Port {port}: Moving left. Target index: {target_index}. Current index: {current_index}")
+                    current_instance['last_pressed_time'] = current_time
+                    return {'type': 'key_press', 'key': '0000000000100000'}
+                #on bottom row(5-9), move up
+                elif current_index > target_index and target_index < 5 and current_index >= 5:
+                    # print(f"Port {port}: Moving up. Target index: {target_index}. Current index: {current_index}")
+                    current_instance['last_pressed_time'] = current_time
+                    return {'type': 'key_press', 'key': '0000000001000000'}
+
+
+
     # Skip chip window logic remains unchanged
     if inside_window.item() == 1.0:
         print(f"Port {port}: Inside chip window.")
@@ -615,9 +943,18 @@ def predict(port, current_data_point, inside_window, tensor_params):
         non_zero_confidences = [confidence for offset, confidence in confidences if confidence != 0]
         if non_zero_confidences:
             average_confidence = sum(non_zero_confidences) / len(non_zero_confidences)
-        
+        press_confidence = 0
+        release_confidence = 0
+
+        release_params = tensor_params.copy()
+        release_params['player_shoot_button'] = False
+        release_confidence = shoot_model.get_confidence_score(get_gamestate_tensor(release_params))
+
+        press_params = tensor_params.copy()
+        press_params['player_shoot_button'] = True
+        press_confidence = shoot_model.get_confidence_score(get_gamestate_tensor(press_params))
         # Print the complete grid of confidences with deviations
-        print("==============================")
+        print(f"================Release Charge: {release_confidence}==============")
         for y in range(1, 4):
             row = ""
             for x in range(1, 7):
@@ -669,20 +1006,22 @@ def predict(port, current_data_point, inside_window, tensor_params):
                 input_string = input_string[:15 - KEY_BIT_POSITIONS['DOWN']] + '1' + input_string[15 - KEY_BIT_POSITIONS['DOWN'] + 1:]
 
             # Incorporate shoot button logic as per existing code
-            shoot_bit = '0'
-            press_confidence = 0
-            release_confidence = 0
+            shoot_bit = '0' if not tensor_params['player_shoot_button'] else '1'
+            
 
-            release_params = tensor_params.copy()
-            release_params['player_shoot_button'] = False
-            release_confidence = shoot_model.get_confidence_score(get_gamestate_tensor(release_params))
 
-            press_params = tensor_params.copy()
-            press_params['player_shoot_button'] = True
-            press_confidence = shoot_model.get_confidence_score(get_gamestate_tensor(press_params))
-
-            if press_confidence > 0.5 and not tensor_params['player_shoot_button']:
+            if tensor_params['player_shoot_button'] and tensor_params['player_charge'] == 2 and release_confidence > 0.5:#fully charged
+                shoot_bit = '0'
+            elif  not tensor_params['player_shoot_button']:
+            # if press_confidence > 0.5 and not tensor_params['player_shoot_button']:
                 shoot_bit = '1'
+                
+            current_instance = next((instance for instance in INSTANCES if instance['port'] == port), None)
+            
+            if shoot_bit =='0' and tensor_params['player_shoot_button']:
+                current_instance['release_shot'] = True
+            else:
+                current_instance['release_shot'] = False
 
             # Set the shoot bit in the input string
             input_string = input_string[:15 - KEY_BIT_POSITIONS['X']] + shoot_bit + input_string[15 - KEY_BIT_POSITIONS['X'] + 1:]
@@ -697,7 +1036,7 @@ def predict(port, current_data_point, inside_window, tensor_params):
     return {'type': 'key_press', 'key': '0000000000000000'}
 
 
-async def punish_if_no_reward(port, data_point):
+async def reward_punish_shot_made(port, data_point, tensor_params, shot_position):
     """
     Waits for ATTACK_TIMEOUT seconds and punishes the shoot_model
     if no reward has been received for the attack on the given port.
@@ -707,10 +1046,68 @@ async def punish_if_no_reward(port, data_point):
         # Check if the attack is still ongoing (i.e., no reward received)
         if port in attack_timers and attack_timers[port] == asyncio.current_task():
             # Apply punishment to the shoot_model
-            punishment_reward = -1.0  # Define the punishment value as needed
+            current_instance = next((instance for instance in INSTANCES if instance['port'] == port), None)
+            punishment_reward = current_instance['got_shot_reward']
             shoot_experiences[port].append([data_point, punishment_reward])
-            shoot_model.train_batch([shoot_experiences[port][-1]])
-            print(f"Port {port}: No reward received within {ATTACK_TIMEOUT} seconds. Punished shoot_model.")
+            current_instance['got_shot_reward'] = -1
+            avgloss, numtrain = shoot_model.train_batch([shoot_experiences[port][-1]])
+            print(f"Port {port}: Shoot model rewarded/punished for shot. Loss: {avgloss:.6f} Reward: {punishment_reward} Num: {numtrain}, from position {shot_position}")
+            
+            #also train positining model
+            grid_experiences[port].append([data_point, punishment_reward])
+            avgloss, numtrain = gridstate_model.train_batch([grid_experiences[port][-1]])
+            print(f"Port {port}: Grid model rewarded/punished for shot. Loss: {avgloss:.6f} Reward: {punishment_reward} Num: {numtrain}, from position {shot_position}")
+            
+            
+             # clamp reward_value
+            # Define the grid dimensions
+            if punishment_reward < 0:
+                exploration_batch = []
+                #reward exploration to try shooting elsewhere
+                GRID_WIDTH = 6
+                GRID_HEIGHT = 3
+
+                for x in range(1, GRID_WIDTH + 1):  # Columns 1 to 6
+                    for y in range(1, GRID_HEIGHT + 1):  # Rows 1 to 3
+                        target_position = [x, y]
+                        
+                        # Skip the current position to avoid redundant punishment
+                        if target_position == shot_position:
+                            continue
+
+                        # Calculate the offset required to move from current position to target_position
+                        offset = [x - shot_position[0],
+                                y - shot_position[1]]
+
+                        # Check if movement to this offset is possible
+                        if check_owner(offset, tensor_params):
+                            # Assign the punishment reward (positive value since reward_value is negative)
+                            move_reward = -punishment_reward / 2  # Converts negative reward to positive punishment
+
+                            # Create a new data point with the updated player position
+                            move_data_point = tensor_params.copy()
+                            move_data_point['player_grid_position'] = target_position
+
+                            # Convert the updated game state to a tensor suitable for the model
+                            data = get_gamestate_tensor(move_data_point)
+
+                            # Append the experience to grid_experiences for training
+                            grid_experiences[port].append([data, move_reward])
+
+                            # Also append to exploration_batch for potential batch processing or logging
+                            exploration_batch.append([data, move_reward])
+                            
+                            print(f"Port {port}: Rewarding move to {target_position} with reward {move_reward}. For Shot")
+                            
+                grid_experiences[port].extend(exploration_batch)
+                avgloss, numtrain = gridstate_model.train_batch(exploration_batch)
+                print(f"Port {port}: Grid model rewarded to exploration. Loss: {avgloss:.6f} Reward: {-punishment_reward} Num: {numtrain}, not from position {shot_position}")
+                
+                shoot_experiences[port].extend(exploration_batch)
+                avgloss, numtrain = shoot_model.train_batch(exploration_batch)
+                print(f"Port {port}: Shoot model rewarded to exploration. Loss: {avgloss:.6f} Reward: {-punishment_reward} Num: {numtrain}, not from position {shot_position}")
+            
+            
             
             # Remove the attack from the tracking dictionary
             del attack_timers[port]
@@ -1380,15 +1777,16 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                             await send_input_command(writer, command, port)
                             
                             # If an attack was made, start the punishment timer
-                            # if started_attack:
-                            #     async with attack_timers_lock:
-                            #         if port in attack_timers:
-                            #             # If there's already an ongoing attack, you might choose to ignore or handle it
-                            #             print(f"Port {port}: Attack already in progress.")
-                            #         else:
-                            #             # Schedule the punishment coroutine
-                            #             punishment_task = asyncio.create_task(punish_if_no_reward(port, data_point))
-                            #             attack_timers[port] = punishment_task
+                            if 'release_shot' in game_instance and game_instance['release_shot']:
+                                async with attack_timers_lock:
+                                    if port in attack_timers:
+                                        # If there's already an ongoing attack, you might choose to ignore or handle it
+                                        print(f"Port {port}: Attack already in progress.")
+                                    else:
+                                        # Schedule the punishment coroutine
+                                        punishment_task = asyncio.create_task(reward_punish_shot_made(port, data_point,tensor_params, tensor_params['player_grid_position']))
+                                        game_instance['got_shot_reward'] = -1
+                                        attack_timers[port] = punishment_task
                                 
                         else:
                             data_point['action'] = current_input  # Store the current input
@@ -1410,13 +1808,17 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 
                                     
                             data_buffers[port].append(data_point)
-                            if current_reward != 0 or current_punishment != 0 and not game_instance.get('is_player', False):#is not player
+                            if current_reward != 0 or current_punishment != 0:# and not game_instance.get('is_player', False):#is not player
                                 # Compute reward
                                 reward_value = (current_reward / max_reward) - (current_punishment / max_punishment)
                                 grid_experiences[port].append([data_point, reward_value])
                                 
                                 
-                                
+                                if 'got_shot_reward' in game_instance and game_instance['got_shot_reward'] == -1 and reward_value > 0:
+                                    game_instance['got_shot_reward'] = reward_value
+                                    print(f"Port {port}: Got shot reward: {reward_value}")
+                                    
+                                    
                                 if 'player_timer_on' in game_instance and game_instance['player_timer_on']:
                                     #the player timer is on, add all experiences to the player_chip_experiences
                                     if not 'player_timer_reward' in game_instance:
@@ -1433,35 +1835,34 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 # average_loss, num_trained = gridstate_model.train_batch(grid_experiences[port][-1:])
                                 
                                 # Apply discounted rewards to all experiences
-                                gamma = 0.99
-                                grid_experiences[port] = apply_discounted_rewards(grid_experiences[port], gamma)
-                                shoot_experiences[port] = apply_discounted_rewards(shoot_experiences[port], gamma)
+                                # gamma = 0.99
+                                # grid_experiences[port] = apply_discounted_rewards(grid_experiences[port], gamma)
+                                # shoot_experiences[port] = apply_discounted_rewards(shoot_experiences[port], gamma)
                                 
-                                # Train on the last batch of window_size
-                                if len(grid_experiences[port]) > window_size:
-                                    batch = grid_experiences[port][-window_size:]
-                                else:
-                                    batch = grid_experiences[port]
+                                # # Train on the last batch of window_size
+                                # if len(grid_experiences[port]) > window_size:
+                                #     batch = grid_experiences[port][-window_size:]
+                                # else:
+                                #     batch = grid_experiences[port]
                                 
                                 # average_loss, num_trained = gridstate_model.train_batch(batch)
                                 
-                                if reward_value > 0:
+                                # if reward_value > 0:
                                     # print(reward_value)
-                                    shoot_experiences[port].append([data_point, reward_value])
+                                    # shoot_experiences[port].append([data_point, reward_value])
                                     # #train on shoot experiences
                                     # if len(shoot_experiences[port]) > window_size:
                                     #     batch = shoot_experiences[port][-window_size:]
                                     # else:
                                     #     batch = shoot_experiences[port]
                                     
-                                    # average_loss, num_trained = shoot_model.train_batch(batch)
+                                    # average_loss, num_trained = shoot_model.train_batch(shoot_experiences[port][-1:])
                                 
                                 
                                 exploration_batch = []
                                 # If being punished on this square, assign -reward_value to ALL accessible grid positions to encourage dodging
                                 if reward_value < 0:
                                     # clamp reward_value
-                                    reward_value = abs(reward_value)
                                     # Define the grid dimensions
                                     GRID_WIDTH = 6
                                     GRID_HEIGHT = 3
@@ -1481,7 +1882,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                             # Check if movement to this offset is possible
                                             if check_owner(offset, tensor_params):
                                                 # Assign the punishment reward (positive value since reward_value is negative)
-                                                move_reward = 1#-reward_value / 2  # Converts negative reward to positive punishment
+                                                move_reward = -reward_value / 2  # Converts negative reward to positive punishment
 
                                                 # Create a new data point with the updated player position
                                                 move_data_point = tensor_params.copy()
@@ -1496,11 +1897,37 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                                 # Also append to exploration_batch for potential batch processing or logging
                                                 exploration_batch.append([data, move_reward])
                                                 
-                                                # print(f"Port {port}: Rewarding move to {target_position} with reward {move_reward}")
+                                                print(f"Port {port}: Rewarding move to {target_position} with reward {move_reward}")
 
                                     # Optional: Log the exploration_batch size for monitoring purposes
                                     # print(f"Port {port}: Exploration batch size after punishment: {len(exploration_batch)}")
 
+                                    #train on everything
+                                    #progress bar
+                                    # if len(grid_experiences[port]) > 0:
+                                    #     batch_size = 100
+                                    #     num_batches = len(grid_experiences[port]) // batch_size + (1 if len(grid_experiences[port]) % batch_size != 0 else 0)
+                                    #     for i in tqdm(range(0, len(grid_experiences[port]), batch_size), desc=f"Training Grid Model on Port {port}", total=num_batches):
+                                    #         average_loss, num_trained = gridstate_model.train_batch(grid_experiences[port][i:i+batch_size])
+                                    #         print(f"Port {port}: Average Loss: {average_loss}, Num Trained: {num_trained}")
+                                    
+                                    # if len(shoot_experiences[port]) > 0:
+                                    #     batch_size = 100
+                                    #     num_batches = len(shoot_experiences[port]) // batch_size + (1 if len(shoot_experiences[port]) % batch_size != 0 else 0)
+                                    #     for i in tqdm(range(0, len(shoot_experiences[port]), batch_size), desc=f"Training Shoot Model on Port {port}", total=num_batches):
+                                    #         average_loss, num_trained = shoot_model.train_batch(shoot_experiences[port][i:i+batch_size])
+                                    #         print(f"Port {port}: Shoot Average Loss: {average_loss}, Num Trained: {num_trained}")
+                                    
+                                    #train only on last 100
+                                    if len(grid_experiences[port]) > 100:
+                                        average_loss, num_trained = gridstate_model.train_batch(grid_experiences[port][-100:])
+                                        print(f"Port {port}: Average Loss: {average_loss}, Num Trained: {num_trained}")
+                                    
+                                    # train shoot on last 100
+                                    if len(shoot_experiences[port]) > 100:
+                                        average_loss, num_trained = shoot_model.train_batch(shoot_experiences[port][-100:])
+                                        print(f"Port {port}: Shoot Average Loss: {average_loss}, Num Trained: {num_trained}")
+                                    
 
                                 # if len(exploration_batch) > 0:
                                 #     average_loss, num_trained = gridstate_model.train_batch(exploration_batch)
@@ -1509,14 +1936,14 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 current_reward = 0
                                 current_punishment = 0
                                 
-                                #train on exploration batch
-                                if len(exploration_batch) > 0:
-                                    average_loss, num_trained = gridstate_model.train_batch(exploration_batch)
-                                    print(f"Port {port}: Exploration Average Loss: {average_loss}, Num Trained: {num_trained}")
+                                # #train on exploration batch
+                                # if len(exploration_batch) > 0:
+                                #     average_loss, num_trained = gridstate_model.train_batch(exploration_batch)
+                                #     print(f"Port {port}: Exploration Average Loss: {average_loss}, Num Trained: {num_trained}")
                                     
-                                #train on last data
-                                average_loss, num_trained = gridstate_model.train_batch(grid_experiences[port][-1:])
-                                print(f"Port {port}: Average Loss: {average_loss}, Num Trained: {num_trained}")
+                                # #train on last data
+                                # average_loss, num_trained = gridstate_model.train_batch(grid_experiences[port][-1:])
+                                # print(f"Port {port}: Average Loss: {average_loss}, Num Trained: {num_trained}")
                                 #train on all data
                                 #train on random 100 experiences and everything in the exploration batch
                                 #randomly sample 100 experiences
@@ -2103,8 +2530,10 @@ def save_models():
     """
     global gridstate_model, shoot_model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    grid_checkpoint_path = 'grideval.pth'
-    shoot_checkpoint_path = 'shooteval.pth'
+    checkpoint_path = os.path.join(get_root_dir(), "checkpoints")
+
+    grid_checkpoint_path = os.path.join(checkpoint_path,'grideval.pth')
+    shoot_checkpoint_path = os.path.join(checkpoint_path,'shooteval.pth')
     
     try:
         torch.save(gridstate_model.state_dict(), grid_checkpoint_path)

@@ -28,7 +28,7 @@ config = {
     }
 
 class GridStateEvaluator(nn.Module):
-    def __init__(self, learning_rate=1e-5, config=config):
+    def __init__(self, learning_rate=1e-4, config=config):
         super(GridStateEvaluator, self).__init__()
         self.config = config if config is not None else {}
 
@@ -416,6 +416,7 @@ class GridStateEvaluator(nn.Module):
             int: Number of valid experiences trained on.
             None: If no valid experiences are provided.
         """
+        # return None, 0#don't train right now
         if not grid_experiences:
             print("No experiences provided for training.")
             return None, 0
