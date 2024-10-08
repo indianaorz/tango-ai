@@ -325,6 +325,8 @@ def get_gamestate_tensor(
     # enemy_chip=None,            # integer (0-400)
     # player_charge=None,         # float (0-1)
     # enemy_charge=None,          # float (0-1)
+    # player_release_charge=None, # float (0-1)
+    # enemy_release_charge=None,  # float (0-1)
     # player_chip_hand=None,      # list of 5 integers (0-400) or None
     # player_folder=None,         # list of 30 dicts with keys 'chip', 'code', 'used', 'regged', 'tagged' or None
     # enemy_folder=None,          # list of 30 dicts with keys 'chip', 'code', 'used', 'regged', 'tagged' or None
@@ -354,6 +356,8 @@ def get_gamestate_tensor(
     enemy_active_chip = tensor_params['enemy_active_chip']
     player_charge = tensor_params['player_charge']
     enemy_charge = tensor_params['enemy_charge']
+    player_release_charge = tensor_params['player_release_charge']
+    enemy_release_charge = tensor_params['enemy_release_charge']
     player_chip_button = tensor_params['player_chip_button']
     player_shoot_button = tensor_params['player_shoot_button']
     player_chip_hand = tensor_params['player_chip_hand']
@@ -491,6 +495,13 @@ def get_gamestate_tensor(
     enemy_charge_tensor = torch.tensor([enemy_charge / 2.0], dtype=torch.float32) if enemy_charge is not None else torch.tensor([0.0], dtype=torch.float32)
     gamestate['player_charge'] = player_charge_tensor  # Shape: (1,)
     gamestate['enemy_charge'] = enemy_charge_tensor    # Shape: (1,)
+    
+    # 6.25 player_release_charge and enemy_release_charge
+    #true or false values, convert to 0 or 1
+    player_release_charge_tensor = torch.tensor([float(player_release_charge)], dtype=torch.float32) if player_release_charge is not None else torch.tensor([0.0], dtype=torch.float32)
+    enemy_release_charge_tensor = torch.tensor([float(enemy_release_charge)], dtype=torch.float32) if enemy_release_charge is not None else torch.tensor([0.0], dtype=torch.float32)
+    gamestate['player_release_charge'] = player_release_charge_tensor  # Shape: (1,)
+    gamestate['enemy_release_charge'] = enemy_release_charge_tensor    # Shape: (1,)
     
     # 6.5 player_chip_button and player_shoot_button
     player_chip_button_tensor = torch.tensor([player_chip_button], dtype=torch.float32) if player_chip_button is not None else torch.tensor([0.0], dtype=torch.float32)

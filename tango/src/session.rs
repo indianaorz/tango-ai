@@ -672,7 +672,6 @@ impl Session {
 
                 //let is_offerer = local_player_index == 1;
 
-                set_is_offerer(local_player_index as u16);
                 // if is_offerer {
                 // } else {
                 //     // println!("First Chip P2: {}", core.raw_read_16(0x203A9DA, -1));
@@ -871,6 +870,8 @@ impl Session {
                     }
 
                     if is_left_player == 1 {
+
+                        set_is_offerer(1);
                         set_enemy_position((enemy_x, enemy_y));
                         set_player_position((player_x, player_y));
 
@@ -913,6 +914,7 @@ impl Session {
                             std::process::exit(0);
                         }
                     } else {
+                        set_is_offerer(0);
                         set_enemy_position((player_x, player_y));
                         set_player_position((enemy_x, enemy_y));
 

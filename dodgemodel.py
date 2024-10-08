@@ -25,6 +25,10 @@ config = {
         'include_enemy_used_crosses': True,
         'include_player_active_chip': True,
         'include_enemy_active_chip': True,
+        'include_player_release_charge': True,
+        'include_enemy_release_charge': True,
+        'include_player_charge': True,
+        'include_enemy_charge': True,
     }
 
 class GridStateEvaluator(nn.Module):
@@ -81,6 +85,18 @@ class GridStateEvaluator(nn.Module):
 
         if self.config.get('include_enemy_beasted_over', False):
             size += 1  # enemy_beasted_over
+        
+        if self.config.get('include_player_charge', False):
+            size += 1
+        
+        if self.config.get('include_enemy_charge', False):
+            size += 1
+            
+        if self.config.get('include_player_release_charge', False):
+            size += 1
+            
+        if self.config.get('include_enemy_release_charge', False):
+            size += 1
 
         if self.config.get('include_player_chip', False):
             size += 401  # player_chip
@@ -212,6 +228,18 @@ class GridStateEvaluator(nn.Module):
 
         if self.config.get('include_enemy_beasted_over', False):
             features.append(float(current_data_point.get('enemy_beasted_over', 0.0)))
+            
+        if self.config.get('include_player_charge', False):
+            features.append(float(current_data_point.get('player_charge', 0.0)))
+            
+        if self.config.get('include_enemy_charge', False):
+            features.append(float(current_data_point.get('enemy_charge', 0.0)))
+            
+        if self.config.get('include_player_release_charge', False):
+            features.append(float(current_data_point.get('player_release_charge', 0.0)))
+            
+        if self.config.get('include_enemy_release_charge', False):
+            features.append(float(current_data_point.get('enemy_release_charge', 0.0)))
 
         if self.config.get('include_player_chip', False):
             player_chip = current_data_point.get('player_chip', None)
@@ -416,7 +444,7 @@ class GridStateEvaluator(nn.Module):
             int: Number of valid experiences trained on.
             None: If no valid experiences are provided.
         """
-        # return None, 0#don't train right now
+        return None, 0#don't train right now
         if not grid_experiences:
             print("No experiences provided for training.")
             return None, 0
