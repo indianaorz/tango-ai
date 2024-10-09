@@ -1,8 +1,5 @@
 use crate::global::{
-    set_beast_out_selectable, set_chip_code, set_chip_count_visible, set_chip_selected_count, set_chip_slot,
-    set_cust_gage, set_enemy_game_emotion_state, set_inside_cross_window, set_is_offerer, set_player_chip_folder,
-    set_player_emotion_state, set_player_game_emotion_state, set_selected_chip_index, set_selected_cross_index,
-    set_selected_menu_index,
+    set_beast_out_selectable, set_chip_code, set_chip_count_visible, set_chip_selected_count, set_chip_slot, set_cust_gage, set_enemy_game_emotion_state, set_enemy_trap, set_grid_occupy_state, set_inside_cross_window, set_is_offerer, set_player_barrier, set_player_chip_folder, set_player_emotion_state, set_player_game_emotion_state, set_player_invis, set_player_trap, set_selected_chip_index, set_selected_cross_index, set_selected_menu_index, set_time_frozen
 };
 use crate::{audio, config, game, gui, net, rom, stats, video};
 use egui::debug_text::print;
@@ -22,7 +19,7 @@ use std::fs::File;
 
 use std::sync::LazyLock;
 
-pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0); // * 8.0;
+pub const EXPECTED_FPS: f32 = (16777216.0 / 280896.0) * 4.0;
 
 // session.rs
 use crate::global::{
@@ -31,7 +28,7 @@ use crate::global::{
     set_enemy_navi_cust_parts, set_enemy_position, set_enemy_reg_chip, set_enemy_selected_chip, set_enemy_tag_folder,
     set_frame_count, set_grid_owner_state, set_grid_state, set_is_player_inside_window, set_local_input,
     set_player_charge, set_player_code_folder, set_player_grid_position, set_player_health, set_player_health_index,
-    set_player_navi_cust_parts, set_player_position, set_player_reg_chip, set_player_selected_chip,
+    set_player_navi_cust_parts, set_player_position, set_player_reg_chip, set_player_selected_chip,set_player_aura,
     set_player_tag_folder, set_winner, RewardPunishment,
 };
 use crate::global::{PUNISHMENTS, REWARDS}; // Import the global variables
@@ -592,7 +589,7 @@ impl Session {
         // }
 
         // Shared storage for initial boolean states
-        static INITIAL_BOOLEAN_STATES: LazyLock<Mutex<HashMap<u32, u8>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+        static INITIAL_BOOLEAN_STATES: LazyLock<Mutex<HashMap<u32, u16>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
         // Initialize the log file with thread-safe access
         let log_file = Arc::new(Mutex::new(
@@ -619,9 +616,11 @@ impl Session {
         let logging_enabled_clone = Arc::clone(&logging_enabled);
         let command4_prev_state_clone = Arc::clone(&command4_prev_state);
 
-        let commands_enabled = Arc::new(AtomicBool::new(false));
+        let commands_enabled = Arc::new(AtomicBool::new(true));
         let local_player_index_for_frame = Arc::clone(&local_player_index_arc);
         let mut is_left_player = -1;
+
+
 
         // Wrap the health variables in Arc<Mutex<T>>
         let last_player_health = Arc::new(Mutex::new(0u16));
@@ -740,14 +739,19 @@ impl Session {
 
                 //assign to 3x6 grid
                 let grid_addresses = [
-                    0x02039C06, 0x02039C26, 0x02039C46, 0x02039C66, 0x02039C86, 0x02039CA6, 0x02039D06, 0x02039D26,
-                    0x02039D46, 0x02039D66, 0x02039D86, 0x02039DA6, 0x02039E06, 0x02039E26, 0x02039E46, 0x02039E66,
-                    0x02039E86, 0x02039EA6,
+                    0x02039C06, 0x02039C26, 0x02039C46, 0x02039C66, 0x02039C86, 0x02039CA6, 
+                    0x02039D06, 0x02039D26, 0x02039D46, 0x02039D66, 0x02039D86, 0x02039DA6, 
+                    0x02039E06, 0x02039E26, 0x02039E46, 0x02039E66, 0x02039E86, 0x02039EA6,
                 ];
                 let grid_owner_addresses = [
-                    0x02039C07, 0x02039C27, 0x02039C47, 0x02039C67, 0x02039C87, 0x02039CA7, 0x02039D07, 0x02039D27,
-                    0x02039D47, 0x02039D67, 0x02039D87, 0x02039DA7, 0x02039E07, 0x02039E27, 0x02039E47, 0x02039E67,
-                    0x02039E87, 0x02039EA7,
+                    0x02039C07, 0x02039C27, 0x02039C47, 0x02039C67, 0x02039C87, 0x02039CA7, 
+                    0x02039D07, 0x02039D27, 0x02039D47, 0x02039D67, 0x02039D87, 0x02039DA7, 
+                    0x02039E07, 0x02039E27, 0x02039E47, 0x02039E67, 0x02039E87, 0x02039EA7,
+                ];
+                let grid_occupy_addresses = [
+                    0x02039C16, 0x02039C36, 0x02039C56, 0x02039C76, 0x02039C97, 0x02039CB7, 
+                    0x02039D16, 0x02039D36, 0x02039D56, 0x02039D76, 0x02039D97, 0x02039DB7, 
+                    0x02039E16, 0x02039E36, 0x02039E56, 0x02039E76, 0x02039E97, 0x02039EB7,
                 ];
 
                 //display values of grid
@@ -765,6 +769,15 @@ impl Session {
                     let current_value = core.raw_read_8(*address, -1);
 
                     set_grid_owner_state(i, current_value as u16);
+                    i += 1;
+                    // println!("0x{:08X},{}", address, current_value);
+                }
+
+                //display values of grid
+                i = 0;
+                for address in &grid_occupy_addresses {
+                    let current_value = core.raw_read_8(*address, -1);
+                    set_grid_occupy_state(i, current_value as u16);
                     i += 1;
                     // println!("0x{:08X},{}", address, current_value);
                 }
@@ -800,6 +813,30 @@ impl Session {
                         Err(e) => eprintln!("Failed to set selected chip index {}: {:?}", i, e),
                     }
                 }
+
+                set_player_invis(core.raw_read_16(0x02038514, -1) as u16);
+                // println!("Player invis: {}", core.raw_read_16(0x02038514, -1) as u16);
+
+
+                set_player_trap((core.raw_read_8(0x2036720, -1)) as u16);
+                // println!("Player trap: {}", core.raw_read_8(0x2036720, -1) as u16);
+
+
+                //enemy trap? 020368A0 0203A9DA? 0203AAB8 02036844 0x02036730!   02034134!
+                //enemy aura? 02046FF7
+
+                set_enemy_trap(core.raw_read_8(0x02036730, -1) as u16);
+
+                set_player_barrier(core.raw_read_8(0x2038506, -1) as u16);
+                // println!("Player barrier: {}", core.raw_read_8(0x2038506, -1) as u16);
+
+                set_player_aura(core.raw_read_8(0x20340E3, -1) as u16);
+                // println!("Player aura: {}", core.raw_read_8(0x20340E3, -1) as u16);
+
+                set_time_frozen( core.raw_read_8(0x02009878, -1) as u16);
+                // println!("Time frozen: {}", core.raw_read_8(0x02009878, -1) as u16);
+
+
 
                 set_beast_out_selectable(core.raw_read_8(0x0203664B, -1) as u16);
                 // println!("Beast out selectable: {}", core.raw_read_8(0x0203664B, -1) as u16);
@@ -977,7 +1014,7 @@ impl Session {
                             for &address in addresses.iter() {
                                 //only get values that are 0
 
-                                let current_value = core_ref.raw_read_8(address, -1);
+                                let current_value = core_ref.raw_read_16(address, -1);
                                 // if current_value == 0 {
                                 initial_states.insert(address, current_value);
                                 // }
@@ -993,7 +1030,7 @@ impl Session {
                             let mut addresses = boolean_addresses.lock();
                             let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
                             addresses.retain(|&address| {
-                                let current_value = core_ref.raw_read_8(address, -1);
+                                let current_value = core_ref.raw_read_16(address, -1);
                                 if let Some(&initial_value) = initial_states.get(&address) {
                                     if current_value != initial_value {
                                         // Value has changed, prune it from the list
@@ -1016,7 +1053,7 @@ impl Session {
                             let mut addresses = boolean_addresses.lock();
                             let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
                             addresses.retain(|&address| {
-                                let current_value = core_ref.raw_read_8(address, -1);
+                                let current_value = core_ref.raw_read_16(address, -1);
                                 if let Some(&initial_value) = initial_states.get(&address) {
                                     if current_value == initial_value {
                                         // Value has changed, prune it from the list
@@ -1040,7 +1077,7 @@ impl Session {
                             let mut initial_states = INITIAL_BOOLEAN_STATES.lock();
 
                             for &address in addresses.iter() {
-                                let current_value = core_ref.raw_read_8(address, -1);
+                                let current_value = core_ref.raw_read_16(address, -1);
                                 //update initial value to the current value
                                 if let Some(initial_value) = initial_states.get_mut(&address) {
                                     *initial_value = current_value;

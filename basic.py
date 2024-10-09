@@ -62,6 +62,8 @@ window_entry_time = {}
 previous_sent_dict = defaultdict(int)
 previous_inside_window_dict = defaultdict(float)
 
+
+
 # Global dictionaries for Planning Model
 
 current_round_damage = defaultdict(float)  # Tracks damage dealt in the current round per port
@@ -112,8 +114,8 @@ max_player_health = 1.0  # Start with a default value to avoid division by zero
 max_enemy_health = 1.0
 
 replay_count = 0
-battle_count = 1
-include_orig =False
+battle_count = 0
+include_orig =True
 do_replays = False
 save_data = False
 load_data = False
@@ -174,7 +176,7 @@ INSTANCES = [
         # 'replay_path':'/home/lee/Documents/Tango/replaysOrig/20231006020253-lunazoe-bn6-vs-DthKrdMnSP-round1-p1.tangoreplay',
         'init_link_code': 'arena1',
         'is_dodge': False,
-        'is_player': False  # Set to True if you don't want this instance to send inputs
+        'is_player': True  # Set to True if you don't want this instance to send inputs
     },
     {
         'address': '127.0.0.1',
@@ -186,9 +188,9 @@ INSTANCES = [
         'name': 'Instance 2',
         'init_link_code': 'arena1',
         'is_dodge':False,
-        'is_player': False  # Set to False if you want this instance to send inputs
+        'is_player': True  # Set to False if you want this instance to send inputs
     },
-    # Additional instances can be added here
+    # # Additional instances can be added here
 ]
 
 import numpy as np
@@ -462,7 +464,7 @@ else:
     health_buffers = {}
 
 
-from planning_model import PlanningModel, get_planning_input_from_replay
+from planning_model import PlanningModel, get_planning_input_from_replay, get_planning_input_from_instance
 
 
 # Function to load the AI models
@@ -486,7 +488,7 @@ def load_models(image_memory=1, learning_rate=1e-3):
         image_memory (int): Not used in this context but retained for compatibility.
         learning_rate (float): Learning rate for the optimizer.
     """
-    global gridstate_model, shoot_model, dodge_model, danger_model
+    global gridstate_model, shoot_model, dodge_model, danger_model, planning_model, optimizer_planning
     global latest_checkpoint_number  # Access the global variable
     
     # Define the device
@@ -536,9 +538,34 @@ def load_models(image_memory=1, learning_rate=1e-3):
         print(f"[LOAD] danger_model loaded from {danger_checkpoint_path}")
     else:
         print("[WARN] No checkpoint found for danger_model. Initializing a new model.")
+        
+    
+    
+    # Load Training Planning Model
+    training_planning_checkpoint_path = os.path.join(get_root_dir(), "checkpoints", "planning", "1", "checkpoint_1.pth")
+    if training_planning_checkpoint_path:
+        planning_model = PlanningModel().to(device)
+        print(training_planning_checkpoint_path)
+        checkpoint_training_planning = torch.load(training_planning_checkpoint_path, map_location=device)
+        if 'model_state_dict' in checkpoint_training_planning:
+            planning_model.load_state_dict(checkpoint_training_planning['model_state_dict'])
+            print(f"Training Planning Model loaded from {training_planning_checkpoint_path}")
+            # Extract the checkpoint number
+            latest_number = extract_number_from_checkpoint(training_planning_checkpoint_path)
+            latest_checkpoint_number['planning'] = latest_number
+        else:
+            raise KeyError("Training Planning checkpoint does not contain 'model_state_dict'")
+    else:
+        # Initialize new Training Planning Model
+        planning_model = PlanningModel().to(device)
+        print("No Training Planning Model checkpoint found. Initialized a new Training Planning Model.")
+        
+    optimizer_planning = optim.Adam(planning_model.parameters(), lr=learning_rate)
 
         
+planning_model = None
 
+optimizer_planning = None
     
 
 
@@ -633,9 +660,9 @@ def predict(port, current_data_point, inside_window, tensor_params):
         #todo: get from model
         # current_instance['cross_target'] = 4
         
-        cross_target = random.randint(-1, 4 - len(current_instance['player_used_crosses']))
-        target_list = [1,2,3,4,5]
-        current_instance['target_list'] = target_list
+        # cross_target = random.randint(-1, 4 - len(current_instance['player_used_crosses']))
+        # target_list = [1,2,3,4,5]
+        # current_instance['target_list'] = target_list
 
         chip_slots = current_instance['chip_slots']
         chip_codes = current_instance['chip_codes']
@@ -658,10 +685,10 @@ def predict(port, current_data_point, inside_window, tensor_params):
         #set game instance chip data
         current_instance['player_chips'] = chip_data
         
-        # inputs, cross_target, target_list = get_planning_input_from_instance(inference_planning_model, current_instance, GAMMA, device)
-        # target_list_input = []
-        # for i in range(len(target_list)):
-        #     target_list_input.append(target_list[i])
+        inputs, cross_target, target_list = get_planning_input_from_instance(planning_model, current_instance, GAMMA, device)
+        target_list_input = []
+        for i in range(len(target_list)):
+            target_list_input.append(target_list[i])
             
         
         # #log the inputs and outputs to the port for training
@@ -673,9 +700,9 @@ def predict(port, current_data_point, inside_window, tensor_params):
         # planning_data_buffers[port].append(data_point)
         
         #set values higher than chip visible to 0
-        # for i in range(len(target_list)):
-        #     if target_list[i] >= chips_visible:
-        #         target_list[i] = 0
+        for i in range(len(target_list)):
+            if target_list[i] >= chips_visible:
+                target_list[i] = 0
                 
                 
         #get the min index of any chip_data with a slot value > 360
@@ -699,9 +726,10 @@ def predict(port, current_data_point, inside_window, tensor_params):
         current_instance['target_list'] = target_list
         
         
+        
         # current_instance['target_list'] = target_list
         print(f"Port {port}: Cross Target: {cross_target}")
-        # print(f"Port {port}: Target List: {target_list}")
+        print(f"Port {port}: Target List: {target_list}")
         
 
 
@@ -2227,6 +2255,8 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                         tensor_params
                     )
                     
+                    game_instance['grid'] = gamestate_tensor['grid']
+                    
                     #print out count of one tensors in player folder
                     # print(f"Port {port}: PLAYER: {gamestate_tensor['player_chip_hand']}")
                     
@@ -2470,6 +2500,7 @@ async def receive_messages(reader, writer, port, training_data_dir, config):
                                 #if exiting the window and the game is a replay
                                 if is_replay or game_instance.get('is_player', True):
                                     inputs, cross_target, target_list_input = get_planning_input_from_replay(game_instance, GAMMA, device)
+                                    # print(inputs['grid_tensor'])
                                     #append the selected data to the planning data buffer
                                     planning_data_point = {
                                         'inputs': inputs,
@@ -2793,28 +2824,32 @@ async def main():
     # Start mouse monitoring task
     # monitor_task = asyncio.create_task(monitor_mouse_over_instances(INSTANCES))
 
-    
-
-
-    # Wait for all connection tasks to complete
+    # Wait for all tasks to complete
     await asyncio.gather(*connection_tasks)
-    print("All instances have completed. Exiting program.")
-    #prune all datapoints which have not been rewarded
-    prune_count = 0
-    if prune:
-        #loop through instances ports
-        for port, buffer in data_buffers.items():
-            for data_point in buffer:
-                if 'reward' not in data_point:
-                    del data_point
-                    prune_count += 1
-                #or if the abs of the reward is < 0.1
-                elif abs(data_point['reward']) < 0.1:
-                    del data_point
-                    prune_count += 1
-                    
-    print(f"Pruned {prune_count} data points.")
     
+
+    WIN_REWARD = 1
+    # REPLAY_REWARD = 0.5
+    # Determine winners and losers based on final_health
+    print("Processing final health to determine winners and losers.")
+    for port, (player_health, enemy_health) in final_health.items():
+        if player_health > enemy_health:
+            # Winner: Add +1 to all rewards
+            for data_point in planning_data_buffers[port]:
+                if 'reward' in data_point:
+                    data_point['reward'] += WIN_REWARD
+                else:
+                    data_point['reward'] = WIN_REWARD
+            print(f"Port {port}: Winner. Added +{WIN_REWARD} reward to all data points.")
+        else:
+            #punish loser
+            for data_point in planning_data_buffers[port]:
+                if 'reward' in data_point:
+                    data_point['reward'] -= WIN_REWARD
+                else:
+                    data_point['reward'] = -WIN_REWARD
+            print(f"Port {port}: Loser. Added -{WIN_REWARD} reward to all data points.")
+                
      # Start the training thread... testing to see if we can do this after the instances have been closed
     if save_data:
         save_training_data()
@@ -2826,7 +2861,7 @@ def save_training_data():
     Saves the grid_experiences and shoot_experiences dictionaries to disk using pickle.
     Each port's experiences are saved in separate files for better organization.
     """
-    global grid_experiences, shoot_experiences, dodge_experiences, punish_dictionary
+    global grid_experiences, shoot_experiences, dodge_experiences, punish_dictionary, planning_model
     try:
         # Save grid_experiences
         grid_path = os.path.join(TRAINING_DATA_DIR, "grid_experiences.pkl")
@@ -2856,6 +2891,16 @@ def save_training_data():
             pickle.dump(reward_dictionary, f)
         print(f"[SAVE] reward_dictionary saved to {reward_dictionary_path}")
         
+        # Save planning data
+        planning_data_path = os.path.join(TRAINING_DATA_DIR, "planning_data.pkl")
+        with open(planning_data_path, 'wb') as f:
+            pickle.dump(planning_data_buffers, f)
+        print(f"[SAVE] planning_data saved to {planning_data_path}")
+        
+                
+        
+                
+        
 
     except Exception as e:
         print(f"[ERROR] Failed to save training data: {e}")
@@ -2866,7 +2911,7 @@ def load_training_data():
     Loads the grid_experiences and shoot_experiences dictionaries from disk using pickle.
     If the files do not exist, initializes empty defaultdicts.
     """
-    global grid_experiences, shoot_experiences, train_on_load, dodge_experiences, danger_experiences, punish_dictionary, reward_dictionary
+    global grid_experiences, shoot_experiences, train_on_load, dodge_experiences, danger_experiences, punish_dictionary, reward_dictionary, planning_model,planning_data_buffers
     try:
         # Load grid_experiences
         grid_path = os.path.join(TRAINING_DATA_DIR, "grid_experiences.pkl")
@@ -2915,9 +2960,77 @@ def load_training_data():
             print(f"[LOAD] reward_dictionary loaded from {reward_dictionary_path}")
             # inspect_reward_dictionary(reward_dictionary)
             
+        planning_data_path = os.path.join(TRAINING_DATA_DIR, "planning_data.pkl")
+        if os.path.exists(planning_data_path):
+            with open(planning_data_path, 'rb') as f:
+                planning_data_buffers = pickle.load(f)
+            print(f"[LOAD] planning_data loaded from {planning_data_path}")
+            
+        # Check if planning_data_buffers is not empty
+        if not planning_data_buffers:
+            print("[INFO] No planning_data_buffers to train on.")
+            return
+        
+        
+        # Iterate over each port and its buffer
+        
+        #progress bar, train for 100 epochs
+        # for epoch in tqdm(range(10000), desc="Training Planning Model"):
+        #     # Iterate over each port and its buffer
+        #     for port, buffer in planning_data_buffers.items():
+        #         if not buffer:
+        #             print(f"[INFO] No data in buffer for port {port}. Skipping.")
+        #             continue
+                
+        #         print(f"[INFO] Training on port {port} with {len(buffer)} data points.")
+                
+        #         # Prepare batch_data as a list of dicts
+        #         batch_data = []
+        #         for data_point in buffer:
+        #             try:
+        #                 inputs = data_point['inputs']
+                        
+        #                 # Shuffle player_folder and enemy_folder
+        #                 inputs['player_folder'] = planning_model.shuffle_folder_encoded(inputs['player_folder'])
+        #                 inputs['enemy_folder'] = planning_model.shuffle_folder_encoded(inputs['enemy_folder'])
+
+        #                 cross_target = data_point['cross_target']
+        #                 target_list = data_point['target_list']
+        #                 reward = 1.0  # Placeholder reward value, todo get from data_point
+                        
+        #                 # Restructure data_point to match train_batch expectations
+        #                 batch_dict = {
+        #                     'inputs': inputs,
+        #                     'cross_target': cross_target,
+        #                     'target_list': target_list,
+        #                     'reward': reward
+        #                 }
+                        
+        #                 batch_data.append(batch_dict)
+        #             except KeyError as e:
+        #                 print(f"[ERROR] Missing key {e} in data_point for port {port}. Skipping this data_point.")
+        #                 continue
+                
+        #         if not batch_data:
+        #             print(f"[WARN] No valid data points found for port {port}. Skipping training for this port.")
+        #             continue
+                
+        #         # Call the train_batch method
+        #         loss, count = planning_model.train_batch(
+        #             batch_data=batch_data,
+        #             optimizer=optimizer_planning,
+        #             max_grad_norm=1.0
+        #         )
+        #         #update the bar with the loss
+        #         tqdm.write(f"Epoch {epoch}, Port {port}: Loss: {loss}, Num Trained: {count}")
+                
+            
+            
 
     except Exception as e:
         print(f"[ERROR] Failed to load training data: {e}")
+        #traceback
+        print(traceback.format_exc())
         # Initialize empty if loading fails
         grid_experiences = defaultdict(list)
         shoot_experiences = defaultdict(list)

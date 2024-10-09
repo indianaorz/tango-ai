@@ -117,6 +117,27 @@ lazy_static! {
     //6x3 grid of uint16s for the grid owner state
     pub static ref GRID_OWNER_STATE: Vec<Arc<Mutex<u16>>> = (0..18).map(|_| Arc::new(Mutex::new(0))).collect();
 
+    //6x3 grid of ids which occupy the grid
+    pub static ref GRID_OCCUPY_STATE: Vec<Arc<Mutex<u16>>> = (0..18).map(|_| Arc::new(Mutex::new(0))).collect();
+
+    pub static ref PLAYER_INVIS:Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    pub static ref ENEMY_INVIS: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    pub static ref PLAYER_TRAP:Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    pub static ref ENEMY_TRAP:Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    pub static ref TIME_FROZEN: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    pub static ref PLAYER_AURA: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    pub static ref ENEMY_AURA: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    pub static ref PLAYER_BARRIER: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
+    pub static ref ENEMY_BARRIER: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+
     //xy of player grid position
     pub static ref PLAYER_GRID_POSITION: Arc<Mutex<(u16, u16)>> = Arc::new(Mutex::new((0, 0)));
 
@@ -135,6 +156,125 @@ lazy_static! {
     // Global variable for storing enemy Navi Cust parts
     pub static ref ENEMY_NAVI_CUST_PARTS: Arc<Mutex<Option<Vec<usize>>>> = Arc::new(Mutex::new(None));
 
+}
+
+
+// ================== Time Frozen Getters and Setters ==================
+pub fn set_time_frozen(value: u16) {
+    let mut time_frozen = TIME_FROZEN.lock();
+    *time_frozen = value;
+}
+pub fn get_time_frozen() -> u16 {
+    let time_frozen = TIME_FROZEN.lock();
+    *time_frozen
+}
+
+// ================== Player Aura Getters and Setters ==================
+pub fn set_player_aura(value: u16) {
+    let mut player_aura = PLAYER_AURA.lock();
+    *player_aura = value;
+}
+pub fn get_player_aura() -> u16 {
+    let player_aura = PLAYER_AURA.lock();
+    *player_aura
+}
+
+// ================== Enemy Aura Getters and Setters ==================
+pub fn set_enemy_aura(value: u16) {
+    let mut enemy_aura = ENEMY_AURA.lock();
+    *enemy_aura = value;
+}
+pub fn get_enemy_aura() -> u16 {
+    let enemy_aura = ENEMY_AURA.lock();
+    *enemy_aura
+}
+
+// ================== Player Barrier Getters and Setters ==================
+pub fn set_player_barrier(value: u16) {
+    let mut player_barrier = PLAYER_BARRIER.lock();
+    *player_barrier = value;
+}
+pub fn get_player_barrier() -> u16 {
+    let player_barrier = PLAYER_BARRIER.lock();
+    *player_barrier
+}
+
+// ================== Enemy Barrier Getters and Setters ==================
+pub fn set_enemy_barrier(value: u16) {
+    let mut enemy_barrier = ENEMY_BARRIER.lock();
+    *enemy_barrier = value;
+}
+
+pub fn get_enemy_barrier() -> u16 {
+    let enemy_barrier = ENEMY_BARRIER.lock();
+    *enemy_barrier
+}
+
+// ================== Grid Occupy State Getters and Setters ==================
+pub fn set_grid_occupy_state(index: usize, value: u16) -> Result<(), String> {
+    if index < GRID_OCCUPY_STATE.len() {
+        let state = &GRID_OCCUPY_STATE[index];
+        let mut state_lock = state.lock();
+        *state_lock = value;
+        Ok(())
+    } else {
+        Err(format!("Grid occupy state index {} out of bounds", index))
+    }
+}
+pub fn get_grid_occupy_state(index: usize) -> Option<u16> {
+    if index < GRID_OCCUPY_STATE.len() {
+        let state = &GRID_OCCUPY_STATE[index];
+        Some(*state.lock())
+    } else {
+        None
+    }
+}
+
+pub fn get_all_grid_occupy_states() -> Vec<u16> {
+    GRID_OCCUPY_STATE.iter().map(|state| *state.lock()).collect()
+}
+
+// ================== Player Invis Getters and Setters ==================
+pub fn set_player_invis(value: u16) {
+    let mut player_invis = PLAYER_INVIS.lock();
+    *player_invis = value;
+}
+pub fn get_player_invis() -> u16 {
+    let player_invis = PLAYER_INVIS.lock();
+    *player_invis
+}
+
+// ================== Enemy Invis Getters and Setters ==================
+pub fn set_enemy_invis(value: u16) {
+    let mut enemy_invis = ENEMY_INVIS.lock();
+    *enemy_invis = value;
+}
+pub fn get_enemy_invis() -> u16 {
+    let enemy_invis = ENEMY_INVIS.lock();
+    *enemy_invis
+}
+
+// ================== Player Trap Getters and Setters ==================
+pub fn set_player_trap(value: u16) {
+    let mut player_trap = PLAYER_TRAP.lock();
+    *player_trap = value;
+}
+
+pub fn get_player_trap() -> u16 {
+    let player_trap = PLAYER_TRAP.lock();
+    *player_trap
+}
+
+// ================== Enemy Trap Getters and Setters ==================
+
+pub fn set_enemy_trap(value: u16) {
+    let mut enemy_trap = ENEMY_TRAP.lock();
+    *enemy_trap = value;
+}
+
+pub fn get_enemy_trap() -> u16 {
+    let enemy_trap = ENEMY_TRAP.lock();
+    *enemy_trap
 }
 
 // ================== Player Navi Cust Parts Getters and Setters ==================

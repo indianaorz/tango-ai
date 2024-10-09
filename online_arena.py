@@ -266,14 +266,14 @@ def perform_final_training(wandb_run, save = True):
 
 async def main():
     # Initialize wandb
-    wandb_config = config.copy()
-    wandb.init(
-        project=wandb_config.get('wandb_project', 'online_arena'),
-        config=wandb_config,
-        name=wandb_config.get('run_name', f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"),
-        resume="allow",  # Allows resuming the run if it exists
-    )
-    wandb_run = wandb.run
+    # wandb_config = config.copy()
+    # wandb.init(
+    #     project=wandb_config.get('wandb_project', 'online_arena'),
+    #     config=wandb_config,
+    #     name=wandb_config.get('run_name', f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"),
+    #     resume="allow",  # Allows resuming the run if it exists
+    # )
+    # wandb_run = wandb.run
 
     # Load or set initial GAMMA parameters
     initial_gamma = config.get('gamma', {}).get('initial', 0.25)
@@ -318,11 +318,11 @@ async def main():
         await asyncio.sleep(1)  # Adjust the delay time as needed
 
     # Optionally, finish the wandb run when the loop ends
-    wandb.finish()
+    # wandb.finish()
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Process interrupted. Exiting...")
-        wandb.finish()  # Ensure wandb finishes properly on interrupt
+        # wandb.finish()  # Ensure wandb finishes properly on interrupt
