@@ -1,256 +1,101 @@
 # utils.py
+import random
 import os
-import glob
-import re
-from datetime import datetime
+import torch
+import torchvision.transforms.functional as TF
+from PIL import Image
+import numpy as np
 
-def get_root_dir():
-    return '../TANGO'#'/home/lee/tango' #'../TANGO'#'/media/lee/A416C57D16C5514A/Users/Lee/FFCO/ai/TANGO'
+def int_to_binary_string(value):
+    return format(value, '016b')
 
-def get_image_memory():
-    return 10
+def generate_random_action_for_skip_strategy(key_bit_positions, random_action_keys):
+    binary_command = 0
+    num_keys_to_press = random.choices([0, 1, 2], weights=[0.3, 0.5, 0.2], k=1)[0]
+    if num_keys_to_press > 0:
+        selected_keys = random.sample(random_action_keys, num_keys_to_press)
+        for key_name in selected_keys:
+            if key_name in key_bit_positions:
+                binary_command |= (1 << key_bit_positions[key_name])
+    return int_to_binary_string(binary_command)
 
-def get_exponental_amount():
-    return 1
+def map_discrete_action_to_buttons(action_index, discrete_actions_map, key_bit_positions_map):
+    """Maps an AI's discrete action index to a button command string."""
+    if action_index < 0 or action_index >= len(discrete_actions_map):
+        print(f"Warning: Action index {action_index} out of bounds. Defaulting to NO_OP.")
+        return int_to_binary_string(0)
 
+    action_name = discrete_actions_map[action_index]
+    binary_command = 0
 
-def get_threshold():
-    return 0.7
-
-def get_threshold_plan():
-    return 0.7
-
-def inference_fps():
-    return 60
-
-default_checkpoint_path = get_root_dir() + '/checkpoints'
-#checkpoint path
-def get_checkpoint_dir(model_type='planning', image_memory=1, button=None):
-    """
-    Constructs the checkpoint directory path based on model type and image memory.
-    """
-    root_dir = get_root_dir()
-    if button:
-        checkpoint_dir = os.path.join(root_dir, 'checkpoints', model_type, str(image_memory), button)
+    if action_name == "NO_OP":
+        pass
+    elif action_name == "UP":
+        binary_command |= (1 << key_bit_positions_map['UP'])
+    elif action_name == "DOWN":
+        binary_command |= (1 << key_bit_positions_map['DOWN'])
+    elif action_name == "LEFT":
+        binary_command |= (1 << key_bit_positions_map['LEFT'])
+    elif action_name == "RIGHT":
+        binary_command |= (1 << key_bit_positions_map['RIGHT'])
+    elif action_name == "X":
+        binary_command |= (1 << key_bit_positions_map['X'])
+    elif action_name == "A":
+        binary_command |= (1 << key_bit_positions_map['A'])
+    elif action_name == "LEFT_X":
+        binary_command |= (1 << key_bit_positions_map['LEFT'])
+        binary_command |= (1 << key_bit_positions_map['X'])
+    elif action_name == "RIGHT_X":
+        binary_command |= (1 << key_bit_positions_map['RIGHT'])
+        binary_command |= (1 << key_bit_positions_map['X'])
+    elif action_name == "UP_X":
+        binary_command |= (1 << key_bit_positions_map['UP'])
+        binary_command |= (1 << key_bit_positions_map['X'])
+    elif action_name == "DOWN_X":
+        binary_command |= (1 << key_bit_positions_map['DOWN'])
+        binary_command |= (1 << key_bit_positions_map['X'])
+    # Add other mappings for new discrete actions here
     else:
-        checkpoint_dir = os.path.join(root_dir, 'checkpoints', model_type, str(image_memory))
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    return checkpoint_dir
+        print(f"Warning: Unmapped action name '{action_name}'. Defaulting to NO_OP.")
+
+    return int_to_binary_string(binary_command)
 
 
-def one_hot_encode_chip(value, size=400):
-    """
-    One-hot encodes a chip value. If the value is out of range, returns a zero tensor.
+
+def preprocess_frame(frame_pil_image, height, width):
+  """Preprocesses a single PIL image frame for the DRL model."""
+  if frame_pil_image is None: # Handle cases where image might be missing
+    return torch.zeros((1, height, width), dtype=torch.float32)
+  img = frame_pil_image.convert("L") # Grayscale
+  img = TF.resize(img, [height, width], antialias=True)
+  img_tensor = TF.to_tensor(img) # Converts to [C, H, W] and scales to [0, 1]
+  return img_tensor # Shape: [1, H, W]
+
+def normalize_value(value, current_max, default_max=1.0):
+    """Normalizes a value, updating current_max if value is higher."""
+    if value is None: return 0.0
+    true_max = max(current_max, value, default_max) # Ensure current_max doesn't shrink below default_max
+    return float(value) / true_max, true_max
+
+def get_grid_coordinates(pixel_pos, game_width=240, game_height=160, grid_cols=6, grid_rows=3):
+    """Converts pixel coordinates to approximate grid cell coordinates (1-indexed)."""
+    # This is a placeholder. You'll need to fine-tune based on your game's actual panel layout.
+    # The example data had 'player_grid_position': [6, 2] directly. If that's always available, use it.
+    if pixel_pos is None: return None
     
-    Args:
-        value (int): The chip value to encode.
-        size (int): The size of the one-hot vector.
+    # Example simple mapping if player_grid_position is not directly available
+    # These values (20, 518) seem to be from a different coordinate system or scaled.
+    # Assuming your game panels:
+    # X: 0-3 (player side), 4-7 (enemy side) -- needs calibration
+    # Y: 0-2 (rows)
     
-    Returns:
-        torch.Tensor: One-hot encoded tensor of shape (size,).
-    """
-    if 0 <= value < size:
-        one_hot = torch.zeros(size, dtype=torch.float32, device=device)
-        one_hot[value] = 1.0
-    else:
-        one_hot = torch.zeros(size, dtype=torch.float32, device=device)
-    return one_hot
+    # If using the server-provided grid positions:
+    # return pixel_pos # if pixel_pos is already like [col, row]
 
-
-def extract_number_from_checkpoint(checkpoint_path):
-    """
-    Extracts the numerical part from the checkpoint filename.
-    Example: 'checkpoint_5.pt' -> 5
-    """
-    basename = os.path.basename(checkpoint_path)
-    match = re.search(r'checkpoint_(\d+)\.pt', basename)
-    if match:
-        return int(match.group(1))
-    else:
-        raise ValueError(f"Invalid checkpoint filename: {checkpoint_path}")
-    
-import os
-import glob
-
-def get_latest_checkpoint(model_type='planning', image_memory=1, append=0, button=None):
-    """
-    Returns the path to the latest checkpoint for the specified model type, image memory, and optionally a button.
-    If no checkpoint exists, returns None.
-
-    Args:
-        model_type (str): Type of the model ('planning' or 'battle').
-        image_memory (int): The memory parameter used in the model.
-        append (int, optional): Number to append to the checkpoint number. Defaults to 0.
-        button (str, optional): Name of the button (e.g., 'MENU', 'SHOOT'). Defaults to None.
-
-    Returns:
-        str or None: Path to the latest checkpoint file or None if no checkpoint is found.
-    """
-    # Construct the checkpoint directory path
-    checkpoint_dir = get_checkpoint_dir(model_type, image_memory, button)
-    
-    # Check if the checkpoint directory exists
-    if not os.path.isdir(checkpoint_dir):
-        if button:
-            print(f"No checkpoint directory found for model_type='{model_type}', image_memory={image_memory}, button='{button}' in {checkpoint_dir}.")
-        else:
-            print(f"No checkpoint directory found for model_type='{model_type}', image_memory={image_memory} in {checkpoint_dir}.")
-        return None
-
-    # Find all checkpoint files with .pt extension
-    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, '*.pt'))
-    
-    if not checkpoint_files:
-        if button:
-            print(f"No checkpoint files found for button '{button}' in {checkpoint_dir}.")
-        else:
-            print(f"No checkpoint files found in {checkpoint_dir}.")
-        return None
-    
-    # Select the latest checkpoint based on creation time
-    latest_checkpoint = max(checkpoint_files, key=os.path.getctime)
-    
-    # Extract the number from the checkpoint filename
-    original_number = extract_number_from_checkpoint(latest_checkpoint)
-    
-    # Compute the new number by adding the append value
-    number = original_number + append
-    
-    # Replace the original number with the new number in the checkpoint path
-    # This assumes that the number appears only once in the filename and is unique
-    # Modify this logic if your filenames have multiple numbers or a different structure
-    checkpoint_filename = os.path.basename(latest_checkpoint)
-    new_checkpoint_filename = checkpoint_filename.replace(str(original_number), str(number))
-    latest_checkpoint = os.path.join(checkpoint_dir, new_checkpoint_filename)
-    
-    return latest_checkpoint
-
-
-def get_latest_checkpoint_plus1(model_type='planning', image_memory=1):
-    return get_latest_checkpoint(model_type, image_memory, 10, None)
-
-def get_latest_checkpoint_plus10(model_type='planning', image_memory=1):
-    return get_latest_checkpoint(model_type, image_memory, 10, None)
-
-def get_new_checkpoint_path(model_type='planning', image_memory=1):
-    """
-    Generates a new checkpoint path with a timestamp to ensure uniqueness.
-    """
-    checkpoint_dir = get_checkpoint_dir(model_type, image_memory)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    checkpoint_filename = f'checkpoint_{timestamp}.pt'
-    checkpoint_path = os.path.join(checkpoint_dir, checkpoint_filename)
-    return checkpoint_path
-
-
-# utils.py
-
-def get_exponential_sample(indices_list, current_idx, image_memory):
-    """
-    Returns a list of frame indices sampled exponentially from the current index.
-    Ensures exactly `image_memory` frames by allowing duplicates when necessary.
-
-    The sampling order is:
-        current frame, current-1, current-2, current-4, current-8, ...
-
-    If indices go below 0, they are clamped to 0.
-    The returned list is ordered from oldest to newest frame.
-    """
-    if not indices_list:
-        # print("get_exponential_sample: indices_list is empty.")
-        return []
-
-    # Ensure indices_list is sorted in ascending order
-    sorted_indices = sorted(indices_list)
-    earliest_idx = sorted_indices[0]
-    latest_idx = sorted_indices[-1]
-
-    # print(f"get_exponential_sample: earliest_idx={earliest_idx}, latest_idx={latest_idx}")
-
-    sampled_indices = []
-    step = 1
-    current = current_idx
-
-    for _ in range(image_memory):
-        if current < earliest_idx:
-            current = earliest_idx
-        sampled_indices.append(current)
-        # print(f"get_exponential_sample: Appending index {current}")
-        current -= step
-        step = 1#get_exponental_amount()  # Exponentially increase the step (1, 2, 4, 8, ...)
-
-    # Remove any excess frames
-    if len(sampled_indices) > image_memory:
-        sampled_indices = sampled_indices[:image_memory]
-
-    # To maintain chronological order (oldest to newest), sort the indices
-    sampled_indices_sorted = sorted(sampled_indices)
-    # print(f"get_exponential_sample: sampled_indices_sorted={sampled_indices_sorted}")
-
-    return sampled_indices_sorted
-
-# utils.py
-
-import math
-
-def position_to_grid(x, y):
-    """
-    Converts a (x, y) position to a 2D grid with a 1 marking the player's location.
-
-    Grid Configuration:
-    - Columns: 3
-    - Rows: 6
-    - X-axis range: 20 to 220
-    - Y-axis range: 258 to 773
-
-    Args:
-        x (float): The x-coordinate of the player's position.
-        y (float): The y-coordinate of the player's position.
-
-    Returns:
-        list[list[int]]: A 6x3 grid with a 1 in the player's cell and 0s elsewhere.
-    """
-    import math
-
-    # Grid boundaries and dimensions
-    GRID_START_X = 20
-    GRID_END_X = 220
-    GRID_START_Y = 258
-    GRID_END_Y = 773
-
-    COLUMNS = 3  # Changed to 3 to match HDF5 expectation
-    ROWS = 6     # Changed to 6 to match HDF5 expectation
-
-    GRID_WIDTH = GRID_END_X - GRID_START_X  # 200
-    GRID_HEIGHT = GRID_END_Y - GRID_START_Y  # 515
-
-    COLUMN_WIDTH = GRID_WIDTH / COLUMNS  # ~66.666
-    ROW_HEIGHT = GRID_HEIGHT / ROWS      # ~85.8333
-
-    # Calculate column index
-    col = math.floor((x - GRID_START_X) / COLUMN_WIDTH)
-    # Calculate row index
-    row = math.floor((y - GRID_START_Y) / ROW_HEIGHT)
-
-    # if x or y is out of bounds, return an empty grid
-    if col < 0 or col >= COLUMNS or row < 0 or row >= ROWS:
-        return [[0 for _ in range(COLUMNS)] for _ in range(ROWS)]
-
-    # Initialize grid with 0s
-    grid = [[0 for _ in range(COLUMNS)] for _ in range(ROWS)]
-
-    # Mark the player's position with a 1
-    grid[row][col] = 1
-
-    return grid  # Shape: (6, 3)
-
-
-# Example Usage
-if __name__ == "__main__":
-    # Example player position
-    player_x = 20
-    player_y = 5130
-
-    grid = position_to_grid(player_x, player_y)
-    for row in grid:
-        print(row)
+    # If you must convert from raw pixel x,y:
+    # panel_width = game_width / grid_cols
+    # panel_height = game_height / grid_rows
+    # col = int(pixel_pos[0] / panel_width) + 1
+    # row = int(pixel_pos[1] / panel_height) + 1
+    # return [min(grid_cols, max(1, col)), min(grid_rows, max(1, row))]
+    return None # Placeholder until coordinates are clear

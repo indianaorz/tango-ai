@@ -1032,7 +1032,9 @@ async fn handle_tcp_client(
                                         }
                                     }
                                 } else {
-                                    println!("Failed to parse input command");
+                                    // println!("Failed to parse input command");
+                                    //detailed log of the input command
+                                    println!("Failed to parse input command: {}", line);
                                 }
                             }
                         }
