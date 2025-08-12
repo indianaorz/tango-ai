@@ -1,226 +1,293 @@
-import time
+import time, base64
 from collections import defaultdict, deque
-import torch
-import torch.nn.functional as F # For softmax
-from PIL import Image
 from io import BytesIO
-import base64
+import torch
+from PIL import Image
+
+
+class DRLAgentStrategy:
+    """Actor-Critic wrapper with per-env observation state + robust menu-skip FSM."""
+
+    def __init__(self,
+                 key_bit_positions,
+                 discrete_actions,
+                 util_fns,
+                 actor_critic_model,
+                 device,
+                 frame_h: int,
+                 frame_w: int,
+                 seq_len_frames: int,
+                 *,
+                 max_health_config: float,
+                 max_charge_config: float,
+                 max_cust_gauge_config: float):
+
+        self.key_bits         = key_bit_positions
+        self.discrete_actions = discrete_actions
+        self.bin16            = util_fns["int_to_binary_string"]
+        self.map_discrete     = util_fns["map_discrete_action_to_buttons"]
+        self.preprocess_frame = util_fns.get("preprocess_frame")
+
+        self.model      = actor_critic_model
+        self.dev        = device
+        self.H, self.W  = frame_h, frame_w
+        self.T          = seq_len_frames
+
+        # normalisation constants
+        self.max_hp     = max_health_config
+        self.max_charge = max_charge_config
+        self.max_cust   = max_cust_gauge_config
+
+        # per-env rolling buffers
+        self._frames = defaultdict(lambda: deque(maxlen=self.T))  # [C,H,W] tensors
+        self._feats  = defaultdict(lambda: deque(maxlen=self.T))  # 1-D tensors
+
+        # per-env menu FSM + held bits
+        self._skip       = defaultdict(lambda: {'phase': 'INIT', 'ts': 0.0})
+        self._held_bits  = defaultdict(int)
+
+    # ──────────────────────────────────────────────────────────────────
+    # helpers
+    # ──────────────────────────────────────────────────────────────────
+    def _append_obs(self, port, pil_img, raw):
+        f_t = self.preprocess_frame(pil_img, self.H, self.W)  # [C,H,W], float 0-1
+        self._frames[port].append(f_t)
+
+        # scalar features (keep order stable)
+        pg = raw.get('player_grid_position', [1, 1])
+        eg = raw.get('enemy_grid_position',  [4, 1])
+        cust = raw.get('cust_gauge', raw.get('cust_gage', 0))
+
+        feat = [
+            raw.get('player_health', 0) / self.max_hp,
+            raw.get('enemy_health',  0) / self.max_hp,
+            (pg[0] - 1) / 5, (pg[1] - 1) / 2,
+            (eg[0] - 1) / 5, (eg[1] - 1) / 2,
+            raw.get('player_charge', 0) / self.max_charge,
+            raw.get('enemy_charge',  0) / self.max_charge,
+            cust / self.max_cust,
+            1.0 if raw.get('is_player_beasted_out') else 0.0,
+            1.0 if raw.get('is_enemy_beasted_out') else 0.0,
+        ]
+        self._feats[port].append(torch.tensor(feat, dtype=torch.float32))
+
+        # left-pad early timesteps
+        while len(self._frames[port]) < self.T:
+            self._frames[port].appendleft(torch.zeros_like(f_t))
+            self._feats [port].appendleft(torch.zeros_like(self._feats[port][-1]))
+
+    def _get_seq_tensors(self, port):
+        frames = torch.stack(list(self._frames[port]), 0).unsqueeze(0).to(self.dev)  # [1,T,C,H,W]
+        feats  = torch.stack(list(self._feats [port]), 0).unsqueeze(0).to(self.dev)  # [1,T,F]
+        return frames, feats
+
+    # ──────────────────────────────────────────────────────────────────
+    # robust menu skip (Return → pause → Z → pause → loop)
+    # ──────────────────────────────────────────────────────────────────
+    def _ensure_skip_shape(self, port):
+        """Migrate any legacy _skip[port] dicts to the new {'phase','ts'} shape."""
+        st = self._skip[port]
+        if 'phase' not in st or 'ts' not in st:
+            self._skip[port] = {'phase': 'INIT', 'ts': 0.0}
+        return self._skip[port]
+
+    def _skip_menu(self, port):
+        st  = self._ensure_skip_shape(port)
+        now = time.time()
+
+        def elapsed(sec): return (now - st['ts']) >= sec
+
+        phase = st['phase']
+
+        if phase == 'INIT':
+            if st['ts'] == 0.0:
+                st['ts'] = now
+                return 0
+            if elapsed(0.30):                    # settle 300 ms
+                st['phase'] = 'HOLD_RETURN'; st['ts'] = now
+            return 0
+
+        if phase == 'HOLD_RETURN':
+            if not elapsed(0.22):                # hold Return ~220 ms
+                return 1 << self.key_bits['RETURN']
+            st['phase'] = 'PAUSE1'; st['ts'] = now
+            return 0
+
+        if phase == 'PAUSE1':
+            if not elapsed(0.10):                # gap
+                return 0
+            st['phase'] = 'TAP_Z'; st['ts'] = now
+            return 0
+
+        if phase == 'TAP_Z':
+            if not elapsed(0.12):                # hold Z ~120 ms
+                return 1 << self.key_bits['Z']
+            st['phase'] = 'PAUSE2'; st['ts'] = now
+            return 0
+
+        if phase == 'PAUSE2':
+            if not elapsed(0.10):                # gap
+                return 0
+            st['phase'] = 'HOLD_RETURN'; st['ts'] = now  # loop while still in window
+            return 0
+
+        # fallback
+        st['phase'] = 'INIT'; st['ts'] = now
+        return 0
+
+    # ──────────────────────────────────────────────────────────────────
+    # policy step
+    # ──────────────────────────────────────────────────────────────────
+    def decide_action(self, port, game_state):
+        in_menu = bool(game_state.get("inside_window", False))
+
+        if in_menu:
+            # do NOT carry battle holds into menus
+            self._held_bits[port] = 0
+            # drive the menu-skip FSM
+            key_bits = self._skip_menu(port)
+            return {
+                "button_command": {"type": "key_press", "key": self.bin16(key_bits)},
+                "action_idx": None, "log_prob": None, "value": None,
+                "stacked_frames_tensor": None, "game_features_tensor": None,
+            }
+
+        # leaving menu → reset FSM cleanly
+        st = self._ensure_skip_shape(port)
+        if st['phase'] != 'INIT':
+            self._skip[port] = {'phase': 'INIT', 'ts': 0.0}
+
+        # encode observation
+        pil = None
+        b64 = game_state.get("image")
+        if b64:
+            try:
+                pil = Image.open(BytesIO(base64.b64decode(b64)))
+            except Exception:
+                pil = None
+
+        self._append_obs(port, pil, game_state)
+        seq_f, seq_feat = self._get_seq_tensors(port)
+
+        # model forward (stochastic during training)
+        self.model.eval()
+        with torch.no_grad():
+            a_idx, log_p, _, value, _ = self.model.get_action_and_value(seq_f, seq_feat)
+
+        action_name = self.discrete_actions[a_idx.item()]
+        frame_mask  = int(self.map_discrete(a_idx.item(), self.discrete_actions, self.key_bits), 2)
+
+        # sticky holds (explicit RELEASE_* clears; taps don’t affect the latch)
+        X_bit = 1 << self.key_bits["X"]
+        Z_bit = 1 << self.key_bits["Z"]
+
+        if action_name == "HOLD_X":
+            self._held_bits[port] |= X_bit
+        elif action_name == "HOLD_Z":
+            self._held_bits[port] |= Z_bit
+        elif action_name == "RELEASE_X":
+            self._held_bits[port] &= ~X_bit
+        elif action_name == "RELEASE_Z":
+            self._held_bits[port] &= ~Z_bit
+        # NOTE: choosing "X" or "Z" (tap) does not toggle the latch
+
+        final_mask = frame_mask | self._held_bits[port]
+
+        return {
+            "button_command": {"type": "key_press", "key": self.bin16(final_mask)},
+            "action_idx": a_idx,
+            "log_prob":   log_p,
+            "value":      value,
+            "stacked_frames_tensor": seq_f,
+            "game_features_tensor":  seq_feat,
+        }
+
+    def reset_state(self, port):
+        self._frames[port].clear()
+        self._feats [port].clear()
+        self._skip  [port] = {'phase': 'INIT', 'ts': 0.0}   # ← consistent shape
+        self._held_bits[port] = 0
+
+# -----------------------------------------------------------------------------
+# Base Strategy ----------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 class ActionStrategy:
-    """Base class for all action decision strategies."""
-    def __init__(self, key_bit_positions_map, discrete_actions_map, util_functions):
-        self.key_bit_positions = key_bit_positions_map
-        self.discrete_actions = discrete_actions_map
-        self.utils_int_to_binary_string = util_functions['int_to_binary_string']
-        self.utils_map_discrete_action_to_buttons = util_functions['map_discrete_action_to_buttons']
-        self.utils_preprocess_frame = util_functions.get('preprocess_frame')
-        self.utils_generate_random_action = util_functions.get('generate_random_action_for_skip_strategy')
+    """Common interface all concrete strategies must expose."""
 
-    def decide_action(self, port, game_state_dict):
-        raise NotImplementedError("Subclasses must implement the decide_action method.")
+    def __init__(self,
+                 key_bit_positions: dict[str, int],
+                 discrete_actions: list[str],
+                 util_fns: dict):
+        # button‑bit mapping & action‑list come from config
+        self.key_bits        = key_bit_positions        # e.g. {'UP':6, ...}
+        self.discrete_actions= discrete_actions          # e.g. ["NO_OP","UP", ...]
+        # helper lambdas passed in from utils.py so we keep strategy self‑contained
+        self.bin16           = util_fns["int_to_binary_string"]
+        self.map_discrete    = util_fns["map_discrete_action_to_buttons"]
+        self.preprocess_frame= util_fns.get("preprocess_frame")  # DRL only
+        self.rand_skip_act   = util_fns.get("generate_random_action_for_skip_strategy")
 
-    def reset_state(self, port):
-        pass # Optional for subclasses to implement
+    # interface -----------------------------------------------------------------
+    def decide_action(self, port: int, game_state: dict):  # -> dict (see callers)
+        raise NotImplementedError
 
+    def reset_state(self, port: int):                      # optional
+        pass
+
+# -----------------------------------------------------------------------------
+# Skip‑and‑Random Strategy (simple hand‑crafted baseline) -----------------------
+# -----------------------------------------------------------------------------
 
 class SkipAndRandomStrategy(ActionStrategy):
-    """Implements the MVP skip logic and random actions for non-DRL scenarios."""
-    def __init__(self, key_bit_positions_map, discrete_actions_map, util_functions, random_battle_action_keys):
-        super().__init__(key_bit_positions_map, discrete_actions_map, util_functions)
-        self.random_battle_action_keys = random_battle_action_keys
-        # Note: This strategy still uses the tuple-based state for its skip logic.
-        # If it needs the same alternating Z behavior, its skip logic and state would also need updating.
-        self._skip_logic_state = defaultdict(lambda: (0, 0.0)) # (state_code, timestamp)
+    """Spams RETURN/Z in chip‑select windows and else presses random movement."""
 
-    def decide_action(self, port, game_state_dict):
-        inside_window_flag = game_state_dict.get('inside_window', False)
-        action_to_send_str = '0000000000000000' # Default NO_OP
+    def __init__(self,
+                 key_bit_positions,
+                 discrete_actions,
+                 util_fns,
+                 random_action_keys):
+        super().__init__(key_bit_positions, discrete_actions, util_fns)
+        self.random_keys    = random_action_keys
+        # per‑port FSM state → (state_code, timestamp)
+        self._state         = defaultdict(lambda: (0, 0.))
 
-        if inside_window_flag:
-            current_state_code, timestamp = self._skip_logic_state[port]
-            if current_state_code == 0: # Just entered window, start initial wait
-                self._skip_logic_state[port] = (10, time.time())
-                # print(f"Port {port} (SR): Entered window. State 0->10. Initial 0.5s wait.")
-            elif current_state_code == 10: # Initial 0.5s wait
-                if time.time() - timestamp >= 0.5:
-                    self._skip_logic_state[port] = (11, time.time())
-                    # print(f"Port {port} (SR): State 10->11. Initial wait over. Sending RETURN.")
-                    action_to_send_str = self.utils_int_to_binary_string(1 << self.key_bit_positions['RETURN'])
-            elif current_state_code == 11: # First RETURN sent, waiting 1s for Z.
-                # Original SkipAndRandom logic: spam RETURN, then final Z.
-                # If this strategy also needs the "alternate Z and NO_OP" logic,
-                # this section needs to be updated similar to DRLAgentStrategy.
-                if time.time() - timestamp >= 1.0: # Time for final Z
-                    self._skip_logic_state[port] = (12, 0.0)
-                    # print(f"Port {port} (SR): State 11->12. Sending Z.")
-                    action_to_send_str = self.utils_int_to_binary_string(1 << self.key_bit_positions['Z'])
-                else: # Still waiting, keep pressing RETURN
-                    # print(f"Port {port} (SR): State 11. Spamming RETURN before final Z.")
-                    action_to_send_str = self.utils_int_to_binary_string(1 << self.key_bit_positions['RETURN'])
-            # elif current_state_code == 12: # Z sent, sequence complete, send NO_OP
-            #     pass # Default NO_OP is fine
-            
-            return {
-                'button_command': {'type': 'key_press', 'key': action_to_send_str},
-                'action_idx': None, 'log_prob': None, 'value': None,
-                'stacked_frames_tensor': None, 'game_features_tensor': None
-            }
-        else: # Not in window
-            if self._skip_logic_state[port][0] != 0: # If was in a skipping state
-                self.reset_state(port)
-            
-            action_key_str = self.utils_generate_random_action(self.key_bit_positions, self.random_battle_action_keys)
-            return {
-                'button_command': {'type': 'key_press', 'key': action_key_str},
-                'action_idx': None, 'log_prob': None, 'value': None,
-                'stacked_frames_tensor': None, 'game_features_tensor': None
-            }
+    # ------------------------------------------------------------------
+    def _fsm_in_window(self, port):
+        code, ts = self._state[port]
+        now      = time.time()
+        key_bits = 0
+        if code == 0:                       # just entered window -> wait 0.5 s
+            self._state[port] = (1, now)
+        elif code == 1 and now-ts >= 0.5:   # send RETURN, begin spamming
+            key_bits          = 1 << self.key_bits['RETURN']
+            self._state[port] = (2, now)
+        elif code == 2:                     # keep RETURN for 1 s then Z
+            if now-ts >= 1.0:
+                key_bits          = 1 << self.key_bits['Z']
+                self._state[port] = (3, 0.)
+            else:
+                key_bits          = 1 << self.key_bits['RETURN']
+        # state 3 == finished, send NO_OP
+        return key_bits
 
-    def reset_state(self, port):
-        # print(f"Port {port} (SR): Resetting skip logic state.")
-        self._skip_logic_state[port] = (0, 0.0)
-
-
-class DRLAgentStrategy(ActionStrategy):
-    def __init__(self, key_bit_positions_map, discrete_actions_map, util_functions,
-                 actor_critic_model, device, frame_height, frame_width, num_frames_stacked,
-                 max_health_config, max_charge_config, max_cust_gauge_config):
-        super().__init__(key_bit_positions_map, discrete_actions_map, util_functions)
-        self.model = actor_critic_model
-        self.device = device
-        self.frame_height = frame_height
-        self.frame_width = frame_width
-        self.num_frames_stacked = num_frames_stacked
-
-        self.frame_buffers = defaultdict(lambda: deque(maxlen=self.num_frames_stacked))
-        
-        self.max_health = max_health_config
-        self.max_charge = max_charge_config
-        self.max_cust_gauge = max_cust_gauge_config
-        
-        # ** CORRECTED INITIALIZATION FOR _skip_logic_state_internal **
-        self._skip_logic_state_internal = defaultdict(lambda: {'code': 0, 'timestamp': 0.0, 'next_alternating_action': 'Z'})
-
-
-    def _preprocess_state(self, port, game_state_dict):
-        # 1. Image Data
-        b64_image = game_state_dict.get('image')
-        pil_image = None
-        if b64_image:
-            try:
-                pil_image = Image.open(BytesIO(base64.b64decode(b64_image)))
-            except Exception as e:
-                # print(f"Port {port} (DRL): Error decoding image: {e}")
-                pass 
-        
-        frame_tensor = self.utils_preprocess_frame(pil_image, self.frame_height, self.frame_width)
-
-        buffer = self.frame_buffers[port]
-        if pil_image is None and len(buffer) > 0: 
-            buffer.append(buffer[-1].clone()) 
+    # ------------------------------------------------------------------
+    def decide_action(self, port, game_state):
+        inside_win = bool(game_state.get('inside_window', False))
+        if inside_win:
+            key_bits = self._fsm_in_window(port)
         else:
-            buffer.append(frame_tensor)
-        
-        stacked_frames_list = list(buffer)
-        while len(stacked_frames_list) < self.num_frames_stacked:
-            stacked_frames_list.insert(0, torch.zeros_like(frame_tensor))
+            # reset FSM if we left the window
+            if self._state[port][0] != 0:
+                self._state[port] = (0, 0.)
+            key_bits = int(self.rand_skip_act(self.key_bits, self.random_keys), 2)
 
-        stacked_frames_tensor = torch.cat(stacked_frames_list, dim=0).unsqueeze(0).to(self.device)
+        return {
+            'button_command': {'type': 'key_press', 'key': self.bin16(key_bits)},
+            'action_idx': None, 'log_prob': None, 'value': None,
+            'stacked_frames_tensor': None, 'game_features_tensor': None
+        }
 
-        # 2. Numerical Game Features
-        features = []
-        features.append(float(game_state_dict.get('player_health', 0)) / self.max_health)
-        features.append(float(game_state_dict.get('enemy_health', 0)) / self.max_health)
-        player_grid_pos = game_state_dict.get('player_grid_position', [1, 1]) 
-        enemy_grid_pos = game_state_dict.get('enemy_grid_position', [4, 1])   
-        features.append((player_grid_pos[0] - 1) / 5.0) 
-        features.append((player_grid_pos[1] - 1) / 2.0)  
-        features.append((enemy_grid_pos[0] - 1) / 5.0)
-        features.append((enemy_grid_pos[1] - 1) / 2.0)
-        features.append(float(game_state_dict.get('player_charge', 0)) / self.max_charge)
-        features.append(float(game_state_dict.get('enemy_charge', 0)) / self.max_charge)
-        features.append(float(game_state_dict.get('cust_gage', 0)) / self.max_cust_gauge)
-        features.append(1.0 if game_state_dict.get('is_player_beasted_out', False) else 0.0)
-        features.append(1.0 if game_state_dict.get('is_enemy_beasted_out', False) else 0.0)
-        
-        game_features_tensor = torch.tensor(features, dtype=torch.float32).unsqueeze(0).to(self.device)
-        return stacked_frames_tensor, game_features_tensor
-
-    def decide_action(self, port, game_state_dict):
-        inside_window_flag = game_state_dict.get('inside_window', False)
-        action_to_send_str = '0000000000000000' # Default NO_OP
-
-        if inside_window_flag:
-            state_info = self._skip_logic_state_internal[port]
-            current_state_code = state_info['code']
-            
-            if current_state_code == 0: 
-                state_info['code'] = 1
-                state_info['timestamp'] = time.time()
-                action_to_send_str = '0000000000000000' 
-            elif current_state_code == 1: 
-                if time.time() - state_info['timestamp'] >= 0.5:
-                    state_info['code'] = 2
-                    state_info['next_alternating_action'] = 'Z' 
-                    action_to_send_str = self.utils_int_to_binary_string(1 << self.key_bit_positions['RETURN'])
-                else:
-                    action_to_send_str = '0000000000000000' 
-            elif current_state_code == 2: 
-                if state_info['next_alternating_action'] == 'Z':
-                    action_to_send_str = self.utils_int_to_binary_string(1 << self.key_bit_positions['Z'])
-                    state_info['next_alternating_action'] = 'NO_OP'
-                else: 
-                    action_to_send_str = '0000000000000000' 
-                    state_info['next_alternating_action'] = 'Z'
-            
-            num_gf = self.model.num_game_features if hasattr(self.model, 'num_game_features') else 11 
-            dummy_sf = torch.zeros(1, self.num_frames_stacked, self.frame_height, self.frame_width, device=self.device)
-            dummy_gf = torch.zeros(1, num_gf, device=self.device)
-            
-            action_idx_val = self.discrete_actions.index("NO_OP") 
-            if action_to_send_str == self.utils_int_to_binary_string(1 << self.key_bit_positions['RETURN']):
-                if "RETURN" in self.discrete_actions: action_idx_val = self.discrete_actions.index("RETURN")
-            elif action_to_send_str == self.utils_int_to_binary_string(1 << self.key_bit_positions['Z']):
-                 if "Z" in self.discrete_actions: action_idx_val = self.discrete_actions.index("Z")
-
-            return {
-                'button_command': {'type': 'key_press', 'key': action_to_send_str},
-                'action_idx': torch.tensor(action_idx_val, device=self.device, dtype=torch.long),
-                'log_prob': torch.tensor(0.0, device=self.device), 
-                'value': None, 
-                'stacked_frames_tensor': dummy_sf,
-                'game_features_tensor': dummy_gf
-            }
-        else: 
-            state_info = self._skip_logic_state_internal[port]
-            if state_info['code'] != 0: 
-                state_info['code'] = 0
-                state_info['timestamp'] = 0.0 
-                state_info['next_alternating_action'] = 'Z' 
-
-            stacked_frames, game_features = self._preprocess_state(port, game_state_dict)
-
-            self.model.eval() 
-            with torch.no_grad():
-                action_idx_tensor, log_prob_tensor, _, value_tensor = \
-                    self.model.get_action_and_value(stacked_frames, game_features)
-            
-            action_idx_item = action_idx_tensor.item() 
-            button_command_str = self.utils_map_discrete_action_to_buttons(
-                action_idx_item, self.discrete_actions, self.key_bit_positions
-            )
-            
-            return {
-                'button_command': {'type': 'key_press', 'key': button_command_str},
-                'action_idx': action_idx_tensor,
-                'log_prob': log_prob_tensor,
-                'value': value_tensor,
-                'stacked_frames_tensor': stacked_frames,
-                'game_features_tensor': game_features
-            }
-        
     def reset_state(self, port):
-        # print(f"Port {port} (DRL): Resetting strategy state (frame buffer & skip logic).")
-        self.frame_buffers[port].clear()
-        # ** CORRECTED RESET FOR _skip_logic_state_internal **
-        self._skip_logic_state_internal[port] = {'code': 0, 'timestamp': 0.0, 'next_alternating_action': 'Z'}
+        self._state[port] = (0, 0.)
+

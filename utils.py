@@ -6,6 +6,9 @@ import torchvision.transforms.functional as TF
 from PIL import Image
 import numpy as np
 
+#import DESCRETE_ACTIONS and KEY_BIT_POSITIONS from your config file
+from config import DISCRETE_ACTIONS, KEY_BIT_POSITIONS
+
 def int_to_binary_string(value):
     return format(value, '016b')
 
@@ -19,57 +22,95 @@ def generate_random_action_for_skip_strategy(key_bit_positions, random_action_ke
                 binary_command |= (1 << key_bit_positions[key_name])
     return int_to_binary_string(binary_command)
 
-def map_discrete_action_to_buttons(action_index, discrete_actions_map, key_bit_positions_map):
-    """Maps an AI's discrete action index to a button command string."""
+def map_discrete_action_to_buttons(action_index,
+                                   discrete_actions_map,
+                                   key_bit_positions_map):
+    """
+    Maps a discrete action index to a 16‑bit button mask string.
+
+    HOLD_* sets the bit this frame; RELEASE_* returns 0 so the strategy
+    can drop the persistent hold.
+    """
     if action_index < 0 or action_index >= len(discrete_actions_map):
         print(f"Warning: Action index {action_index} out of bounds. Defaulting to NO_OP.")
-        return int_to_binary_string(0)
+        return format(0, "016b")
 
-    action_name = discrete_actions_map[action_index]
-    binary_command = 0
+    name   = discrete_actions_map[action_index]
+    mask   = 0
+    kb     = key_bit_positions_map  # shorthand
 
-    if action_name == "NO_OP":
-        pass
-    elif action_name == "UP":
-        binary_command |= (1 << key_bit_positions_map['UP'])
-    elif action_name == "DOWN":
-        binary_command |= (1 << key_bit_positions_map['DOWN'])
-    elif action_name == "LEFT":
-        binary_command |= (1 << key_bit_positions_map['LEFT'])
-    elif action_name == "RIGHT":
-        binary_command |= (1 << key_bit_positions_map['RIGHT'])
-    elif action_name == "X":
-        binary_command |= (1 << key_bit_positions_map['X'])
-    elif action_name == "A":
-        binary_command |= (1 << key_bit_positions_map['A'])
-    elif action_name == "LEFT_X":
-        binary_command |= (1 << key_bit_positions_map['LEFT'])
-        binary_command |= (1 << key_bit_positions_map['X'])
-    elif action_name == "RIGHT_X":
-        binary_command |= (1 << key_bit_positions_map['RIGHT'])
-        binary_command |= (1 << key_bit_positions_map['X'])
-    elif action_name == "UP_X":
-        binary_command |= (1 << key_bit_positions_map['UP'])
-        binary_command |= (1 << key_bit_positions_map['X'])
-    elif action_name == "DOWN_X":
-        binary_command |= (1 << key_bit_positions_map['DOWN'])
-        binary_command |= (1 << key_bit_positions_map['X'])
-    # Add other mappings for new discrete actions here
+    # ── directional & single‑frame buttons ───────────────────────────
+    if name == "UP":       mask |= 1 << kb["UP"]
+    elif name == "DOWN":   mask |= 1 << kb["DOWN"]
+    elif name == "LEFT":   mask |= 1 << kb["LEFT"]
+    elif name == "RIGHT":  mask |= 1 << kb["RIGHT"]
+    elif name == "X":      mask |= 1 << kb["X"]
+    elif name == "Z":      mask |= 1 << kb["Z"]
+    elif name == "LEFT_X":
+        mask |= (1 << kb["LEFT"]) | (1 << kb["X"])
+    elif name == "RIGHT_X":
+        mask |= (1 << kb["RIGHT"]) | (1 << kb["X"])
+    elif name == "UP_X":
+        mask |= (1 << kb["UP"]) | (1 << kb["X"])
+    elif name == "DOWN_X":
+        mask |= (1 << kb["DOWN"]) | (1 << kb["X"])
+
+    # ── “sticky” actions (handled by DRLAgentStrategy) ───────────────
+    elif name in ("HOLD_X", "HOLD_Z"):
+        # holding just sets the bit this frame; persistence added later
+        if name.endswith("X"):
+            mask |= 1 << kb["X"]
+        else:
+            mask |= 1 << kb["Z"]
+
+    elif name in ("RELEASE_X", "RELEASE_Z", "NO_OP"):
+        mask = 0  # explicit no‑buttons frame
+
     else:
-        print(f"Warning: Unmapped action name '{action_name}'. Defaulting to NO_OP.")
+        print(f"Warning: Unmapped action '{name}'. Sending NO_OP.")
 
-    return int_to_binary_string(binary_command)
+    return format(mask, "016b")
+
+
+
+# ----------------------------------------------------------------------
+#  Discrete‑action  ⇆  16‑bit button‑mask  conversions
+# ----------------------------------------------------------------------
+def _build_bitmask_to_idx(discrete_actions, key_bit_positions):
+    """Pre‑compute {bitmask:int → action_idx:int} once at start‑up."""
+    table = {}
+    for idx in range(len(discrete_actions)):
+        mask_str = map_discrete_action_to_buttons(
+            idx, discrete_actions, key_bit_positions
+        )
+        table[int(mask_str, 2)] = idx
+    return table
+
+# Call **once** when the module is imported
+BITMASK_TO_ACTION_IDX = _build_bitmask_to_idx(
+    DISCRETE_ACTIONS, KEY_BIT_POSITIONS
+)
+
+def bitmask_to_action_index(bitmask: int) -> int:
+    """Returns the discrete‑action index for a pressed‑button mask."""
+    # Unknown combos fall back to NO_OP (index 0)
+    return BITMASK_TO_ACTION_IDX.get(bitmask, 0)
+
 
 
 
 def preprocess_frame(frame_pil_image, height, width):
-  """Preprocesses a single PIL image frame for the DRL model."""
-  if frame_pil_image is None: # Handle cases where image might be missing
-    return torch.zeros((1, height, width), dtype=torch.float32)
-  img = frame_pil_image.convert("L") # Grayscale
-  img = TF.resize(img, [height, width], antialias=True)
-  img_tensor = TF.to_tensor(img) # Converts to [C, H, W] and scales to [0, 1]
-  return img_tensor # Shape: [1, H, W]
+    """
+    Converts a PIL image to a [C,H,W] float tensor in **RGB**.
+    Scales pixels to [0,1].  If image is missing, returns zeros.
+    """
+    if frame_pil_image is None:
+        return torch.zeros((3, height, width), dtype=torch.float32)
+
+    img = frame_pil_image.convert("RGB")                # keep colour
+    img = TF.resize(img, [height, width], antialias=True)
+    img_tensor = TF.to_tensor(img)                      # [3,H,W], float32 0‑1
+    return img_tensor
 
 def normalize_value(value, current_max, default_max=1.0):
     """Normalizes a value, updating current_max if value is higher."""

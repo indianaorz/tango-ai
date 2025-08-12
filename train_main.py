@@ -16,7 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from collections import deque
 
-
+from models import ActorCriticCNNRNN
 
 # Import modular components
 
@@ -26,7 +26,7 @@ import utils
 
 from game_manager import GameManager
 
-from models import ActorCriticCNN
+# from models import ActorCriticCNN
 
 from experience_buffer import ExperienceBuffer
 
@@ -72,429 +72,302 @@ def find_latest_model_and_steps(model_dir, model_prefix="mmbn_ppo_model_"):
 
 
 
-async def main_drl_training_loop():
-
-  print(f"Starting DRL Training Script using device: {config.DEVICE}")
-
-  os.makedirs(config.TENSORBOARD_LOG_DIR, exist_ok=True)
-
-  os.makedirs(config.MODEL_SAVE_DIR, exist_ok=True)
-
- 
-
-  writer = SummaryWriter(log_dir=os.path.join(config.TENSORBOARD_LOG_DIR, f"mmbn_ppo_{int(time.time())}"))
-
- 
-
-  NUM_GAME_FEATURES_FOR_MODEL = 11
+class _RepeatingTimer:
+    def __init__(self):           # start “now”
+        self._t = time.time()
+    def every(self, seconds: float) -> bool:
+        """Returns True once every <seconds> seconds."""
+        now = time.time()
+        if now - self._t >= seconds:
+            self._t = now
+            return True
+        return False
+    
 
 
 
-  actor_critic_model = ActorCriticCNN(
+# ---------------------------------------------------------------------
+#  main training loop – auto‑heals missing windows
+# ---------------------------------------------------------------------
+async def main_drl_training_loop() -> None:
+    print(f"Starting DRL Training Script using device: {config.DEVICE}")
+    os.makedirs(config.TENSORBOARD_LOG_DIR, exist_ok=True)
+    os.makedirs(config.MODEL_SAVE_DIR,     exist_ok=True)
 
-    num_stacked_frames=config.NUM_FRAMES_STACKED,
+    writer = SummaryWriter(
+        log_dir=os.path.join(
+            config.TENSORBOARD_LOG_DIR, f"mmbn_ppo_{int(time.time())}"
+        )
+    )
 
-    num_game_features=NUM_GAME_FEATURES_FOR_MODEL,
+    # -----------------------------------------------------------------
+    # constants (short names so the code reads cleanly)
+    # -----------------------------------------------------------------
+    WINDOWS_TARGET   = config.NUM_GAME_PAIRS * 2
+    ROM_PATH         = config.ROM_PATH_DEFAULT
+    SAVE_TMPL        = config.SAVE_PATH_TEMPLATE
+    INIT_CODE_BASE   = config.INIT_CODE_DEFAULT
+    ADDRESS          = config.ADDRESS_DEFAULT
+    NUM_GAME_FEATURES_FOR_MODEL = 11      # <- keep in sync with model
 
-    num_actions=len(config.DISCRETE_ACTIONS),
+    # -----------------------------------------------------------------
+    # build Actor‑Critic
+    # -----------------------------------------------------------------
+    actor_critic_model = ActorCriticCNNRNN(
+        seq_len_frames    = config.SEQ_LEN_FRAMES,
+        num_game_features = NUM_GAME_FEATURES_FOR_MODEL,
+        num_actions       = len(config.DISCRETE_ACTIONS),
+        frame_height      = config.FRAME_HEIGHT,
+        frame_width       = config.FRAME_WIDTH,
+        frame_channels    = config.FRAME_CHANNELS,
+    ).to(config.DEVICE)
+    print("ActorCritic model instantiated.")
 
-    frame_height=config.FRAME_HEIGHT,
+    # resume checkpoint ------------------------------------------------
+    initial_total_steps_trained = 0
+    ckpt_file, ckpt_steps = find_latest_model_and_steps(config.MODEL_SAVE_DIR)
+    if ckpt_file:
+        try:
+            actor_critic_model.load_state_dict(
+                torch.load(ckpt_file, map_location=config.DEVICE)
+            )
+            initial_total_steps_trained = ckpt_steps
+            print(f"Loaded {ckpt_file} ({ckpt_steps} steps).")
+        except Exception as e:
+            print(f"⚠️  Failed to load checkpoint: {e}")
 
-    frame_width=config.FRAME_WIDTH
+    # -----------------------------------------------------------------
+    # helpers (buffer, trainer, strategy)
+    # -----------------------------------------------------------------
+    experience_buffer = ExperienceBuffer(
+        buffer_size       = config.EXPERIENCE_BUFFER_SIZE,
+        mini_batch_size   = config.MINI_BATCH_SIZE,
+        num_game_features = NUM_GAME_FEATURES_FOR_MODEL,
+        frame_shape = (
+            config.SEQ_LEN_FRAMES,
+            config.FRAME_CHANNELS,
+            config.FRAME_HEIGHT,
+            config.FRAME_WIDTH,
+        ),
+        gamma      = config.GAMMA,
+        gae_lambda = config.GAE_LAMBDA,
+        device     = config.DEVICE,
+    )
 
-  ).to(config.DEVICE)
+    ppo_trainer = PPOTrainer(
+        actor_critic_model = actor_critic_model,
+        learning_rate      = config.LEARNING_RATE,
+        ppo_clip_epsilon   = config.PPO_CLIP_EPSILON,
+        ppo_epochs         = config.PPO_EPOCHS,
+        value_loss_coef    = config.VALUE_LOSS_COEF,
+        entropy_coef       = config.ENTROPY_COEF,
+        device             = config.DEVICE,
+    )
 
-  print(f"ActorCritic model initialized with {NUM_GAME_FEATURES_FOR_MODEL} game features.")
+    util_funcs = {
+        "int_to_binary_string": utils.int_to_binary_string,
+        "map_discrete_action_to_buttons": utils.map_discrete_action_to_buttons,
+        "preprocess_frame": utils.preprocess_frame,
+    }
+
+    drl_strategy = DRLAgentStrategy(
+        config.KEY_BIT_POSITIONS, config.DISCRETE_ACTIONS, util_funcs,
+        actor_critic_model, config.DEVICE,
+        config.FRAME_HEIGHT, config.FRAME_WIDTH, config.SEQ_LEN_FRAMES,
+        max_health_config   = config.MAX_HEALTH,
+        max_charge_config   = config.MAX_CHARGE_LEVEL,
+        max_cust_gauge_config = config.MAX_CUST_GAUGE_VALUE,
+    )
+    opponent_strategy = drl_strategy   # currently self‑play
+
+    shared = {
+        "episode_rewards":   deque(maxlen=100),
+        "episode_lengths":   deque(maxlen=100),
+        "steps_collected_since_last_train": 0,
+        "total_steps_trained":             initial_total_steps_trained,
+        "reward_batch":      {k: 0.0 for k in (
+            "damage_dealt","damage_taken","charge_gain",
+            "charge_shot","time_penalty","win","loss")},
+        "reward_cumulative": {k: 0.0 for k in (
+            "damage_dealt","damage_taken","charge_gain",
+            "charge_shot","time_penalty","win","loss")},
+    }
 
 
 
-  initial_total_steps_trained = 0
+    # -----------------------------------------------------------------
+    # Game‑process orchestration
+    # -----------------------------------------------------------------
+    game_mgr = GameManager(
+        config.APP_PATH, config.ENV_COMMON, config.INSTANCE_STAGGER_TIME,
+        base_port = config.BASE_PORT,
+    )
 
-  latest_model_file, loaded_steps = find_latest_model_and_steps(config.MODEL_SAVE_DIR)
+    # 1️⃣ launch initial windows --------------------------------------
+    instance_cfgs = game_mgr.start_initial_pairs(
+        num_pairs          = config.NUM_GAME_PAIRS,
+        rom_path           = ROM_PATH,
+        save_path_template = SAVE_TMPL,
+        init_code_base     = INIT_CODE_BASE,
+        address            = ADDRESS,
+    )
+
+    # build first batch of handlers -----------------------------------
+    handlers        : list[ConnectionHandler] = []
+    port_to_handler : dict[int, ConnectionHandler] = {}
+    pid_to_port     : dict[int, int] = {}
+
+    def _attach_handler(cfg):
+        strat = drl_strategy   # could be per‑role; single strat for now
+        h = ConnectionHandler(
+            cfg, strat, config.INFERENCE_FPS,
+            experience_buffer, shared, config, utils,
+        )
+        handlers.append(h)
+        port_to_handler[h.port] = h
+        # map PID→port once GameManager has registered the Popen obj
+        for pinfo in game_mgr.processes:
+            if pinfo["port"] == h.port:
+                pid_to_port[pinfo["process"].pid] = h.port
+                break
+        return h
+
+    for cfg in instance_cfgs:
+        _attach_handler(cfg)
+
+    # start manual‑input router (dicts are mutable — updates propagate)
+    from manual_input_router import ManualInputRouter
+    manual_router = ManualInputRouter(
+        port_to_handler, pid_to_port,
+        config.KEY_BIT_POSITIONS, utils.int_to_binary_string,
+    )
+    manual_router.start()
+
+    # schedule handler tasks ------------------------------------------
+    handler_tasks = [asyncio.create_task(h.start_handling()) for h in handlers]
+
+    # maintenance timers ----------------------------------------------
+    maint_timer   = _RepeatingTimer()   # every 2 s
+    log_timer     = _RepeatingTimer()   # every 30 s
+    
+    def _bootstrap_value_avg_over_handlers(model, handlers, device):
+        """
+        Compute an average V(s_{t+1}) over currently alive handlers to use as the
+        final bootstrap for GAE. This is not perfect per-env, but with correct
+        done-masks it’s a solid, low-variance estimate for the last step.
+        """
+        vals = []
+        model.eval()
+        with torch.no_grad():
+            for h in handlers:
+                sf = getattr(h, "prev_processed_stacked_frames", None)
+                gf = getattr(h, "prev_processed_game_features",  None)
+                if sf is None or gf is None:
+                    continue
+                _, _, _, v, _ = model.get_action_and_value(
+                    sf.to(device), gf.to(device)
+                )
+                vals.append(v.squeeze())
+        if vals:
+            return torch.stack(vals).mean().to(device)
+        return torch.tensor(0.0, device=device)
 
 
-
-  if latest_model_file:
-
+    # =================================================================
+    #  ░ main event‑loop ░
+    # =================================================================
     try:
+        while shared["total_steps_trained"] < config.MAX_TRAINING_STEPS:
+            # ----------------------------------------------------------
+            #  1. replace crashed / finished windows
+            # ----------------------------------------------------------
+            if maint_timer.every(2.0):
+                new_cfgs = game_mgr.maintain_window_count(
+                    WINDOWS_TARGET, ROM_PATH, SAVE_TMPL, INIT_CODE_BASE, ADDRESS
+                )
+                for cfg in new_cfgs:
+                    task = asyncio.create_task(_attach_handler(cfg).start_handling())
+                    handler_tasks.append(task)
+                if new_cfgs:
+                    print(f"🆕  Attached {len(new_cfgs)} fresh handler(s).")
 
-      print(f"Loading model from: {latest_model_file} with {loaded_steps} steps.")
+            # ----------------------------------------------------------
+            #  2. PPO update when buffer full
+            # ----------------------------------------------------------
+            if shared["steps_collected_since_last_train"] >= config.NUM_STEPS_PER_COLLECT:
+                print(f"\n--- Collected {shared['steps_collected_since_last_train']} steps. Starting PPO update ---")
+                actor_critic_model.train()
 
-      actor_critic_model.load_state_dict(torch.load(latest_model_file, map_location=config.DEVICE))
+                # --- compute bootstrap V(s_{t+1}) over current env states -----------
+                last_val_for_gae = _bootstrap_value_avg_over_handlers(
+                    actor_critic_model, handlers, config.DEVICE
+                )
 
-      initial_total_steps_trained = loaded_steps
+                # --- iterate mini-batches -------------------------------------------
+                tot_pol = tot_val = tot_ent = 0.0
+                n_batches = 0
+                for batch in experience_buffer.get_batches(last_val_for_gae):
+                    s_frames, s_feats, acts, old_log_ps, advs, rets, old_vs = batch
+                    p_loss, v_loss, ent = ppo_trainer.train_step(
+                        s_frames, s_feats, acts, old_log_ps, advs, rets, old_vs
+                    )
+                    tot_pol += p_loss; tot_val += v_loss; tot_ent += ent; n_batches += 1
 
-      print(f"Successfully loaded model. Resuming from {initial_total_steps_trained} steps.")
+                avg_pol = tot_pol / max(1, n_batches)
+                avg_val = tot_val / max(1, n_batches)
+                avg_ent = tot_ent / max(1, n_batches)
+
+                # --- bookkeeping ------------------------------------------------------
+                shared["total_steps_trained"] += shared["steps_collected_since_last_train"]
+                cur_steps = shared["total_steps_trained"]
+                shared["steps_collected_since_last_train"] = 0
+                update_idx = cur_steps // config.NUM_STEPS_PER_COLLECT
+
+                # --- TensorBoard logs -------------------------------------------------
+                if writer and shared["episode_rewards"]:
+                    avg_r = sum(shared["episode_rewards"]) / len(shared["episode_rewards"])
+                    avg_l = sum(shared["episode_lengths"]) / len(shared["episode_lengths"])
+                    writer.add_scalar("Charts/AverageEpisodeReward", avg_r, cur_steps)
+                    writer.add_scalar("Charts/AverageEpisodeLength",  avg_l, cur_steps)
+
+                writer.add_scalar("Losses/PolicyLoss", avg_pol, cur_steps)
+                writer.add_scalar("Losses/ValueLoss",  avg_val, cur_steps)
+                writer.add_scalar("Charts/Entropy",    avg_ent, cur_steps)
+
+                # reward breakdowns
+                for name, val in shared["reward_batch"].items():
+                    writer.add_scalar(f"Rewards/{name}", val, cur_steps)
+                    shared["reward_batch"][name] = 0.0
+                for name, cum_val in shared["reward_cumulative"].items():
+                    writer.add_scalar(f"RewardsCumulative/{name}", cum_val, cur_steps)
+
+                writer.flush()
+
+                # --- checkpoint -------------------------------------------------------
+                if update_idx > 0 and update_idx % config.MODEL_SAVE_FREQUENCY == 0:
+                    ckpt = os.path.join(config.MODEL_SAVE_DIR, f"mmbn_ppo_model_{cur_steps}.pth")
+                    torch.save(actor_critic_model.state_dict(), ckpt)
+                    print(f"✅  Model checkpoint saved to {ckpt}")
+
+
+            # ----------------------------------------------------------
+            #  3. occasional status log
+            # ----------------------------------------------------------
+            if log_timer.every(30.0):
+                print(f"[{time.strftime('%H:%M:%S')}] "
+                      f"windows: {len(game_mgr.processes)}/{WINDOWS_TARGET}  |  "
+                      f"steps: {shared['total_steps_trained']}")
+
+            # ----------------------------------------------------------
+            await asyncio.sleep(0.1)
 
     except Exception as e:
-
-      print(f"Error loading model from {latest_model_file}: {e}. Starting from scratch.")
-
-      initial_total_steps_trained = 0
-
-  else:
-
-    print("No saved models found. Starting training from scratch.")
-
-
-
-  experience_buffer = ExperienceBuffer(
-
-    buffer_size=config.NUM_STEPS_PER_COLLECT * len(config.INSTANCES),
-
-    mini_batch_size=config.MINI_BATCH_SIZE,
-
-    num_game_features=NUM_GAME_FEATURES_FOR_MODEL,
-
-    frame_shape=(config.NUM_FRAMES_STACKED, config.FRAME_HEIGHT, config.FRAME_WIDTH),
-
-    gamma=config.GAMMA,
-
-    gae_lambda=config.GAE_LAMBDA,
-
-    device=config.DEVICE
-
-  )
-
-
-
-  ppo_trainer = PPOTrainer(
-
-    actor_critic_model=actor_critic_model,
-
-    learning_rate=config.LEARNING_RATE,
-
-    ppo_clip_epsilon=config.PPO_CLIP_EPSILON,
-
-    ppo_epochs=config.PPO_EPOCHS,
-
-    value_loss_coef=config.VALUE_LOSS_COEF,
-
-    entropy_coef=config.ENTROPY_COEF,
-
-    device=config.DEVICE
-
-  )
-
-
-
-  util_funcs = {
-
-    'int_to_binary_string': utils.int_to_binary_string,
-
-    'map_discrete_action_to_buttons': utils.map_discrete_action_to_buttons,
-
-    'preprocess_frame': utils.preprocess_frame
-
-  }
-
-  drl_strategy = DRLAgentStrategy(
-
-    config.KEY_BIT_POSITIONS, config.DISCRETE_ACTIONS, util_funcs,
-
-    actor_critic_model, config.DEVICE,
-
-    config.FRAME_HEIGHT, config.FRAME_WIDTH, config.NUM_FRAMES_STACKED,
-
-    max_health_config=config.MAX_HEALTH,
-
-    max_charge_config=config.MAX_CHARGE_LEVEL,
-
-    max_cust_gauge_config=config.MAX_CUST_GAUGE_VALUE
-
-  )
-
-  opponent_strategy = drl_strategy
-
-
-
-  shared_episode_data = {
-
-    'episode_rewards': deque(maxlen=100), 'episode_lengths': deque(maxlen=100),
-
-    'steps_collected_since_last_train': 0,
-
-    'total_steps_trained': initial_total_steps_trained,
-
-  }
-
-
-
-  # GameManager is created once and reused
-
-  game_mgr = GameManager(config.APP_PATH, config.ENV_COMMON, config.INSTANCE_STAGGER_TIME)
-
-  first_session = True
-
-
-
-  try:
-
-    while shared_episode_data['total_steps_trained'] < config.MAX_TRAINING_STEPS:
-
-      if not first_session:
-
-        print(f"--- All game instances terminated. Attempting to restart in {config.GAME_RESTART_DELAY}s... ---")
-
-        await asyncio.sleep(config.GAME_RESTART_DELAY)
-
-      first_session = False
-
-     
-
-      print("--- Starting new training session / Restarting game instances ---")
-
-      game_mgr.terminate_all_instances() # Clean up any previous processes
-
-
-
-      if not game_mgr.start_all_instances(config.INSTANCES):
-
-        print("CRITICAL: Failed to start game instances. Exiting training loop.")
-
-        break
-
-     
-
-      print(f"Instances launched. Waiting {config.INSTANCE_INIT_WAIT_TIME}s for initialization...")
-
-      await asyncio.sleep(config.INSTANCE_INIT_WAIT_TIME)
-
-
-
-      current_session_handlers = []
-
-      for i, instance_cfg in enumerate(config.INSTANCES):
-
-        strat = drl_strategy if i == 0 else opponent_strategy
-
-        # Each new session gets new ConnectionHandler instances
-
-        # Strategy objects are reused, but their internal per-port state (like frame buffers)
-
-        # should be reset by ConnectionHandler's start_handling calling strategy.reset_state()
-
-        handler = ConnectionHandler(
-
-          instance_cfg, strat, config.INFERENCE_FPS,
-
-          experience_buffer, shared_episode_data, config, utils
-
-        )
-
-        current_session_handlers.append(handler)
-
-
-
-      if not current_session_handlers: # Should not happen if config.INSTANCES is populated
-
-        print("CRITICAL: No handlers created, instances might not have started. Exiting.")
-
-        break
-
-
-
-      current_session_tasks = [asyncio.create_task(h.start_handling()) for h in current_session_handlers]
-
-      print(f"Started {len(current_session_tasks)} connection handlers for this session.")
-
-     
-
-      session_active = True
-
-      while session_active and shared_episode_data['total_steps_trained'] < config.MAX_TRAINING_STEPS:
-
-        # Check if all handlers for the current session have stopped
-
-        if not any(not task.done() for task in current_session_tasks):
-
-          print("All connection handlers for the current session have completed or failed.")
-
-          session_active = False # Will break outer session loop after this iteration
-
-
-
-        # --- Data Collection & PPO Update ---
-
-        if shared_episode_data['steps_collected_since_last_train'] >= config.NUM_STEPS_PER_COLLECT:
-
-          print(f"\n--- Collected {shared_episode_data['steps_collected_since_last_train']} steps. Starting PPO Update ---")
-
-          actor_critic_model.train()
-
-
-
-          if experience_buffer.ptr == 0 and not experience_buffer.is_full:
-
-            last_val_for_gae = torch.tensor(0.0, device=config.DEVICE)
-
-            last_done_for_gae = torch.tensor(False, device=config.DEVICE)
-
-          else:
-
-            last_idx_in_buffer = (experience_buffer.ptr - 1 + experience_buffer.buffer_size) % experience_buffer.buffer_size
-
-            if experience_buffer.dones[last_idx_in_buffer]:
-
-              last_val_for_gae = torch.tensor(0.0, device=config.DEVICE)
-
-            else:
-
-              last_val_for_gae = experience_buffer.values[last_idx_in_buffer]
-
-            last_done_for_gae = experience_buffer.dones[last_idx_in_buffer]
-
-         
-
-          total_policy_loss_epoch, total_value_loss_epoch, total_entropy_epoch = 0,0,0
-
-          num_batches = 0
-
-
-
-          for batch_data in experience_buffer.get_batches(last_val_for_gae, last_done_for_gae):
-
-            s_frames, s_feats, acts, old_log_ps, advs, rets, old_vs = batch_data
-
-            policy_loss, value_loss, entropy = ppo_trainer.train_step(
-
-              s_frames, s_feats, acts, old_log_ps, advs, rets, old_vs
-
-            )
-
-            total_policy_loss_epoch += policy_loss
-
-            total_value_loss_epoch += value_loss
-
-            total_entropy_epoch += entropy
-
-            num_batches +=1
-
-         
-
-          avg_policy_loss = total_policy_loss_epoch / num_batches if num_batches > 0 else 0
-
-          avg_value_loss = total_value_loss_epoch / num_batches if num_batches > 0 else 0
-
-          avg_entropy = total_entropy_epoch / num_batches if num_batches > 0 else 0
-
-
-
-
-
-          shared_episode_data['total_steps_trained'] += shared_episode_data['steps_collected_since_last_train']
-
-          current_total_steps = shared_episode_data['total_steps_trained'] # For logging and saving this update cycle
-
-          shared_episode_data['steps_collected_since_last_train'] = 0
-
-
-
-          # Logging
-
-          current_update_num = current_total_steps // config.NUM_STEPS_PER_COLLECT if config.NUM_STEPS_PER_COLLECT > 0 else 0
-
-          if writer and len(shared_episode_data['episode_rewards']) > 0:
-
-            avg_reward = sum(shared_episode_data['episode_rewards']) / len(shared_episode_data['episode_rewards'])
-
-            avg_length = sum(shared_episode_data['episode_lengths']) / len(shared_episode_data['episode_lengths'])
-
-            writer.add_scalar('Charts/AverageEpisodeReward', avg_reward, current_total_steps)
-
-            writer.add_scalar('Charts/AverageEpisodeLength', avg_length, current_total_steps)
-
-            print(f"Update {current_update_num}, Total Steps: {current_total_steps}/{config.MAX_TRAINING_STEPS}, Avg Reward: {avg_reward:.2f}, Avg Length: {avg_length:.1f}")
-
-         
-
-          writer.add_scalar('Losses/PolicyLoss', avg_policy_loss, current_total_steps)
-
-          writer.add_scalar('Losses/ValueLoss', avg_value_loss, current_total_steps)
-
-          writer.add_scalar('Charts/Entropy', avg_entropy, current_total_steps)
-
-          writer.flush()
-
-
-
-          # Model Saving
-
-          if current_update_num > 0 and current_update_num % config.MODEL_SAVE_FREQUENCY == 0:
-
-            save_path = os.path.join(config.MODEL_SAVE_DIR, f"mmbn_ppo_model_{current_total_steps}.pth")
-
-            torch.save(actor_critic_model.state_dict(), save_path)
-
-            print(f"Model saved to {save_path}")
-
-       
-
-        if not session_active: # If handlers died, break inner loop after potential update
-
-          break
-
-       
-
-        await asyncio.sleep(0.1) # Yield control, check conditions periodically
-
-
-
-      # --- End of current session's inner loop ---
-
-      print(f"Session ended. Cleaning up {len(current_session_tasks)} tasks for this session...")
-
-      for task in current_session_tasks: # Cancel any still running tasks from this session
-
-        if not task.done():
-
-          task.cancel()
-
-      await asyncio.gather(*current_session_tasks, return_exceptions=True) # Wait for tasks to actually finish/cancel
-
-      print("Session tasks cleaned up.")
-
-
-
-      if shared_episode_data['total_steps_trained'] >= config.MAX_TRAINING_STEPS:
-
-        print("Maximum training steps reached.")
-
-        break # Break the outer training loop
-
-
-
-    # --- End of main training loop (while total_steps < MAX_TRAINING_STEPS) ---
-
-    print("Training loop finished or MAX_TRAINING_STEPS reached.")
-
-
-
-  except asyncio.CancelledError:
-
-    print("Main training loop cancelled.")
-
-  except Exception as e:
-
-    print(f"Error in main DRL training loop: {e}")
-
-    print(traceback.format_exc())
-
-  finally:
-
-    print("Closing TensorBoard writer...")
-
-    if writer: writer.close()
-
-    print("Terminating any remaining game instances...")
-
-    game_mgr.terminate_all_instances() # Final cleanup
-
-    print("Game instances terminated.")
-
-  # No need to return game_mgr from here as it's managed within the loop now
-
-
+        print(f"❌  Unhandled error in training loop: {e}")
+        print(traceback.format_exc())
+    finally:
+        print("Closing writer & killing game windows …")
+        writer.close()
+        game_mgr.terminate_all_instances()
 
 if __name__ == '__main__':
 

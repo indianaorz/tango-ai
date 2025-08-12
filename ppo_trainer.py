@@ -26,7 +26,7 @@ class PPOTrainer:
         for _ in range(self.ppo_epochs):
             # Get new log_probs, entropy, and values from the current model
             # Note: actions_batch are the actions taken by the old policy
-            _, new_log_probs, entropy, new_values = self.model.get_action_and_value(
+            _, new_log_probs, entropy, new_values, _ = self.model.get_action_and_value(
                 stacked_frames_batch, game_features_batch, actions_batch
             )
             new_values = new_values.squeeze(-1) # Ensure correct shape [batch_size]

@@ -1,84 +1,77 @@
-# models.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class ActorCriticCNN(nn.Module):
-    def __init__(self, num_stacked_frames, num_game_features, num_actions, frame_height, frame_width):
-        super(ActorCriticCNN, self).__init__()
-        self.num_stacked_frames = num_stacked_frames
-        self.num_game_features = num_game_features # Health, positions, charge, etc.
-        self.num_actions = num_actions
+class ActorCriticCNNRNN(nn.Module):
+    """
+    CNN encoder → GRU → actor / critic heads.
+    Now supports an arbitrary number of colour channels (default 3).
+    """
 
-        # CNN for processing stacked frames
+    def __init__(self,
+                 seq_len_frames: int,
+                 num_game_features: int,
+                 num_actions: int,
+                 frame_height: int,
+                 frame_width: int,
+                 frame_channels: int = 3,
+                 rnn_hidden: int = 512):
+        super().__init__()
+
+        self.seq_len_frames   = seq_len_frames
+        self.num_game_features= num_game_features
+        self.num_actions      = num_actions
+        self.rnn_hidden       = rnn_hidden
+        self.C                = frame_channels
+
+        # ── 1 ▸ CNN encoder ───────────────────────────────────────────
         self.cnn_base = nn.Sequential(
-            nn.Conv2d(num_stacked_frames, 32, kernel_size=8, stride=4), # Input: [B, C, H, W] -> [B, 4, 84, 84]
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU(),
-            nn.Flatten() # Flatten the output of conv layers
+            nn.Conv2d(self.C, 32, kernel_size=8, stride=4), nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),     nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),     nn.ReLU(),
+            nn.Flatten()
         )
-        
-        # Calculate the flattened CNN output size
-        # To do this properly, run a dummy tensor through cnn_base once
         with torch.no_grad():
-            dummy_input = torch.zeros(1, num_stacked_frames, frame_height, frame_width)
-            cnn_out_features = self.cnn_base(dummy_input).shape[1]
+            dummy = torch.zeros(1, self.C, frame_height, frame_width)
+            self.frame_latent_dim = self.cnn_base(dummy).shape[1]
 
-        # Fully connected layers for combined features
-        # The input size is cnn_out_features + num_game_features
-        self.fc_shared = nn.Sequential(
-            nn.Linear(cnn_out_features + num_game_features, 512),
-            nn.ReLU()
+        # ── 2 ▸ Temporal GRU ──────────────────────────────────────────
+        self.rnn = nn.GRU(
+            input_size  = self.frame_latent_dim + num_game_features,
+            hidden_size = rnn_hidden,
+            num_layers  = 1,
+            batch_first = True
         )
 
-        # Actor head (outputs action logits)
-        self.actor_head = nn.Linear(512, num_actions)
+        # ── 3 ▸ Heads ────────────────────────────────────────────────
+        self.actor_head  = nn.Linear(rnn_hidden, num_actions)
+        self.critic_head = nn.Linear(rnn_hidden, 1)
 
-        # Critic head (outputs state value)
-        self.critic_head = nn.Linear(512, 1)
+    # ------------------------------------------------------------------
+    def forward(self, frame_seq, feat_seq, h0=None):
+        """
+        frame_seq : [B, T, C, H, W]
+        feat_seq  : [B, T, F]
+        """
+        B, T, C, H, W = frame_seq.shape
+        assert C == self.C, f"Expected {self.C} channels, got {C}"
 
-    def forward(self, stacked_frames_tensor, game_features_tensor):
-        """
-        Args:
-            stacked_frames_tensor: Tensor of shape [batch_size, num_stacked_frames, height, width]
-            game_features_tensor: Tensor of shape [batch_size, num_game_features]
-        Returns:
-            action_logits: Tensor of shape [batch_size, num_actions]
-            state_value: Tensor of shape [batch_size, 1]
-        """
-        cnn_output = self.cnn_base(stacked_frames_tensor)
-        
-        # Concatenate CNN output with game features
-        combined_features = torch.cat((cnn_output, game_features_tensor), dim=1)
-        
-        shared_output = self.fc_shared(combined_features)
-        
-        action_logits = self.actor_head(shared_output)
-        state_value = self.critic_head(shared_output)
-        
-        return action_logits, state_value
+        flat_frames = frame_seq.reshape(B*T, C, H, W)      # (B·T, C, H, W)
+        latents     = self.cnn_base(flat_frames).view(B, T, -1)
+        rnn_in      = torch.cat([latents, feat_seq], dim=-1)
+        rnn_out, h_n  = self.rnn(rnn_in, h0)               # (B, T, H)
+        last        = rnn_out[:, -1]                       # most‑recent step
+        return self.actor_head(last), self.critic_head(last).squeeze(-1), h_n
 
-    def get_action_and_value(self, stacked_frames_tensor, game_features_tensor, action_idx=None):
-        """
-        Gets action probabilities, samples an action, and gets state value.
-        Also calculates log probability of the action.
-        """
-        action_logits, state_value = self.forward(stacked_frames_tensor, game_features_tensor)
-        
-        probs = F.softmax(action_logits, dim=-1)
-        
-        if action_idx is None: # During inference/acting
-            action_distribution = torch.distributions.Categorical(probs)
-            action_idx = action_distribution.sample() # Sample an action
-            log_prob = action_distribution.log_prob(action_idx)
-            entropy = action_distribution.entropy().mean() # For entropy bonus in loss
-        else: # During training, action is given
-            # Create distribution to get log_prob for the given action
-            action_distribution = torch.distributions.Categorical(probs)
-            log_prob = action_distribution.log_prob(action_idx)
-            entropy = action_distribution.entropy().mean()
+    # identical external API
+    def get_action_and_value(self, frame_seq, feat_seq, action_idx=None, h0=None):
+        logits, value, h_n = self.forward(frame_seq, feat_seq, h0)
+        probs  = F.softmax(logits, dim=-1)
+        dist   = torch.distributions.Categorical(probs)
 
-        return action_idx, log_prob, entropy, state_value
+        if action_idx is None:
+            action_idx = dist.sample()
+        log_prob = dist.log_prob(action_idx)
+        entropy  = dist.entropy().mean()
+
+        return action_idx, log_prob, entropy, value, h_n
