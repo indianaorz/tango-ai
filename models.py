@@ -4,10 +4,8 @@ import torch.nn.functional as F
 
 class ActorCriticCNNRNN(nn.Module):
     """
-    CNN encoder → GRU → actor / critic heads.
-    Now supports an arbitrary number of colour channels (default 3).
+    CNN (configurable) -> optional linear fuse -> {GRU/LSTM}^{layers} -> actor/critic heads
     """
-
     def __init__(self,
                  seq_len_frames: int,
                  num_game_features: int,
@@ -15,63 +13,79 @@ class ActorCriticCNNRNN(nn.Module):
                  frame_height: int,
                  frame_width: int,
                  frame_channels: int = 3,
-                 rnn_hidden: int = 512):
+                 # NEW: plumb from config
+                 cnn_channels=(64,128,256,256),
+                 cnn_kernels=(8,4,3,3),
+                 cnn_strides=(4,2,1,1),
+                 fuse_dim: int = 1024,
+                 rnn_type: str = "gru",
+                 rnn_hidden: int = 2048,
+                 rnn_layers: int = 2,
+                 rnn_dropout: float = 0.1):
         super().__init__()
+        self.T  = seq_len_frames
+        self.F  = num_game_features
+        self.A  = num_actions
+        self.C  = frame_channels
 
-        self.seq_len_frames   = seq_len_frames
-        self.num_game_features= num_game_features
-        self.num_actions      = num_actions
-        self.rnn_hidden       = rnn_hidden
-        self.C                = frame_channels
+        # ---- CNN backbone (configurable) ----
+        layers = []
+        in_ch = self.C
+        for out_ch, k, s in zip(cnn_channels, cnn_kernels, cnn_strides):
+            layers += [nn.Conv2d(in_ch, out_ch, kernel_size=k, stride=s), nn.ReLU(inplace=True)]
+            in_ch = out_ch
+        layers += [nn.Flatten()]
+        self.cnn_base = nn.Sequential(*layers)
 
-        # ── 1 ▸ CNN encoder ───────────────────────────────────────────
-        self.cnn_base = nn.Sequential(
-            nn.Conv2d(self.C, 32, kernel_size=8, stride=4), nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),     nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),     nn.ReLU(),
-            nn.Flatten()
-        )
         with torch.no_grad():
             dummy = torch.zeros(1, self.C, frame_height, frame_width)
-            self.frame_latent_dim = self.cnn_base(dummy).shape[1]
+            flat = self.cnn_base(dummy).shape[1]  # per-frame latent
 
-        # ── 2 ▸ Temporal GRU ──────────────────────────────────────────
-        self.rnn = nn.GRU(
-            input_size  = self.frame_latent_dim + num_game_features,
+        # ---- fuse image latent + scalar features ----
+        fuse_in = flat + self.F
+        if fuse_dim and fuse_dim > 0:
+            self.fuse = nn.Sequential(
+                nn.Linear(fuse_in, fuse_dim),
+                nn.ReLU(inplace=True)
+            )
+            rnn_input_size = fuse_dim
+        else:
+            self.fuse = None
+            rnn_input_size = fuse_in
+
+        # ---- RNN ----
+        rnn_cls = nn.GRU if rnn_type.lower() == "gru" else nn.LSTM
+        self.rnn = rnn_cls(
+            input_size  = rnn_input_size,
             hidden_size = rnn_hidden,
-            num_layers  = 1,
-            batch_first = True
+            num_layers  = rnn_layers,
+            dropout     = (rnn_dropout if rnn_layers > 1 else 0.0),
+            batch_first = True,
         )
 
-        # ── 3 ▸ Heads ────────────────────────────────────────────────
-        self.actor_head  = nn.Linear(rnn_hidden, num_actions)
+        # ---- Heads ----
+        self.actor_head  = nn.Linear(rnn_hidden, self.A)
         self.critic_head = nn.Linear(rnn_hidden, 1)
 
-    # ------------------------------------------------------------------
     def forward(self, frame_seq, feat_seq, h0=None):
         """
-        frame_seq : [B, T, C, H, W]
-        feat_seq  : [B, T, F]
+        frame_seq: [B,T,C,H,W] ; feat_seq: [B,T,F]
         """
         B, T, C, H, W = frame_seq.shape
-        assert C == self.C, f"Expected {self.C} channels, got {C}"
-
-        flat_frames = frame_seq.reshape(B*T, C, H, W)      # (B·T, C, H, W)
-        latents     = self.cnn_base(flat_frames).view(B, T, -1)
-        rnn_in      = torch.cat([latents, feat_seq], dim=-1)
-        rnn_out, h_n  = self.rnn(rnn_in, h0)               # (B, T, H)
-        last        = rnn_out[:, -1]                       # most‑recent step
+        flat_frames = self.cnn_base(frame_seq.reshape(B*T, C, H, W)).view(B, T, -1)
+        fused = torch.cat([flat_frames, feat_seq], dim=-1)
+        if self.fuse is not None:
+            fused = self.fuse(fused)
+        rnn_out, h_n = self.rnn(fused, h0)
+        last = rnn_out[:, -1]
         return self.actor_head(last), self.critic_head(last).squeeze(-1), h_n
 
-    # identical external API
     def get_action_and_value(self, frame_seq, feat_seq, action_idx=None, h0=None):
         logits, value, h_n = self.forward(frame_seq, feat_seq, h0)
         probs  = F.softmax(logits, dim=-1)
         dist   = torch.distributions.Categorical(probs)
-
         if action_idx is None:
             action_idx = dist.sample()
         log_prob = dist.log_prob(action_idx)
         entropy  = dist.entropy().mean()
-
         return action_idx, log_prob, entropy, value, h_n

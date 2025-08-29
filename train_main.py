@@ -8,6 +8,8 @@ import traceback
 
 import os
 
+import random
+
 import re # For parsing filenames
 
 import torch
@@ -120,7 +122,16 @@ async def main_drl_training_loop() -> None:
         frame_height      = config.FRAME_HEIGHT,
         frame_width       = config.FRAME_WIDTH,
         frame_channels    = config.FRAME_CHANNELS,
+        cnn_channels      = config.CNN_CHANNELS,
+        cnn_kernels       = config.CNN_KERNELS,
+        cnn_strides       = config.CNN_STRIDES,
+        fuse_dim          = config.FUSE_DIM,
+        rnn_type          = config.RNN_TYPE,
+        rnn_hidden        = config.RNN_HIDDEN,
+        rnn_layers        = config.RNN_LAYERS,
+        rnn_dropout       = config.DROPOUT_RNN,
     ).to(config.DEVICE)
+
     print("ActorCritic model instantiated.")
 
     # resume checkpoint ------------------------------------------------
@@ -223,6 +234,11 @@ async def main_drl_training_loop() -> None:
             cfg, strat, config.INFERENCE_FPS,
             experience_buffer, shared, config, utils,
         )
+        #pick a random number from 0 - 5 inclusive
+        mode = random.randint(0, 5)
+        # mode = int(cfg.get("cross_select", 1))  # add this to your instance_cfgs however you like
+        drl_strategy.set_cross_select(h.port, mode)
+
         handlers.append(h)
         port_to_handler[h.port] = h
         # map PID→port once GameManager has registered the Popen obj
@@ -253,24 +269,33 @@ async def main_drl_training_loop() -> None:
     def _bootstrap_value_avg_over_handlers(model, handlers, device):
         """
         Compute an average V(s_{t+1}) over currently alive handlers to use as the
-        final bootstrap for GAE. This is not perfect per-env, but with correct
-        done-masks it’s a solid, low-variance estimate for the last step.
+        final bootstrap for GAE. Restores the model's train/eval mode afterwards.
         """
         vals = []
-        model.eval()
-        with torch.no_grad():
-            for h in handlers:
-                sf = getattr(h, "prev_processed_stacked_frames", None)
-                gf = getattr(h, "prev_processed_game_features",  None)
-                if sf is None or gf is None:
-                    continue
-                _, _, _, v, _ = model.get_action_and_value(
-                    sf.to(device), gf.to(device)
-                )
-                vals.append(v.squeeze())
-        if vals:
-            return torch.stack(vals).mean().to(device)
-        return torch.tensor(0.0, device=device)
+        was_training = model.training
+        try:
+            # Temporarily evaluate *without* building a grad graph
+            model.eval()
+            with torch.no_grad():
+                for h in handlers:
+                    sf = getattr(h, "prev_processed_stacked_frames", None)
+                    gf = getattr(h, "prev_processed_game_features",  None)
+                    if sf is None or gf is None:
+                        continue
+                    _, _, _, v, _ = model.get_action_and_value(
+                        sf.to(device), gf.to(device)
+                    )
+                    vals.append(v.squeeze())
+            if vals:
+                return torch.stack(vals).mean().to(device)
+            return torch.tensor(0.0, device=device)
+        finally:
+            # Restore prior mode so PPO can safely run backward through GRU
+            if was_training:
+                model.train()
+            else:
+                model.eval()
+
 
 
     # =================================================================
