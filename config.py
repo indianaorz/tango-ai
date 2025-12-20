@@ -10,6 +10,14 @@ import os
 from typing import List, Dict
 import torch
 
+
+
+STRAT_DRL      = "drl"
+STRAT_STAND    = "scripted_stand"
+STRAT_WANDER   = "scripted_wander"
+STRAT_CHARGE   = "scripted_charge"
+
+
 # =============================================================================
 # Paths
 # =============================================================================
@@ -24,13 +32,25 @@ APP_PATH     = os.path.join(PROJECT_ROOT, "dist", "tango-x86_64-linux.AppImage")
 # Instance orchestration (window/process management)
 # =============================================================================
 
-NUM_GAME_PAIRS: int = int(os.getenv("NUM_GAME_PAIRS", 4))   # number of learner/opponent pairs
-BASE_PORT:      int = int(os.getenv("BASE_PORT", 12340))    # first TCP port to use
+NUM_GAME_PAIRS: int = int(os.getenv("NUM_GAME_PAIRS", 1))   # number of learner/opponent pairs
+BASE_PORT:      int = int(os.getenv("BASE_PORT", 12350))    # first TCP port to use
 
 SAVE_PATH_TEMPLATE = "/home/lee/Documents/Tango/saves/BN6 Gregar 1.sav"
 ROM_PATH_DEFAULT   = "bn6,0"
 INIT_CODE_DEFAULT  = "arena_drl"
 ADDRESS_DEFAULT    = "127.0.0.1"
+
+
+
+EARLY_STOP_ENABLED = bool(int(os.getenv("EARLY_STOP_ENABLED", "1")))
+EARLY_STOP_HP      = int(os.getenv("EARLY_STOP_HP", "900"))
+# "player"  → only this window’s player HP
+# "either"  → either side’s HP (player OR enemy) triggers early stop
+EARLY_STOP_WHOM    = os.getenv("EARLY_STOP_WHOM", "player").lower()  # "player" | "either"
+
+# What to kill when triggered
+EARLY_STOP_SCOPE   = os.getenv("EARLY_STOP_SCOPE", "pair").lower()   # "self" | "pair"
+
 
 def generate_instances(n_pairs: int, base_port: int = BASE_PORT) -> List[Dict]:
     """Build a flat list of instance configs (learner/opponent alternating)."""
@@ -40,6 +60,15 @@ def generate_instances(n_pairs: int, base_port: int = BASE_PORT) -> List[Dict]:
         opponent_port = learner_port + 1
         save_path     = SAVE_PATH_TEMPLATE.format(idx=i + 1)
 
+        # Default: learner uses DRL; opponent uses curriculum for first two pairs
+        if i % 2 == 0:
+            opp_strategy = STRAT_CHARGE   # Game1 Opponent: charge & release
+            # opp_strategy = STRAT_STAND     # Game1 Opponent: stand & shoot
+        elif i % 2 == 1:
+            opp_strategy = STRAT_WANDER    # Game2 Opponent: random walk
+        else:
+            opp_strategy = STRAT_DRL       # remaining pairs: self-play
+
         inst.extend([
             {
                 "address": ADDRESS_DEFAULT,
@@ -48,6 +77,7 @@ def generate_instances(n_pairs: int, base_port: int = BASE_PORT) -> List[Dict]:
                 "save_path": save_path,
                 "name": f"Game{i+1} Learner",
                 "init_link_code": f"{INIT_CODE_DEFAULT}-{i}",
+                "strategy": STRAT_DRL,
             },
             {
                 "address": ADDRESS_DEFAULT,
@@ -56,6 +86,7 @@ def generate_instances(n_pairs: int, base_port: int = BASE_PORT) -> List[Dict]:
                 "save_path": save_path,
                 "name": f"Game{i+1} Opponent",
                 "init_link_code": f"{INIT_CODE_DEFAULT}-{i}",
+                "strategy": opp_strategy,
             },
         ])
     return inst
@@ -111,10 +142,11 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # =============================================================================
 # Model / observation settings
 # =============================================================================
+USE_IMAGES = bool(int(os.getenv("USE_IMAGES", "0")))  # 1 = use frames, 0 = state-only
 
 # Image frames (per observation sequence)
-FRAME_HEIGHT   = 96
-FRAME_WIDTH    = 96
+FRAME_HEIGHT   = 84
+FRAME_WIDTH    = 84
 FRAME_CHANNELS = 3
 
 # Temporal window (sequence length)
@@ -124,11 +156,11 @@ SEQ_LEN_FRAMES = 48
 NUM_FRAMES_STACKED = FRAME_CHANNELS
 
 # ==== Model capacity knobs ====
-RNN_HIDDEN   = int(os.getenv("RNN_HIDDEN", 2048))   # was 768
+RNN_HIDDEN   = int(os.getenv("RNN_HIDDEN", 128))   # was 768
 RNN_LAYERS   = int(os.getenv("RNN_LAYERS", 2))      # new: multi-layer GRU/LSTM
 RNN_TYPE     = os.getenv("RNN_TYPE", "gru")         # "gru" or "lstm"
-FUSE_DIM     = int(os.getenv("FUSE_DIM", 1024))     # linear proj before RNN (0 to disable)
-DROPOUT_RNN  = float(os.getenv("DROPOUT_RNN", 0.1)) # dropout between RNN layers
+FUSE_DIM     = int(os.getenv("FUSE_DIM", 0))     # linear proj before RNN (0 to disable)
+DROPOUT_RNN  = float(os.getenv("DROPOUT_RNN", 0.0)) # dropout between RNN layers
 
 # CNN layout is now configurable
 CNN_CHANNELS = tuple(int(x) for x in os.getenv("CNN_CHANNELS", "64,128,256,256").split(","))
@@ -148,11 +180,11 @@ LEARNING_RATE      = 3e-4
 GAMMA              = 0.99
 GAE_LAMBDA         = 0.95
 PPO_CLIP_EPSILON   = 0.2
-PPO_EPOCHS         = 10
-MINI_BATCH_SIZE    = 64
+PPO_EPOCHS         = 4
+MINI_BATCH_SIZE    = 32
 
 # Steps collected across all envs before each update
-NUM_STEPS_PER_COLLECT = 2048
+NUM_STEPS_PER_COLLECT = 1024
 
 # Experience buffer sizing (kept compatible with ExperienceBuffer expectations)
 EXPERIENCE_BUFFER_SIZE    = NUM_STEPS_PER_COLLECT
@@ -168,7 +200,7 @@ VALUE_LOSS_COEF    = 0.5
 # =============================================================================
 
 MAX_HEALTH         = 2000.0
-MAX_CHARGE_LEVEL   = 3.0
+MAX_CHARGE_LEVEL   = 2.0
 MAX_CUST_GAUGE_VALUE = 255.0
 
 # =============================================================================
@@ -184,7 +216,7 @@ MODEL_SAVE_FREQUENCY  = 1  # save every N updates
 # =============================================================================
 
 # Damage
-REWARD_DAMAGE_DEALT_MULTIPLIER = +0.20   # per HP dealt
+REWARD_DAMAGE_DEALT_MULTIPLIER = +1.0   # per HP dealt
 REWARD_DAMAGE_TAKEN_MULTIPLIER = -0.20   # per HP taken
 
 # Episode result
@@ -192,10 +224,10 @@ REWARD_WIN_GAME  = 0
 REWARD_LOSE_GAME = 0
 
 # Time pressure
-REWARD_TIME_PENALTY_STEP = -0.002
+REWARD_TIME_PENALTY_STEP = -0.0005
 
 # Charge behavior
-REWARD_CHARGE_GAIN_COEF     = 0.02
+REWARD_CHARGE_GAIN_COEF     = 0.00
 CHARGE_MAX_LEVEL            = 3
 REWARD_CHARGE_RELEASE_BONUS = 5.0
 

@@ -18,7 +18,7 @@ class GameManager:
         app_path: str,
         env_common: Dict[str, str],
         instance_stagger_time: float = 1.0,
-        base_port: int = 12340,
+        base_port: int = 12350,
     ):
         self.app_path             = app_path
         self.env_common           = env_common
@@ -106,6 +106,56 @@ class GameManager:
         self.processes = [p for p in self.processes if p["process"].poll() is None]
         return before - len(self.processes)
 
+    # ──────────────────────────────────────────────────────────────────
+    # plan-aware helpers
+    # ──────────────────────────────────────────────────────────────────
+    def _run_instance_from_cfg(self, cfg: Dict):
+        """Spawn one window exactly as described by the plan entry."""
+        env = self.env_common.copy()
+        env.update(
+            ROM_PATH       = cfg["rom_path"],
+            SAVE_PATH      = cfg["save_path"],
+            INIT_LINK_CODE = cfg["init_link_code"],
+            PORT           = str(cfg["port"]),
+            INSTANCE_NAME  = str(cfg.get("name", cfg["port"])),
+        )
+        name = cfg.get("name", f"Port {cfg['port']}")
+        print(f"Starting instance «{name}» on port {cfg['port']} …")
+        proc = subprocess.Popen([self.app_path], env=env)
+        self.processes.append({"process": proc, "port": cfg["port"], "name": name})
+
+    def start_instances_from_plan(self, plan: List[Dict]) -> List[Dict]:
+        """
+        Spawn all instances provided by the plan. Returns the list of cfgs
+        actually launched (same dicts you passed in).
+        """
+        launched = []
+        for cfg in plan:
+            self._run_instance_from_cfg(cfg)
+            launched.append(cfg)
+            time.sleep(self.instance_stagger_time)  # small stagger
+        return launched
+
+    def maintain_from_plan(self, plan: List[Dict]) -> List[Dict]:
+        """
+        Ensure that EXACTLY the set of plan ports are alive. If any plan entry
+        (by port) is missing, respawn it using that same cfg.
+        Returns a list of cfgs that were newly launched.
+        """
+        zombies = self._purge_zombies()
+        if zombies:
+            print(f"🗑️  Cleaned up {zombies} finished window(s).")
+
+        running_ports = {p["port"] for p in self.processes if p["process"].poll() is None}
+        new_cfgs: List[Dict] = []
+        for cfg in plan:
+            if cfg["port"] not in running_ports:
+                print(f"Window for port {cfg['port']} missing; respawning from plan …")
+                self._run_instance_from_cfg(cfg)
+                new_cfgs.append(cfg)
+                time.sleep(self.instance_stagger_time)
+        return new_cfgs
+    
     # ──────────────────────────────────────────────────────────────────
     # public API
     # ──────────────────────────────────────────────────────────────────

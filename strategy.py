@@ -4,6 +4,8 @@ from io import BytesIO
 import torch
 from PIL import Image
 
+import utils
+
 class DRLAgentStrategy:
     """Actor-Critic wrapper with per-env observation state, cross-select menu flows, and sticky-hold combat logic."""
 
@@ -20,7 +22,8 @@ class DRLAgentStrategy:
                  max_health_config: float,
                  max_charge_config: float,
                  max_cust_gauge_config: float,
-                 cross_select_default: int = 0):
+                 cross_select_default: int = 0, use_images: bool = True):
+        self.use_images = bool(use_images)
         self.key_bits        = key_bit_positions
         self.discrete_actions= discrete_actions
         self.bin16           = util_fns["int_to_binary_string"]
@@ -60,7 +63,11 @@ class DRLAgentStrategy:
 
     # -------------------------- helpers ------------------------------ #
     def _append_obs(self, port, pil_img, raw):
-        f_t = self.preprocess_frame(pil_img, self.H, self.W)  # [C,H,W], float 0-1
+        if self.use_images:
+            f_t = self.preprocess_frame(pil_img, self.H, self.W)  # [3,H,W] default
+        else:
+            # C=0 frame placeholder (valid zero-width channel tensor)
+            f_t = torch.zeros((0, self.H, self.W), dtype=torch.float32)
         self._frames[port].append(f_t)
 
         pg = raw.get('player_grid_position', [1,1])
@@ -92,43 +99,42 @@ class DRLAgentStrategy:
     # ------------------ legacy RETURN <-> Z loop --------------------- #
     def _legacy_menu_skip(self, port):
         st  = self._skip_legacy[port]
-        now = time.time()
+        now = time.monotonic()  # monotonic > time.time for timers
 
-        def elapsed(sec): return (now - st['ts']) >= sec
+        # durations tuned to work at 5 Hz too
+        HOLD_RETURN_S = 0.60
+        PAUSE_S       = 0.25
+
         if st['phase'] == 'INIT':
-            if st['ts'] == 0.0:
-                st['ts'] = now
-                return 0
-            if elapsed(0.30):
-                st['phase'] = 'HOLD_RETURN'; st['ts'] = now
-            return 0
+            st.update(phase='HOLD_RETURN', ts=now)
+            return 1 << self.key_bits['RETURN']  # press immediately on entry
 
         if st['phase'] == 'HOLD_RETURN':
-            if not elapsed(0.22):
-                return 1 << self.key_bits['RETURN']
-            st['phase'] = 'PAUSE1'; st['ts'] = now
+            if (now - st['ts']) < HOLD_RETURN_S:
+                return 1 << self.key_bits['RETURN']  # keep holding across frames
+            st.update(phase='PAUSE1', ts=now)
             return 0
 
         if st['phase'] == 'PAUSE1':
-            if not elapsed(0.10):
+            if (now - st['ts']) < PAUSE_S:
                 return 0
-            st['phase'] = 'TAP_Z'; st['ts'] = now
-            return 0
+            st.update(phase='TAP_Z', ts=now)
+            return 1 << self.key_bits['Z']  # TAP immediately on entry
 
         if st['phase'] == 'TAP_Z':
-            if not elapsed(0.12):
-                return 1 << self.key_bits['Z']
-            st['phase'] = 'PAUSE2'; st['ts'] = now
+            # one-frame tap already sent; go to pause
+            st.update(phase='PAUSE2', ts=now)
             return 0
 
         if st['phase'] == 'PAUSE2':
-            if not elapsed(0.10):
+            if (now - st['ts']) < PAUSE_S:
                 return 0
-            st['phase'] = 'HOLD_RETURN'; st['ts'] = now
-            return 0
+            st.update(phase='HOLD_RETURN', ts=now)
+            return 1 << self.key_bits['RETURN']  # press immediately on entry
 
-        st['phase'] = 'INIT'; st['ts'] = now
+        st.update(phase='INIT', ts=now)
         return 0
+
 
     # --------------------- cross-select runner ----------------------- #
     def _build_cross_steps(self, mode: int):
@@ -286,6 +292,18 @@ class DRLAgentStrategy:
 
         final_mask = frame_mask | self._held_bits[port]
 
+        # Map the actually executed mask back to the closest discrete action
+        exec_idx_int = self.preprocess_frame.__self__.utils.bitmask_to_action_index(final_mask) \
+            if hasattr(self.preprocess_frame, "__self__") else utils.bitmask_to_action_index(final_mask)
+
+        exec_idx_t = torch.tensor(exec_idx_int, device=self.dev)
+
+        # If the executed mask doesn't match the originally sampled action, recompute logπ for exec action
+        if exec_idx_int != a_idx.item():
+            with torch.no_grad():
+                _, log_p, _, value, _ = self.model.get_action_and_value(seq_f, seq_feat, exec_idx_t)
+            a_idx = exec_idx_t  # make sure buffer stores the executed action index
+
         return {
             "button_command": {"type":"key_press","key": self.bin16(final_mask)},
             "action_idx": a_idx,
@@ -301,6 +319,21 @@ class DRLAgentStrategy:
         self._skip_legacy[port] = {'phase':'INIT','ts':0.0}
         self._held_bits[port]   = 0
         self._cross_seq[port].update(active=False, steps=[], idx=0, ts=0.0, done_once=False)
+
+    def encode_for_policy(self, port: int, game_state: dict):
+        """
+        Public: update per-port rolling buffers from a raw game_state and
+        return [1,T,C,H,W] frames + [1,T,F] features tensors on self.dev.
+        """
+        pil = None
+        b64 = game_state.get("image")
+        if b64:
+            try:
+                pil = Image.open(BytesIO(base64.b64decode(b64)))
+            except Exception:
+                pil = None
+        self._append_obs(port, pil, game_state)
+        return self._get_seq_tensors(port)
 
 # -----------------------------------------------------------------------------
 # Base Strategy ----------------------------------------------------------------
@@ -385,3 +418,361 @@ class SkipAndRandomStrategy(ActionStrategy):
     def reset_state(self, port):
         self._state[port] = (0, 0.)
 
+# -----------------------------------------------------------------------------
+# Scripted Opponents
+#   • ScriptedStandAndShootStrategy: never moves; taps X on a cadence.
+#   • ScriptedWanderStrategy       : randomly walks; never shoots.
+#
+# Both reuse a robust in-window skipper so battles start reliably.
+# -----------------------------------------------------------------------------
+
+from collections import defaultdict
+import time
+import random
+
+class _MenuSkipController:
+    def __init__(self, key_bits: dict[str,int]):
+        self.key_bits = key_bits
+        self._state   = defaultdict(lambda: {"phase":"INIT","t":0.0})
+
+    def step(self, port: int) -> int:
+        kb  = self.key_bits
+        st  = self._state[port]
+        now = time.monotonic()
+
+        HOLD_RETURN_S = 0.60
+        PAUSE_S       = 0.25
+
+        if st["phase"] == "INIT":
+            st.update(phase="HOLD_RETURN", t=now)
+            return 1 << kb["RETURN"]
+
+        if st["phase"] == "HOLD_RETURN":
+            if (now - st["t"]) < HOLD_RETURN_S:
+                return 1 << kb["RETURN"]
+            st.update(phase="PAUSE1", t=now)
+            return 0
+
+        if st["phase"] == "PAUSE1":
+            if (now - st["t"]) < PAUSE_S:
+                return 0
+            st.update(phase="TAP_Z", t=now)
+            return 1 << kb["Z"]  # one-frame tap
+
+        if st["phase"] == "TAP_Z":
+            st.update(phase="PAUSE2", t=now)
+            return 0
+
+        if st["phase"] == "PAUSE2":
+            if (now - st["t"]) < PAUSE_S:
+                return 0
+            st.update(phase="HOLD_RETURN", t=now)
+            return 1 << kb["RETURN"]
+
+        st.update(phase="INIT", t=now)
+        return 0
+
+
+class ScriptedStandAndShootStrategy(ActionStrategy):
+    """
+    Deterministic bot: stands still and taps X at a fixed cadence.
+    - Inside chip-select window: run the shared menu skipper.
+    - In battle: send a one-frame X press every FIRE_EVERY_MS.
+    """
+    def __init__(self,
+                 key_bit_positions: dict[str,int],
+                 discrete_actions: list[str],
+                 util_fns: dict,
+                 *,
+                 fire_every_ms: int = 500,
+                 seed: int | None = None):
+        super().__init__(key_bit_positions, discrete_actions, util_fns)
+        self._menu = _MenuSkipController(key_bit_positions)
+        self._fire_interval = max(100, int(fire_every_ms)) / 1000.0
+        self._last_fire = defaultdict(lambda: 0.0)
+        if seed is not None:
+            random.seed(seed)
+
+    def decide_action(self, port: int, game_state: dict):
+        if bool(game_state.get("inside_window", False)):
+            mask = self._menu.step(port)
+            return {"button_command": {"type":"key_press","key": self.bin16(mask)},
+                    "action_idx": None, "log_prob": None, "value": None,
+                    "stacked_frames_tensor": None, "game_features_tensor": None}
+
+        # In battle: tap X at cadence; no movement.
+        now = time.monotonic()
+        mask = 0
+        if now - self._last_fire[port] >= self._fire_interval:
+            self._last_fire[port] = now
+            mask |= 1 << self.key_bits["X"]  # one-frame tap
+        return {"button_command": {"type":"key_press","key": self.bin16(mask)},
+                "action_idx": None, "log_prob": None, "value": None,
+                "stacked_frames_tensor": None, "game_features_tensor": None}
+
+    def reset_state(self, port: int):
+        self._last_fire[port] = 0.0
+
+
+class ScriptedWanderStrategy(ActionStrategy):
+    """
+    Stochastic bot: randomly walks; never shoots.
+    - Inside chip-select window: shared menu skipper.
+    - In battle: choose a direction and hold for HOLD_MS; occasionally NO_OP.
+    Deterministic with a fixed seed for reproducibility.
+    """
+    def __init__(self,
+                 key_bit_positions: dict[str,int],
+                 discrete_actions: list[str],
+                 util_fns: dict,
+                 *,
+                 hold_ms: int = 350,
+                 noop_chance: float = 0.15,
+                 seed: int = 1337):
+        super().__init__(key_bit_positions, discrete_actions, util_fns)
+        self._menu = _MenuSkipController(key_bit_positions)
+        self._hold_s = max(50, int(hold_ms)) / 1000.0
+        self._noop_p = min(0.9, max(0.0, noop_chance))
+        self._dir_by_port = defaultdict(lambda: {"dir": None, "t": 0.0})
+        self._rng = random.Random(seed)
+
+        self._dir_keys = ["UP","DOWN","LEFT","RIGHT"]
+
+    def _sample_dir_or_none(self):
+        if self._rng.random() < self._noop_p:
+            return None
+        return self._rng.choice(self._dir_keys)
+
+    def decide_action(self, port: int, game_state: dict):
+        if bool(game_state.get("inside_window", False)):
+            mask = self._menu.step(port)
+            return {"button_command": {"type":"key_press","key": self.bin16(mask)},
+                    "action_idx": None, "log_prob": None, "value": None,
+                    "stacked_frames_tensor": None, "game_features_tensor": None}
+
+        st  = self._dir_by_port[port]
+        now = time.monotonic()
+        if st["dir"] is None or (now - st["t"]) >= self._hold_s:
+            st["dir"] = self._sample_dir_or_none()
+            st["t"]   = now
+
+        mask = 0
+        if st["dir"] is not None and st["dir"] in self.key_bits:
+            mask |= 1 << self.key_bits[st["dir"]]
+        return {"button_command": {"type":"key_press","key": self.bin16(mask)},
+                "action_idx": None, "log_prob": None, "value": None,
+                "stacked_frames_tensor": None, "game_features_tensor": None}
+
+    def reset_state(self, port: int):
+        self._dir_by_port[port] = {"dir": None, "t": 0.0}
+
+
+# scripted_more.py
+import time, random
+from collections import defaultdict
+from strategy import ActionStrategy, _MenuSkipController
+
+# 1) Strafe & Shoot (oscillate rows; fire on cadence or on alignment)
+class ScriptedStrafeAndShoot(ActionStrategy):
+    def __init__(self, key_bit_positions, discrete_actions, util_fns,
+                 *, swap_every_ms=500, fire_every_ms=600, align_only=False, seed=123):
+        super().__init__(key_bit_positions, discrete_actions, util_fns)
+        self._menu = _MenuSkipController(key_bit_positions)
+        self._swap_s = max(120, int(swap_every_ms)) / 1000.0
+        self._fire_s = max(120, int(fire_every_ms)) / 1000.0
+        self._align_only = bool(align_only)
+        self._last_swap = defaultdict(lambda: 0.0)
+        self._last_fire = defaultdict(lambda: 0.0)
+        self._dir = defaultdict(lambda: "UP")   # current strafe direction
+        random.seed(seed)
+
+    def decide_action(self, port, game_state):
+        if bool(game_state.get("inside_window", False)):
+            return {"button_command":{"type":"key_press","key": self.bin16(self._menu.step(port))},
+                    "action_idx":None,"log_prob":None,"value":None,"stacked_frames_tensor":None,"game_features_tensor":None}
+
+        now = time.monotonic()
+        mask = 0
+
+        # Strafe toggle
+        if now - self._last_swap[port] >= self._swap_s:
+            self._last_swap[port] = now
+            self._dir[port] = "DOWN" if self._dir[port] == "UP" else "UP"
+        dir_bit = self.key_bits[self._dir[port]]
+        mask |= (1 << dir_bit)
+
+        # Fire logic
+        aligned = False
+        try:
+            pr = game_state.get("player_grid_position",[1,1])[1]
+            er = game_state.get("enemy_grid_position",[4,1])[1]
+            aligned = (pr == er)
+        except Exception:
+            pass
+
+        if now - self._last_fire[port] >= self._fire_s and (aligned or not self._align_only):
+            self._last_fire[port] = now
+            mask |= (1 << self.key_bits["X"])  # one-frame tap
+
+        return {"button_command":{"type":"key_press","key": self.bin16(mask)},
+                "action_idx":None,"log_prob":None,"value":None,"stacked_frames_tensor":None,"game_features_tensor":None}
+
+    def reset_state(self, port:int):
+        self._last_swap[port] = 0.0
+        self._last_fire[port] = 0.0
+        self._dir[port] = "UP"
+
+
+# 2) Random Walk + Shoot (random move holds; periodic shots)
+class ScriptedRandomWalkAndShoot(ActionStrategy):
+    def __init__(self, key_bit_positions, discrete_actions, util_fns,
+                 *, hold_ms=350, noop_chance=0.10, fire_every_ms=500, seed=1337):
+        super().__init__(key_bit_positions, discrete_actions, util_fns)
+        self._menu = _MenuSkipController(key_bit_positions)
+        self._hold_s = max(60, int(hold_ms)) / 1000.0
+        self._noop_p = min(0.9, max(0.0, noop_chance))
+        self._fire_s = max(120, int(fire_every_ms)) / 1000.0
+        self._state = defaultdict(lambda: {"dir": None, "t": 0.0})
+        self._last_fire = defaultdict(lambda: 0.0)
+        self._rng = random.Random(seed)
+        self._dirs = ["UP","DOWN","LEFT","RIGHT"]
+
+    def decide_action(self, port, game_state):
+        if bool(game_state.get("inside_window", False)):
+            return {"button_command":{"type":"key_press","key": self.bin16(self._menu.step(port))},
+                    "action_idx":None,"log_prob":None,"value":None,"stacked_frames_tensor":None,"game_features_tensor":None}
+
+        st  = self._state[port]
+        now = time.monotonic()
+
+        # Sample/refresh direction
+        if st["dir"] is None or (now - st["t"]) >= self._hold_s:
+            st["dir"] = None if self._rng.random() < self._noop_p else self._rng.choice(self._dirs)
+            st["t"]   = now
+
+        mask = 0
+        if st["dir"] and st["dir"] in self.key_bits:
+            mask |= 1 << self.key_bits[st["dir"]]
+
+        # Periodic fire
+        if now - self._last_fire[port] >= self._fire_s:
+            self._last_fire[port] = now
+            mask |= 1 << self.key_bits["X"]
+
+        return {"button_command":{"type":"key_press","key": self.bin16(mask)},
+                "action_idx":None,"log_prob":None,"value":None,"stacked_frames_tensor":None,"game_features_tensor":None}
+
+    def reset_state(self, port:int):
+        self._state[port] = {"dir": None, "t": 0.0}
+        self._last_fire[port] = 0.0
+
+
+# 3) Charge-then-Release (stand or strafe while charging; release on align or timeout)
+# scripted_more.py
+import time, random
+from collections import defaultdict
+from strategy import ActionStrategy, _MenuSkipController
+
+class ScriptedChargeAndRelease(ActionStrategy):
+    """
+    Hold X to charge, optionally move, then release (stop holding) when:
+      • player_charge >= charge_level AND (aligned OR timeout)
+    After release, restart charging.
+
+    Args:
+      move_mode: "still" | "strafe" | "stand" (alias of "still")
+      charge_level: 1..3 (your config.CHARGE_MAX_LEVEL)
+      align_release: if True, prefer to release only when rows align
+      max_charge_ms: safety timeout to release even if not aligned
+      strafe_ms: toggle UP/DOWN every strafe_ms when move_mode="strafe"
+    """
+    def __init__(self, key_bit_positions, discrete_actions, util_fns,
+                 *, move_mode="still", charge_level=3, align_release=True,
+                 max_charge_ms=3500, strafe_ms=500, seed=7):
+        super().__init__(key_bit_positions, discrete_actions, util_fns)
+        self._menu = _MenuSkipController(key_bit_positions)
+
+        # Normalized/validated args
+        self._lvl           = max(1, int(charge_level))
+        self._align_release = bool(align_release)
+        self._max_charge_s  = max(300, int(max_charge_ms)) / 1000.0
+        self._move_mode     = "still" if move_mode in ("still", "stand") else move_mode
+        self._strafe_s      = max(120, int(strafe_ms)) / 1000.0
+        random.seed(seed)
+
+        # Per-port state
+        self._state        = defaultdict(lambda: "CHARGING")     # "CHARGING" | "RELEASING"
+        self._start_t      = defaultdict(lambda: 0.0)            # when current charge cycle began
+        self._release_t    = defaultdict(lambda: 0.0)            # when we released
+        self._dir          = defaultdict(lambda: "UP")
+        self._last_swap    = defaultdict(lambda: 0.0)
+
+    def _aligned_rows(self, gs) -> bool:
+        try:
+            pr = gs.get("player_grid_position", [1,1])[1]
+            er = gs.get("enemy_grid_position",  [4,1])[1]
+            return pr == er
+        except Exception:
+            return False
+
+    def _movement_mask(self, port, now) -> int:
+        if self._move_mode != "strafe":
+            return 0  # stand still
+        if now - self._last_swap[port] >= self._strafe_s:
+            self._last_swap[port] = now
+            self._dir[port] = "DOWN" if self._dir[port] == "UP" else "UP"
+        return (1 << self.key_bits[self._dir[port]])
+
+    def decide_action(self, port, game_state):
+        # 1) Menu skip unchanged
+        if bool(game_state.get("inside_window", False)):
+            mask = self._menu.step(port)
+            return {"button_command": {"type":"key_press","key": self.bin16(mask)},
+                    "action_idx": None, "log_prob": None, "value": None,
+                    "stacked_frames_tensor": None, "game_features_tensor": None}
+
+        now = time.monotonic()
+        if self._start_t[port] == 0.0:
+            self._start_t[port] = now
+
+        mask = self._movement_mask(port, now)
+
+        # --- core logic ---
+        # Use our own player's charge for this window
+        cur_lvl = int(game_state.get("player_charge", 0))
+        aligned = self._aligned_rows(game_state)
+        timeout = (now - self._start_t[port]) >= self._max_charge_s
+
+        state = self._state[port]
+
+        if state == "CHARGING":
+            # hold X every frame to build charge
+            mask |= (1 << self.key_bits["X"])
+
+            # release condition: reached level AND (aligned or timeout)
+            if cur_lvl >= self._lvl and ((self._align_release and aligned) or timeout):
+                self._state[port]     = "RELEASING"
+                self._release_t[port] = now
+                # IMPORTANT: do NOT press X on the release frame — just stop holding.
+                # So we *do not* include X in mask this frame; the switch to RELEASING
+                # means next frame we won't hold X, causing the charge shot to fire.
+                mask &= ~(1 << self.key_bits["X"])
+
+        elif state == "RELEASING":
+            # One frame (or a short window) of not holding X to let the charge shot fire
+            # Keep not holding X for ~100ms to be safe at low polling rates
+            if (now - self._release_t[port]) >= 0.10:
+                self._state[port]  = "CHARGING"
+                self._start_t[port]= now
+            # no X bit while releasing → mask unchanged (movement only)
+
+        return {"button_command": {"type":"key_press","key": self.bin16(mask)},
+                "action_idx": None, "log_prob": None, "value": None,
+                "stacked_frames_tensor": None, "game_features_tensor": None}
+
+    def reset_state(self, port:int):
+        self._state[port]      = "CHARGING"
+        self._start_t[port]    = 0.0
+        self._release_t[port]  = 0.0
+        self._last_swap[port]  = 0.0
+        self._dir[port]        = "UP"
