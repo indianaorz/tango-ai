@@ -1,0 +1,9 @@
+[workspace]
+members = ["tango"]
+resolver = "2"
+
+[workspace.lints.rust]
+# Defaults to satisfy inheritance
+
+[workspace.lints.clippy]
+# Defaults to satisfy inheritance

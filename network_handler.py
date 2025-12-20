@@ -9,6 +9,7 @@ import torch
 import sys
 import os
 from typing import Optional
+import socket
 
 
 def _c(text, code):             # _c("txt", 32) -> green txt
@@ -509,13 +510,16 @@ class ConnectionHandler:
         # ── keep trying to open the socket ───────────────────────────
         while self._is_running:
             try:
-                print(f"Attempting to connect to {self.name} at "
-                      f"{self.address}:{self.port} (try {attempt + 1})")
-                self.reader, self.writer = await asyncio.open_connection(
-                    self.address, self.port)
-                print(f"Successfully connected to {self.name} "
-                      f"(Port {self.port})")
-                break                                                    # ↲ success
+                print(f"Attempting to connect to {self.name} at {self.address}:{self.port} ...")
+                self.reader, self.writer = await asyncio.open_connection(self.address, self.port)
+                
+                # [FIX] Disable Nagle's algorithm on the Python side too
+                sock = self.writer.get_extra_info('socket')
+                if sock:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                
+                print(f"Successfully connected to {self.name} (Port {self.port})")
+                break
             except ConnectionRefusedError:
                 print(f"Port {self.port} ({self.name}): connection refused.")
             except Exception as e:

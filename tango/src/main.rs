@@ -672,7 +672,7 @@ fn map_key_to_physical_key(key: &str) -> Option<Key> {
 }
 
 use anyhow::Result;
-use image::codecs::png::PngEncoder;
+use image::codecs::jpeg::JpegEncoder; // <--- ADD THIS
 use image::ColorType;
 use serde_json::to_string_pretty;
 use std::env;
@@ -810,8 +810,14 @@ async fn setup_tcp_listener(
 
     loop {
         match listener.accept().await {
-            Ok((socket, _)) => {
-                println!("Accepted connection on port {}", port);
+            Ok((socket, addr)) => {
+                println!("Accepted connection from {} on port {}", addr, port);
+                
+                // [FIX] Disable Nagle's Algorithm to remove the ~40ms latency floor
+                if let Err(e) = socket.set_nodelay(true) {
+                    println!("Warning: Failed to set TCP_NODELAY: {}", e);
+                }
+
                 tokio::spawn(handle_tcp_client(socket, tx.clone(), output_tx.clone()));
             }
             Err(e) => {
@@ -897,16 +903,19 @@ async fn handle_tcp_client(
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<OutputMessage>();
     *output_tx.lock() = Some(msg_tx);
 
+    // Reuse this buffer for pixel data to avoid re-allocating 38k times per frame
+    // GBA resolution is 240x160. RGB is 3 bytes per pixel.
+    let mut rgb_bytes: Vec<u8> = Vec::with_capacity(240 * 160 * 3);
+    
+    // Reuse this buffer for the compressed image data
+    let mut img_data_buffer: Vec<u8> = Vec::with_capacity(1024 * 50);
+
     let mut buf = vec![0; 8192];
     loop {
         tokio::select! {
-            // Reading from the socket
             n = socket.read(&mut buf) => {
                 match n {
-                    Ok(0) => {
-                        // Connection closed
-                        break;
-                    }
+                    Ok(0) => break, // Connection closed
                     Ok(n) => {
                         let data = &buf[..n];
                         if let Ok(command_str) = std::str::from_utf8(data) {
@@ -914,42 +923,47 @@ async fn handle_tcp_client(
                                 if let Ok(cmd) = serde_json::from_str::<InputCommand>(line) {
                                     match cmd.command_type.as_str() {
                                         "request_screen" => {
-                                            // Handle screen image request
                                             if let Some(image) = get_screen_image() {
-                                                // Convert Color32 slice to raw bytes (RGBA)
-                                                let rgba_bytes: Vec<u8> = image.pixels.iter().flat_map(|pixel| {
-                                                    vec![pixel.r(), pixel.g(), pixel.b(), pixel.a()]
-                                                }).collect();
+                                                // [OPTIMIZATION 1] Fast Pixel Copy
+                                                // Reset buffer length but keep capacity
+                                                rgb_bytes.clear();
+                                                
+                                                // Direct loop to avoid per-pixel heap allocations
+                                                // We drop Alpha channel (RGB) to save 25% size and processing time
+                                                for pixel in &image.pixels {
+                                                    rgb_bytes.push(pixel.r());
+                                                    rgb_bytes.push(pixel.g());
+                                                    rgb_bytes.push(pixel.b());
+                                                }
 
-                                                // Encode image to PNG format
-                                                let mut png_data = Vec::new();
-                                                let encoder = PngEncoder::new(&mut png_data);
-                                                encoder.write_image(
-                                                    &rgba_bytes,
+                                                // [OPTIMIZATION 2] JPEG instead of PNG
+                                                // JPEG is much faster to encode/decode
+                                                img_data_buffer.clear();
+                                                let mut encoder = JpegEncoder::new_with_quality(&mut img_data_buffer, 75);
+                                                
+                                                encoder.encode(
+                                                    &rgb_bytes,
                                                     image.size[0] as u32,
                                                     image.size[1] as u32,
-                                                    ColorType::Rgba8.into(),
+                                                    ColorType::Rgb8.into(), // Changed to Rgb8
                                                 ).expect("Failed to encode image");
 
-                                                // Encode PNG data in base64
-                                                let encoded_image = encode(png_data);
+                                                let encoded_image = encode(&img_data_buffer);
 
-                                                // Retrieve additional game state data
+                                                // ... [Rest of your state gathering code remains identical] ...
                                                 let player_health = get_player_health();
                                                 let enemy_health = get_enemy_health();
-                                                let player_position = get_player_position();
-                                                let enemy_position = get_enemy_position();
-                                                // let inside_window = get_is_player_inside_window();
-                                                //if inside window is none return false
-                                                let inside_window = get_is_player_inside_window().unwrap_or(false);
-                                                // Create ScreenImageDetails
+                                                
+                                                // [PASTE THE REST OF YOUR STATE GATHERING LOGIC HERE]
+                                                // ...
                                                 let screen_details = ScreenImageDetails {
                                                     image: encoded_image,
                                                     player_health,
+                                                    // ... fill in the rest as before ...
                                                     enemy_health,
-                                                    player_position,
-                                                    enemy_position,
-                                                    inside_window,
+                                                    player_position: get_player_position(),
+                                                    enemy_position: get_enemy_position(),
+                                                    inside_window: get_is_player_inside_window().unwrap_or(false),
                                                     player_charge: get_player_charge(),
                                                     enemy_charge: get_enemy_charge(),
                                                     reward: get_rewards().last().map(|reward| reward.damage).unwrap_or(0),
@@ -986,17 +1000,15 @@ async fn handle_tcp_client(
                                                     cust_gage: get_cust_gage(),
                                                     own_navi_cust: get_player_navi_cust_parts().unwrap_or_default().into_iter().map(|x| x as u16).collect(),
                                                     enemy_navi_cust: get_enemy_navi_cust_parts().unwrap_or_default().into_iter().map(|x| x as u16).collect(),
-                                                    
                                                 };
+
                                                 clear_local_input();
                                                 clear_rewards();
                                                 clear_punishments();
 
-                                                // Serialize ScreenImageDetails to JSON
                                                 let details_json = serde_json::to_string(&screen_details)
                                                     .expect("Failed to serialize screen details");
 
-                                                // Create OutputMessage
                                                 let response = OutputMessage {
                                                     event: "screen_image".to_string(),
                                                     details: details_json,
@@ -1009,31 +1021,22 @@ async fn handle_tcp_client(
                                                     std::process::exit(0);
                                                 }
 
-                                                // Send the response back to Python
                                                 if let Err(e) = send_message_to_python(&mut socket, &response).await {
                                                     println!("Failed to send screen image: {}", e);
                                                 }
-                                            } else {
-                                                println!("No screen image available.");
                                             }
                                         }
                                         _ => {
-                                            // Handle other commands or send acknowledgment
-                                            if tx.send(cmd.clone()).is_err() {
-                                                // println!("Failed to send input command to event loop");
-                                            }
+                                            // Handle other commands
+                                            if tx.send(cmd.clone()).is_err() { }
                                             let response = OutputMessage {
                                                 event: "command_received".to_string(),
                                                 details: format!("Processed command: {:?}", cmd),
                                             };
-                                            if let Err(e) = send_message_to_python(&mut socket, &response).await {
-                                                println!("Failed to send message to Python: {}", e);
-                                            }
+                                            let _ = send_message_to_python(&mut socket, &response).await;
                                         }
                                     }
                                 } else {
-                                    // println!("Failed to parse input command");
-                                    //detailed log of the input command
                                     println!("Failed to parse input command: {}", line);
                                 }
                             }
@@ -1045,21 +1048,15 @@ async fn handle_tcp_client(
                     }
                 }
             }
-
-            // Reading from msg_rx
             Some(message) = msg_rx.recv() => {
                 if let Err(e) = send_message_to_python(&mut socket, &message).await {
                     println!("Failed to send message to Python: {}", e);
                 }
             }
-            else => {
-                // All senders have been dropped
-                break;
-            }
+            else => break,
         }
     }
 }
-
 // Function to send messages back to the Python app
 async fn send_message_to_python(
     socket: &mut tokio::net::TcpStream,
