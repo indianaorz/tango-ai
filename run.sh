@@ -14,7 +14,7 @@ export AI_MODEL_PATH="ai_model"
 export ROM_PATH="bn6,0"  # Replace with the actual path to your ROM file
 export SAVE_PATH="/home/lee/Documents/Tango/saves/BN6 Gregar.sav"  # Replace with the actual path to your save file
 
-export MATCHMAKING_ID="your_matchmaking_id"  # Replace with the actual matchmaking ID
+export MATCHMAKING_ID="id"  # Replace with the actual matchmaking ID
 
 # Print the environment variables being used
 echo "Running the application with the environment variables:"

@@ -99,22 +99,40 @@ INSTANCES: List[Dict] = generate_instances(NUM_GAME_PAIRS)
 # =============================================================================
 
 KEY_BIT_POSITIONS = {
+    # NOTE: Actual in-game bits we send are X/Z/RETURN + directions.
+    # We keep A/B as logical names via DISCRETE_ACTIONS mapping below.
     "A": 8, "DOWN": 7, "UP": 6, "LEFT": 5, "RIGHT": 4,
     "RETURN": 3, "X": 1, "Z": 0,
 }
 
+# Logical buttons:
+#   chip(A)  -> Z
+#   shoot(B) -> X
+BUTTON_ALIAS = {
+    "A": "Z",
+    "B": "X",
+    "START": "RETURN",
+}
+
+# Minimal discrete actions for BN control
 DISCRETE_ACTIONS = [
     "NO_OP",
     "UP", "DOWN", "LEFT", "RIGHT",
-    "X", "Z",
-    "LEFT_X", "RIGHT_X", "UP_X", "DOWN_X",
-    "HOLD_X", "HOLD_Z",
-    "RELEASE_X", "RELEASE_Z",
+    "A", "B",
+    "START",
+    "UP_A", "DOWN_A", "LEFT_A", "RIGHT_A",
+    "UP_B", "DOWN_B", "LEFT_B", "RIGHT_B",
 ]
 
-# For SkipAndRandomStrategy
-RANDOM_ACTION_KEYS_FOR_SKIP_STRATEGY = ["Z", "DOWN", "UP", "LEFT", "RIGHT", "X"]
+# For SkipAndRandomStrategy / scripted randomness
+RANDOM_ACTION_KEYS_FOR_SKIP_STRATEGY = ["B", "DOWN", "UP", "LEFT", "RIGHT", "A"]
 
+# =============================================================================
+# Nitrogen (ng.pt) policy config
+# =============================================================================
+NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", os.path.join(PROJECT_ROOT, "weights", "ng.pt"))
+USE_NG_POLICY = 1#bool(int(os.getenv("USE_NG_POLICY", "1")))  # 1 = use ng.pt inference for learner DRL policy
+NG_DEVICE = os.getenv("NG_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
 # =============================================================================
 # Environment variables to pass to game processes
 # =============================================================================
@@ -127,7 +145,7 @@ ENV_COMMON["AI_MODEL_PATH"]  = "ai_model"
 # Timing / networking
 # =============================================================================
 
-INFERENCE_FPS             = 20     # model decision rate per env (game can run faster)
+INFERENCE_FPS             = 60     # model decision rate per env (game can run faster)
 CONNECTION_RETRY_DELAY    = 5
 INSTANCE_INIT_WAIT_TIME   = 7
 INSTANCE_STAGGER_TIME     = 0.1
@@ -142,7 +160,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # =============================================================================
 # Model / observation settings
 # =============================================================================
-USE_IMAGES = bool(int(os.getenv("USE_IMAGES", "0")))  # 1 = use frames, 0 = state-only
+USE_IMAGES = bool(int(os.getenv("USE_IMAGES", "1")))  # 1 = use frames, 0 = state-only
 
 # Image frames (per observation sequence)
 FRAME_HEIGHT   = 84

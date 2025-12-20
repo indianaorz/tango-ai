@@ -194,27 +194,45 @@ async def main_drl_training_loop() -> None:
         device=config.DEVICE,
     )
 
+    # util_funcs stays the same
     util_funcs = {
         "int_to_binary_string": utils.int_to_binary_string,
         "map_discrete_action_to_buttons": utils.map_discrete_action_to_buttons,
         "preprocess_frame": utils.preprocess_frame,
+        "generate_random_action_for_skip_strategy": utils.generate_random_action_for_skip_strategy,
     }
 
-    # We keep a single shared learner strategy (it holds the model ref & buffers)
-    drl_strategy_shared = DRLAgentStrategy(
-        config.KEY_BIT_POSITIONS,
-        config.DISCRETE_ACTIONS,
-        util_funcs,
-        actor_critic_model,
-        config.DEVICE,
-        config.FRAME_HEIGHT,
-        config.FRAME_WIDTH,
-        config.SEQ_LEN_FRAMES,
-        max_health_config=config.MAX_HEALTH,
-        max_charge_config=config.MAX_CHARGE_LEVEL,
-        max_cust_gauge_config=config.MAX_CUST_GAUGE_VALUE,
-        use_images=config.USE_IMAGES,
-    )
+    # Decide what policy strategy to use for learner DRL windows
+    if config.USE_NG_POLICY:
+        from strategy_ng import NGAgentStrategy
+        drl_strategy_shared = NGAgentStrategy(
+            ckpt_path=config.NG_CKPT_PATH,
+            device=torch.device(config.NG_DEVICE),
+            key_bit_positions=config.KEY_BIT_POSITIONS,
+            discrete_actions=config.DISCRETE_ACTIONS,
+            util_fns=util_funcs,
+            frame_h=config.FRAME_HEIGHT,
+            frame_w=config.FRAME_WIDTH,
+            seq_len_frames=config.SEQ_LEN_FRAMES,
+            use_images=True,  # NG is a vision tower; force images on for now
+        )
+        print(f"✅ Using NG policy from {config.NG_CKPT_PATH}")
+    else:
+        # We keep a single shared learner strategy (it holds the model ref & buffers)
+        drl_strategy_shared = DRLAgentStrategy(
+            config.KEY_BIT_POSITIONS,
+            config.DISCRETE_ACTIONS,
+            util_funcs,
+            actor_critic_model,
+            config.DEVICE,
+            config.FRAME_HEIGHT,
+            config.FRAME_WIDTH,
+            config.SEQ_LEN_FRAMES,
+            max_health_config=config.MAX_HEALTH,
+            max_charge_config=config.MAX_CHARGE_LEVEL,
+            max_cust_gauge_config=config.MAX_CUST_GAUGE_VALUE,
+            use_images=config.USE_IMAGES,
+        )
 
     shared = {
         "episode_rewards": deque(maxlen=100),
@@ -384,6 +402,7 @@ async def main_drl_training_loop() -> None:
         return drl_strategy_shared
 
     def _attach_handler(cfg):
+
         strat = _make_strategy_from_cfg(cfg)
         h = ConnectionHandler(
             cfg, strat, config.INFERENCE_FPS,
@@ -394,6 +413,9 @@ async def main_drl_training_loop() -> None:
         if isinstance(strat, DRLAgentStrategy):
             drl_strategy_shared.set_cross_select(h.port, 0)
             # drl_strategy_shared.set_cross_select(h.port, random.randint(1, 5))
+
+        if config.USE_NG_POLICY:
+            h.collect_experience = False
 
         handlers.append(h)
         port_to_handler[h.port] = h

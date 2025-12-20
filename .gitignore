@@ -7,3 +7,5 @@
 /trained*
 /runs
 /__pycache__
+#ignore checkpoitns pt and trained files
+*.pt

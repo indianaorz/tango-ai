@@ -7,7 +7,19 @@ from PIL import Image
 import numpy as np
 
 #import DESCRETE_ACTIONS and KEY_BIT_POSITIONS from your config file
-from config import DISCRETE_ACTIONS, KEY_BIT_POSITIONS
+from config import DISCRETE_ACTIONS, KEY_BIT_POSITIONS, BUTTON_ALIAS
+
+
+def _bit(kb: dict, logical: str) -> int:
+    """
+    Convert logical button name -> actual bit position.
+    A -> Z, B -> X, START -> RETURN.
+    """
+    physical = BUTTON_ALIAS.get(logical, logical)
+    if physical not in kb:
+        raise KeyError(f"Unknown key '{logical}' (physical='{physical}') in KEY_BIT_POSITIONS")
+    return 1 << kb[physical]
+
 
 def int_to_binary_string(value):
     return format(value, '016b')
@@ -17,85 +29,73 @@ def generate_random_action_for_skip_strategy(key_bit_positions, random_action_ke
     num_keys_to_press = random.choices([0, 1, 2], weights=[0.3, 0.5, 0.2], k=1)[0]
     if num_keys_to_press > 0:
         selected_keys = random.sample(random_action_keys, num_keys_to_press)
-        for key_name in selected_keys:
-            if key_name in key_bit_positions:
-                binary_command |= (1 << key_bit_positions[key_name])
+        for logical in selected_keys:
+            physical = BUTTON_ALIAS.get(logical, logical)
+            if physical in key_bit_positions:
+                binary_command |= (1 << key_bit_positions[physical])
     return int_to_binary_string(binary_command)
+
+
 
 def map_discrete_action_to_buttons(action_index,
                                    discrete_actions_map,
                                    key_bit_positions_map):
     """
-    Maps a discrete action index to a 16‑bit button mask string.
+    Maps a discrete action index to a 16-bit button mask string.
 
-    HOLD_* sets the bit this frame; RELEASE_* returns 0 so the strategy
-    can drop the persistent hold.
+    Supported:
+      NO_OP
+      UP/DOWN/LEFT/RIGHT
+      A (chip) / B (shoot) / START
+      UP_A etc, UP_B etc
     """
     if action_index < 0 or action_index >= len(discrete_actions_map):
-        print(f"Warning: Action index {action_index} out of bounds. Defaulting to NO_OP.")
         return format(0, "016b")
 
-    name   = discrete_actions_map[action_index]
-    mask   = 0
-    kb     = key_bit_positions_map  # shorthand
+    name = discrete_actions_map[action_index]
+    kb = key_bit_positions_map
+    mask = 0
 
-    # ── directional & single‑frame buttons ───────────────────────────
-    if name == "UP":       mask |= 1 << kb["UP"]
-    elif name == "DOWN":   mask |= 1 << kb["DOWN"]
-    elif name == "LEFT":   mask |= 1 << kb["LEFT"]
-    elif name == "RIGHT":  mask |= 1 << kb["RIGHT"]
-    elif name == "X":      mask |= 1 << kb["X"]
-    elif name == "Z":      mask |= 1 << kb["Z"]
-    elif name == "LEFT_X":
-        mask |= (1 << kb["LEFT"]) | (1 << kb["X"])
-    elif name == "RIGHT_X":
-        mask |= (1 << kb["RIGHT"]) | (1 << kb["X"])
-    elif name == "UP_X":
-        mask |= (1 << kb["UP"]) | (1 << kb["X"])
-    elif name == "DOWN_X":
-        mask |= (1 << kb["DOWN"]) | (1 << kb["X"])
+    if name == "NO_OP":
+        mask = 0
 
-    # ── “sticky” actions (handled by DRLAgentStrategy) ───────────────
-    elif name in ("HOLD_X", "HOLD_Z"):
-        # holding just sets the bit this frame; persistence added later
-        if name.endswith("X"):
-            mask |= 1 << kb["X"]
+    elif name in ("UP", "DOWN", "LEFT", "RIGHT"):
+        mask |= _bit(kb, name)
+
+    elif name in ("A", "B", "START"):
+        mask |= _bit(kb, name)
+
+    elif "_" in name:
+        # combos: DIR_A / DIR_B
+        parts = name.split("_")
+        if len(parts) == 2:
+            d, btn = parts
+            if d in ("UP", "DOWN", "LEFT", "RIGHT") and btn in ("A", "B"):
+                mask |= _bit(kb, d)
+                mask |= _bit(kb, btn)
+            else:
+                mask = 0
         else:
-            mask |= 1 << kb["Z"]
-
-    elif name in ("RELEASE_X", "RELEASE_Z", "NO_OP"):
-        mask = 0  # explicit no‑buttons frame
-
+            mask = 0
     else:
-        print(f"Warning: Unmapped action '{name}'. Sending NO_OP.")
+        mask = 0
 
     return format(mask, "016b")
 
-
-
 # ----------------------------------------------------------------------
-#  Discrete‑action  ⇆  16‑bit button‑mask  conversions
+#  Discrete-action  ⇆  16-bit button-mask conversions
 # ----------------------------------------------------------------------
 def _build_bitmask_to_idx(discrete_actions, key_bit_positions):
-    """Pre‑compute {bitmask:int → action_idx:int} once at start‑up."""
     table = {}
     for idx in range(len(discrete_actions)):
-        mask_str = map_discrete_action_to_buttons(
-            idx, discrete_actions, key_bit_positions
-        )
+        mask_str = map_discrete_action_to_buttons(idx, discrete_actions, key_bit_positions)
         table[int(mask_str, 2)] = idx
     return table
 
-# Call **once** when the module is imported
-BITMASK_TO_ACTION_IDX = _build_bitmask_to_idx(
-    DISCRETE_ACTIONS, KEY_BIT_POSITIONS
-)
+BITMASK_TO_ACTION_IDX = _build_bitmask_to_idx(DISCRETE_ACTIONS, KEY_BIT_POSITIONS)
 
 def bitmask_to_action_index(bitmask: int) -> int:
-    """Returns the discrete‑action index for a pressed‑button mask."""
-    # Unknown combos fall back to NO_OP (index 0)
     return BITMASK_TO_ACTION_IDX.get(bitmask, 0)
-
 
 
 

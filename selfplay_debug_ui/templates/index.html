@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Selfplay Inference Debug</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="title">Selfplay Inference Debug</div>
+
+      <div class="pill">
+        Overall: <span id="overallHz" class="kbd">—</span> inf/s
+        <span class="muted" id="windowInfo"></span>
+      </div>
+
+      <div class="pill">
+        History:
+        <input id="histN" type="number" min="5" max="400" step="5" value="40" />
+        rows
+      </div>
+
+      <div class="pill muted" id="status">Starting…</div>
+    </header>
+
+    <main id="cards" class="wrap">
+      <div class="card">
+        <h2>Waiting…</h2>
+        <div class="meta muted">No data yet.</div>
+      </div>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
