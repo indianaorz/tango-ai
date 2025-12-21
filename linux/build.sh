@@ -24,8 +24,7 @@ resolver = "2"
 EOF
 fi
 
-# 2. [NEW FIX] Patch tango-filesync for "never type fallback" error
-# This replaces .collect::<Result<_, _>>() with .collect::<Result<(), _>>()
+# 2. Patch tango-filesync for Rust compiler compatibility
 if [ -f tango-filesync/src/lib.rs ]; then
     echo "🔧 Patching tango-filesync/src/lib.rs for Rust compiler compatibility..."
     sed -i 's/\.collect::<Result<_, _>>()/\.collect::<Result<(), _>>()/' tango-filesync/src/lib.rs
@@ -42,30 +41,41 @@ fi
 # 4. Build Linux binaries
 target_arch="x86_64"
 
-# Pin dependencies for Rust 1.87 compatibility
-echo "🔧 Pinning dependencies for compatibility..."
+# Pin dependency for compatibility
 cargo update --manifest-path tango/Cargo.toml -p home --precise 0.5.11 || true
 
 # Build
 cargo build --bin tango --target="${target_arch}-unknown-linux-gnu" --no-default-features --features=sdl2-audio,wgpu,cpal --release
 
-# 5. Assemble AppImage
-mkdir -p "tango_linux_workdir/${target_arch}/bin"
+# 5. Assemble AppImage Structure
+# [FIX] Use standard 'usr/bin' structure to avoid path mismatch
+mkdir -p "tango_linux_workdir/usr/bin"
+
 cp tango/src/icon.png tango_linux_workdir/tango.png
-cp linux/AppRun tango_linux_workdir/AppRun
 cp linux/tango.desktop tango_linux_workdir/tango.desktop
 
-# Handle variable binary location
+# [FIX] Generate AppRun pointing to correct usr/bin location
+# We also add "$@" to pass command line arguments (like 'export') through
+cat <<EOF > tango_linux_workdir/AppRun
+#!/bin/sh
+HERE="\$(dirname "\$(readlink -f "\${0}")")"
+export LD_LIBRARY_PATH="\${HERE}/usr/lib:\$LD_LIBRARY_PATH"
+export PATH="\${HERE}/usr/bin:\$PATH"
+exec "\${HERE}/usr/bin/tango" "\$@"
+EOF
+chmod a+x tango_linux_workdir/AppRun
+
+# [FIX] Copy binary to usr/bin
 if [ -f "target/${target_arch}-unknown-linux-gnu/release/tango" ]; then
-    cp "target/${target_arch}-unknown-linux-gnu/release/tango" "tango_linux_workdir/${target_arch}/bin/tango"
+    cp "target/${target_arch}-unknown-linux-gnu/release/tango" "tango_linux_workdir/usr/bin/tango"
 else
-    cp "tango/target/${target_arch}-unknown-linux-gnu/release/tango" "tango_linux_workdir/${target_arch}/bin/tango"
+    cp "tango/target/${target_arch}-unknown-linux-gnu/release/tango" "tango_linux_workdir/usr/bin/tango"
 fi
 
-# 6. Bundle ffmpeg
+# 6. Bundle ffmpeg into usr/bin
 ffmpeg_version="6.0"
-wget "https://github.com/eugeneware/ffmpeg-static/releases/download/b${ffmpeg_version}/ffmpeg-linux-x64" -O "tango_linux_workdir/${target_arch}/bin/ffmpeg"
-chmod a+x "tango_linux_workdir/${target_arch}/bin/ffmpeg"
+wget "https://github.com/eugeneware/ffmpeg-static/releases/download/b${ffmpeg_version}/ffmpeg-linux-x64" -O "tango_linux_workdir/usr/bin/ffmpeg"
+chmod a+x "tango_linux_workdir/usr/bin/ffmpeg"
 
 # 7. Build final AppImage
 mkdir -p dist

@@ -1,14 +1,12 @@
 #![windows_subsystem = "windows"]
 
-use global::{get_all_player_chip_folders, get_enemy_navi_cust_parts, get_frame_count, get_player_charge, get_player_navi_cust_parts, get_selected_menu_index};
-use std::io::Write;
 use std::sync::Arc;
-use tango_pvp::replay;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
-
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+use std::io::Write; // [FIX] Added Write trait for writeln!
 
 #[macro_use]
 extern crate lazy_static;
@@ -36,165 +34,270 @@ mod updater;
 mod version;
 mod video;
 
-use fluent_templates::Loader;
 use keyboard::Key;
+use fluent_templates::Loader;
 
-mod global; // Include the global module
+mod global;
 
+// [FIX] Ensure all used functions are imported. 
+// If any are missing from global.rs, you must verify global.rs exports them publicly.
 use crate::global::{
     add_punishment, add_reward, clear_local_input, clear_punishments, clear_rewards, get_all_chip_codes,
     get_all_chip_slots, get_all_enemy_chip_folders, get_all_enemy_code_folders, get_all_enemy_tag_folders,
     get_all_player_code_folders, get_all_player_tag_folders, get_all_selected_chip_indices, get_beast_out_selectable,
-    get_chip_code, get_chip_count_visible, get_chip_selected_count, get_chip_slot, get_enemy_charge,
+    get_chip_count_visible, get_chip_selected_count, get_enemy_charge,
     get_enemy_emotion_state, get_enemy_game_emotion_state, get_enemy_health, get_enemy_position, get_enemy_reg_chip,
     get_enemy_selected_chip, get_inside_cross_window, get_is_player_inside_window, get_local_input,
     get_player_emotion_state, get_player_game_emotion_state, get_player_health, get_player_position,
     get_player_reg_chip, get_player_selected_chip, get_punishments, get_rewards, get_screen_image,
-    get_all_grid_owner_states,get_all_grid_states,get_player_grid_position, get_enemy_grid_position,get_is_offerer,
+    get_all_grid_owner_states, get_all_grid_states, get_player_grid_position, get_enemy_grid_position, get_is_offerer,
     get_cust_gage,
-    get_selected_chip_index, get_selected_cross_index, get_winner, RewardPunishment, SCREEN_IMAGE,
+    get_selected_chip_index, get_selected_cross_index, get_winner, RewardPunishment,
+    // [FIX] Add missing imports identified by compiler
+    get_player_charge, get_selected_menu_index, get_all_player_chip_folders, 
+    get_player_navi_cust_parts, get_enemy_navi_cust_parts
 };
-use crate::global::{PUNISHMENTS, REWARDS}; // Import the global variables
 
-use base64::encode; // Add base64 for encoding images as strings
+use base64::encode;
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
+use image::codecs::jpeg::JpegEncoder;
+use image::ColorType;
 
 const TANGO_CHILD_ENV_VAR: &str = "TANGO_CHILD";
 
+#[derive(Debug, Clone, Copy)]
+enum UserEvent {
+    RequestRepaint,
+}
+
+// --- CLI DEFINITIONS ---
+
+#[derive(Parser, Debug)]
+#[command(name = "tango")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Export a replay to video + JSONL inputs
+    Export {
+        /// Path to the replay file
+        replay_path: PathBuf,
+
+        /// Output path for the video (jsonl will be created alongside)
+        #[arg(long)]
+        output_path: PathBuf,
+
+        /// Path to the ROM file (e.g., bn6.gba). Defaults to 'bn6_gregar.gba' if not set.
+        #[arg(long, default_value = "bn6_gregar.gba")]
+        rom_path: PathBuf,
+    },
+}
+
 #[derive(Debug)]
-struct Args {
+struct EnvArgs {
     init_link_code: String,
     ai_model: String,
     rom: String,
     save: String,
-    port: u16,                   // Added port number
-    replay_path: Option<String>, // Add replay path argument
+    port: u16,
+    replay_path: Option<String>,
 }
 
-impl Args {
+impl EnvArgs {
     fn from_env() -> Result<Self, anyhow::Error> {
         Ok(Self {
             init_link_code: std::env::var("INIT_LINK_CODE")?,
             ai_model: std::env::var("AI_MODEL_PATH")?,
             rom: std::env::var("ROM_PATH")?,
             save: std::env::var("SAVE_PATH")?,
-            port: std::env::var("PORT")?.parse::<u16>()?, // Read port from environment variable
-            replay_path: std::env::var("REPLAY_PATH").ok(), // Read replay path from environment variable
+            port: std::env::var("PORT")?.parse::<u16>()?,
+            replay_path: std::env::var("REPLAY_PATH").ok(),
         })
     }
 }
-enum UserEvent {
-    RequestRepaint,
-}
 
-use lazy_static::lazy_static;
+// --- MAIN ENTRY POINT ---
 
 fn main() -> Result<(), anyhow::Error> {
     std::env::set_var("RUST_BACKTRACE", "FULL");
-
-    let args = Args::from_env()?; // Read arguments from environment variables
-    println!("Parsed arguments from env: {:?}", args);
-
-    // Check if the REPLAY_PATH environment variable is set and store it globally
-    if let Ok(replay_path) = std::env::var("REPLAY_PATH") {
-        global::set_replay_path(replay_path);
-    }
-
-    let config = config::Config::load_or_create()?;
-    config.ensure_dirs()?;
 
     env_logger::Builder::from_default_env()
         .filter(Some("tango"), log::LevelFilter::Info)
         .filter(Some("datachannel"), log::LevelFilter::Info)
         .filter(Some("mgba"), log::LevelFilter::Info)
+        .filter(Some("tango_pvp"), log::LevelFilter::Info)
         .init();
 
-    log::info!("welcome to tango {}!", version::current());
+    // Parse CLI Arguments
+    let cli = Cli::parse();
 
-    if std::env::var(TANGO_CHILD_ENV_VAR).unwrap_or_default() == "1" {
-        return child_main(config, args);
-    }
+    match cli.command {
+        // [MODE 1] Dataset Generation / Export
+        Some(Commands::Export { replay_path, output_path, rom_path }) => {
+            log::info!("Starting Export Mode...");
+            log::info!("   Replay: {:?}", replay_path);
+            log::info!("   Output: {:?}", output_path);
+            log::info!("   ROM:    {:?}", rom_path);
 
-    let log_filename = format!(
-        "{}.log",
-        time::OffsetDateTime::from(std::time::SystemTime::now())
-            .format(time::macros::format_description!(
-                "[year padding:zero][month padding:zero repr:numerical][day padding:zero][hour padding:zero][minute padding:zero][second padding:zero]"
-            ))
-            .expect("format time"),
-    );
-
-    let log_path = config.logs_path().join(log_filename);
-    log::info!("logging to: {}", log_path.display());
-
-    let mut log_file = match std::fs::File::create(&log_path) {
-        Ok(f) => f,
-        Err(e) => {
-            rfd::MessageDialog::new()
-                //.set_title(&i18n::LOCALES.lookup(&config.language, "window-title").unwrap())
-                .set_description(
-                    &i18n::LOCALES
-                        .lookup_with_args(
-                            &config.language,
-                            "crash-no-log",
-                            &std::collections::HashMap::from([("error", format!("{:?}", e).into())]),
-                        )
-                        .unwrap(),
-                )
-                .set_level(rfd::MessageLevel::Error)
-                .show();
-            return Err(e.into());
+            let rt = Runtime::new()?;
+            rt.block_on(run_export(replay_path, output_path, rom_path))?;
+            log::info!("Export Complete.");
+            Ok(())
         }
+        
+        // [MODE 2] AI Runner / Game Loop (Default)
+        None => {
+            log::info!("welcome to tango {}!", version::current());
+
+            if std::env::var("INIT_LINK_CODE").is_err() && std::env::var(TANGO_CHILD_ENV_VAR).is_err() {
+                 println!("No command provided and INIT_LINK_CODE missing.");
+                 println!("Usage: tango export <REPLAY> --output-path <OUT> --rom-path <ROM>");
+                 // [FIX] Uncomment this line so it exits gracefully instead of crashing
+                 return Ok(()); 
+            }
+
+            let config = config::Config::load_or_create()?;
+            config.ensure_dirs()?;
+
+            if std::env::var(TANGO_CHILD_ENV_VAR).unwrap_or_default() == "1" {
+                let args = EnvArgs::from_env()?; 
+                return child_main(config, args);
+            }
+
+            let log_filename = format!(
+                "{}.log",
+                time::OffsetDateTime::from(std::time::SystemTime::now())
+                    .format(time::macros::format_description!(
+                        "[year padding:zero][month padding:zero repr:numerical][day padding:zero][hour padding:zero][minute padding:zero][second padding:zero]"
+                    ))
+                    .expect("format time"),
+            );
+        
+            let log_path = config.logs_path().join(log_filename);
+            log::info!("logging to: {}", log_path.display());
+        
+            let mut log_file = match std::fs::File::create(&log_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    rfd::MessageDialog::new()
+                        .set_description(
+                            &i18n::LOCALES
+                                .lookup_with_args(
+                                    &config.language,
+                                    "crash-no-log",
+                                    &std::collections::HashMap::from([("error", format!("{:?}", e).into())]),
+                                )
+                                .unwrap(),
+                        )
+                        .set_level(rfd::MessageLevel::Error)
+                        .show();
+                    return Err(e.into());
+                }
+            };
+        
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args(std::env::args_os().skip(1).collect::<Vec<std::ffi::OsString>>())
+                .env(TANGO_CHILD_ENV_VAR, "1")
+                .stderr(log_file.try_clone()?)
+                .spawn()?
+                .wait()?;
+        
+            writeln!(&mut log_file, "exit status: {:?}", status)?;
+        
+            if !status.success() {
+                rfd::MessageDialog::new()
+                    .set_description(
+                        &i18n::LOCALES
+                            .lookup_with_args(
+                                &config.language,
+                                "crash",
+                                &std::collections::HashMap::from([("path", format!("{}", log_path.display()).into())]),
+                            )
+                            .unwrap(),
+                    )
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
+            }
+        
+            if let Some(code) = status.code() {
+                std::process::exit(code);
+            }
+        
+            Ok(())
+        }
+    }
+}
+
+// --- EXPORT HELPER ---
+
+async fn run_export(replay_path: PathBuf, output_path: PathBuf, rom_path: PathBuf) -> Result<(), anyhow::Error> {
+    let mut f = std::fs::File::open(&replay_path)?;
+    let replay = tango_pvp::replay::Replay::decode(&mut f)?;
+
+    let rom = std::fs::read(&rom_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read ROM at {:?}: {}", rom_path, e))?;
+
+    let detected_game = tango_gamedb::detect(&rom)
+        .ok_or(anyhow::anyhow!("ROM detection failed."))?;
+    
+    let hooks = tango_pvp::hooks::hooks_for_gamedb_entry(detected_game)
+        .ok_or(anyhow::anyhow!("No hooks found."))?;
+
+    let settings = tango_pvp::replay::export::Settings {
+        ffmpeg: None,
+        ffmpeg_audio_flags: "-c:a aac -ar 48000 -b:a 384k -ac 2".to_string(),
+        ffmpeg_video_flags: "-c:v libx264 -vf scale=iw*2:ih*2:flags=neighbor,format=yuv420p -force_key_frames expr:gte(t,n_forced/2) -crf 18 -bf 2".to_string(),
+        ffmpeg_mux_flags: "-movflags +faststart -strict -2".to_string(),
+        disable_bgm: false,
     };
 
-    let status = std::process::Command::new(std::env::current_exe()?)
-        .args(std::env::args_os().skip(1).collect::<Vec<std::ffi::OsString>>())
-        .env(TANGO_CHILD_ENV_VAR, "1")
-        .stderr(log_file.try_clone()?)
-        .spawn()?
-        .wait()?;
+    // [FIX] Use indicatif via full path since we didn't import it at top to avoid conflict
+    let bar = indicatif::ProgressBar::new(0);
+    bar.set_style(indicatif::ProgressStyle::default_bar()
+        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+        .unwrap());
+    
+    let cb = move |current, total| {
+        bar.set_length(total as u64);
+        bar.set_position(current as u64);
+    };
 
-    writeln!(&mut log_file, "exit status: {:?}", status)?;
-
-    if !status.success() {
-        rfd::MessageDialog::new()
-            //.set_title(&i18n::LOCALES.lookup(&config.language, "window-title").unwrap())
-            .set_description(
-                &i18n::LOCALES
-                    .lookup_with_args(
-                        &config.language,
-                        "crash",
-                        &std::collections::HashMap::from([("path", format!("{}", log_path.display()).into())]),
-                    )
-                    .unwrap(),
-            )
-            .set_level(rfd::MessageLevel::Error)
-            .show();
-    }
-
-    if let Some(code) = status.code() {
-        std::process::exit(code);
-    }
+    tango_pvp::replay::export::export(
+        &rom,
+        hooks,
+        &[replay],
+        &output_path,
+        &settings,
+        cb,
+    ).await?;
 
     Ok(())
 }
 
-fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Error> {
-    // Use the init_link_code from args
+// --- CHILD MAIN ---
+
+fn child_main(mut config: config::Config, args: EnvArgs) -> Result<(), anyhow::Error> {
     let init_link_code = args.init_link_code;
     let rom_path = args.rom;
     let save_path = args.save;
     let port = args.port;
 
-    let replay_path = args.replay_path.unwrap_or_default();
+    if let Some(rpath) = args.replay_path {
+        global::set_replay_path(rpath);
+    }
 
-    // Create a separate runtime for asynchronous tasks
     let rt = Runtime::new()?;
 
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<InputCommand>(); // For receiving input commands
-    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputMessage>(); // For sending messages back to Python
-    let output_tx = Arc::new(Mutex::new(Some(output_tx))); // Wrap in Arc<Mutex<>> for sharing between threads
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<InputCommand>(); 
+    let (output_tx, _output_rx) = mpsc::unbounded_channel::<OutputMessage>(); // _output_rx to silence warning
+    let output_tx = Arc::new(Mutex::new(Some(output_tx))); 
 
-    // Run the async task within this runtime
     rt.spawn(setup_tcp_listener(port, input_tx.clone(), output_tx.clone()));
 
     println!("Using init_link_code: {}", init_link_code);
@@ -216,8 +319,8 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
     let sdl = sdl2::init().unwrap();
     let game_controller = sdl.game_controller().unwrap();
 
-    let event_loop = winit::event_loop::EventLoopBuilder::with_user_event().build().unwrap();
-    let mut sdl_event_loop = sdl.event_pump().unwrap();
+    let event_loop = winit::event_loop::EventLoopBuilder::<UserEvent>::with_user_event().build().unwrap();
+    // let mut sdl_event_loop = sdl.event_pump().unwrap(); // Unused
 
     let icon = image::load_from_memory(include_bytes!("icon.png"))?;
     let icon_width = icon.width();
@@ -225,8 +328,7 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
     let window_title = format!("{}", args.port);
 
     let window_builder = winit::window::WindowBuilder::new()
-        .with_title(&window_title) // Set the title to the port number
-        //.with_title(i18n::LOCALES.lookup(&config.read().language, "window-title").unwrap())
+        .with_title(&window_title) 
         .with_window_icon(Some(winit::window::Icon::from_rgba(
             icon.into_bytes(),
             icon_width,
@@ -284,7 +386,6 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
 
     let mut controllers: std::collections::HashMap<u32, sdl2::controller::GameController> =
         std::collections::HashMap::new();
-    // Preemptively enumerate controllers.
     for which in 0..game_controller.num_joysticks().unwrap() {
         if !game_controller.is_game_controller(which) {
             continue;
@@ -357,20 +458,11 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
         };
 
         match event {
-            winit::event::Event::WindowEvent {
-                event: window_event, ..
-            } => {
+            winit::event::Event::WindowEvent { event: window_event, .. } => {
                 match window_event {
                     winit::event::WindowEvent::RedrawRequested if !cfg!(windows) => redraw(),
-                    winit::event::WindowEvent::MouseInput { .. } | winit::event::WindowEvent::CursorMoved { .. } => {
-                        state.last_mouse_motion_time = Some(std::time::Instant::now());
-                        if state.steal_input.is_none() {
-                            let _ = gfx_backend.on_window_event(&window_event);
-                        }
-                    }
                     winit::event::WindowEvent::KeyboardInput {
-                        event:
-                            winit::event::KeyEvent {
+                        event: winit::event::KeyEvent {
                                 physical_key: winit::keyboard::PhysicalKey::Code(winit_key),
                                 state: element_state,
                                 ..
@@ -404,17 +496,8 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                     window_event => {
                         let _ = gfx_backend.on_window_event(&window_event);
                         match window_event {
-                            // winit::event::WindowEvent::Focused(false) => {
-                            //     input_state.clear_keys();
-                            // }
                             winit::event::WindowEvent::Occluded(false) => {
                                 next_config.full_screen = gfx_backend.window().fullscreen().is_some();
-                            }
-                            winit::event::WindowEvent::CursorEntered { .. } => {
-                                state.last_mouse_motion_time = Some(std::time::Instant::now());
-                            }
-                            winit::event::WindowEvent::CursorLeft { .. } => {
-                                state.last_mouse_motion_time = None;
                             }
                             winit::event::WindowEvent::CloseRequested => {
                                 window_target.exit();
@@ -425,37 +508,16 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                 };
                 gfx_backend.window().request_redraw();
             }
-            winit::event::Event::NewEvents(cause) => {
-                input_state.digest();
-                if let winit::event::StartCause::ResumeTimeReached { .. } = cause {
-                    gfx_backend.window().request_redraw();
-                }
-            }
-            winit::event::Event::UserEvent(UserEvent::RequestRepaint) => {
-                gfx_backend.window().request_redraw();
-            }
             winit::event::Event::AboutToWait => {
-                if cfg!(windows) {
-                    redraw();
-                }
+                if cfg!(windows) { redraw(); }
 
-                // Process commands from the Python app
                 while let Ok(cmd) = input_rx.try_recv() {
-                    // Debug log for received command
-                    // println!("Received command from TCP: {:?}", cmd);
-
-                    // Clear input state to release any previously pressed keys
                     input_state.clear_keys();
-
-                    // Simulate keyboard input based on the command
                     match cmd.command_type.as_str() {
                         "key_press" => {
-                            // Loop over each bit in the binary string and simulate key presses
                             for (i, bit) in cmd.key.chars().rev().enumerate() {
                                 if bit == '1' {
                                     if let Some(key) = map_bit_to_key(i) {
-                                        // Simulate a key press event for the active bits
-                                        // println!("Simulating key press for bit position: {}", i);
                                         handle_input_event(
                                             &mut input_state,
                                             &mut state,
@@ -463,19 +525,14 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
                                             winit::event::ElementState::Pressed,
                                             &mut next_config,
                                         );
-                                    } else {
-                                        // println!("Unrecognized key for bit position: {}", i);
                                     }
                                 }
                             }
                         }
-                        _ => {
-                            println!("Unknown command type: {}", cmd.command_type);
-                        }
+                        _ => {}
                     }
                 }
             }
-
             _ => {}
         }
 
@@ -484,150 +541,28 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
             session.set_master_volume(next_config.volume);
         }
 
-        // Now handle global rewards and punishments instead of session-specific ones
-        let rewards = get_rewards(); // Use global function to get rewards
-        let punishments = get_punishments(); // Use global function to get punishments
-
-        // if !rewards.is_empty() {
-        //     // println!("Global rewards: {:?}", rewards);
-        //     if let Some(ref output_tx) = *output_tx.lock() {
-        //         for reward in rewards {
-        //             let message = OutputMessage {
-        //                 event: "reward".to_string(),
-        //                 details: format!("damage: {}", reward.damage),
-        //             };
-        //             // println!("Sending message: {:?}", message);
-        //             if let Err(e) = output_tx.send(message) {
-        //                 println!("Failed to send reward message: {}", e);
-        //             }
-        //         }
-        //         clear_rewards(); // Clear global rewards after processing
-        //     }
-        // }
-
-        // if !punishments.is_empty() {
-        //     // println!("Global punishments: {:?}", punishments);
-        //     if let Some(ref output_tx) = *output_tx.lock() {
-        //         for punishment in punishments {
-        //             let message = OutputMessage {
-        //                 event: "punishment".to_string(),
-        //                 details: format!("damage: {}", punishment.damage),
-        //             };
-        //             if let Err(e) = output_tx.send(message) {
-        //                 println!("Failed to send punishment message: {}", e);
-        //             }
-        //         }
-        //         clear_punishments(); // Clear global punishments after processing
-        //     }
-        // }
-
         if let Some(player_won) = get_winner() {
-            // Send a winner message to the Python script
             if let Some(ref output_tx) = *output_tx.lock() {
                 let message = OutputMessage {
                     event: "winner".to_string(),
-                    details: format!("{}", player_won), // Sends "true" if the player won, "false" otherwise
+                    details: format!("{}", player_won),
                 };
-                if let Err(e) = output_tx.send(message) {
-                    println!("Failed to send winner message: {}", e);
-                }
+                let _ = output_tx.send(message);
             }
-
-            // Exit the application after sending the winner message
+            // Removed unreachable exit, using window_target to exit loop
+            // Note: std::process::exit(0) is fine if you want to kill the whole process instantly
             std::process::exit(0);
         }
 
-        // Define the directory where training data will be saved
-        // only do if replay path is set
-        // if !replay_path.is_empty() {
-        //     //split replay path on the last /
-        //     let filename_path = replay_path.split("/").last().unwrap();
-        //     //remove everything after .
-        //     let path = format!("/home/lee/TANGO/training_data/{}", filename_path.split(".").next().unwrap());
-        //     let training_data_dir = Path::new(&path);
-
-        //     // Retrieve the screen image
-        //     // only save the screen image once every 60 frames
-        //     let current_frame_count = get_frame_count();
-        //     if current_frame_count % 2 == 0 {
-        //         if let Some(image) = get_screen_image() {
-        //             // Convert Color32 slice to raw bytes (RGBA)
-        //             let rgba_bytes: Vec<u8> = image.pixels.iter().flat_map(|pixel| {
-        //                 vec![pixel.r(), pixel.g(), pixel.b(), pixel.a()]
-        //             }).collect();
-
-        //             // Encode image to PNG format
-        //             let mut png_data = Vec::new();
-        //             let encoder = PngEncoder::new(&mut png_data);
-        //             encoder.write_image(
-        //                 &rgba_bytes,
-        //                 image.size[0] as u32,
-        //                 image.size[1] as u32,
-        //                 ColorType::Rgba8.into(),
-        //             ).expect("Failed to encode image");
-
-        //             // Save the game state locally
-        //             let inputString = match get_local_input() {
-        //                 Some(input) => format!("{:016b}", input),
-        //                 None => "0000000000000000".to_string(), // or handle None case appropriately
-        //             };
-        //             // println!("Local input: {:?}", inputString);
-        //             if let Err(e) = save_game_state(
-        //                 &png_data,
-        //                 &inputString,
-        //                 get_player_health(),
-        //                 get_enemy_health(),
-        //                 get_player_position(),
-        //                 get_enemy_position(),
-        //                 get_is_player_inside_window(),
-        //                 get_rewards().last().cloned(),
-        //                 get_punishments().last().cloned(),
-        //                 get_player_charge(),
-        //                 get_enemy_charge(),
-        //                 training_data_dir,
-        //             ) {
-        //                 // println!("Failed to save game state: {:?}", e);
-        //             }
-        //             //clear rewards and punishments
-        //             clear_rewards();
-        //             clear_punishments();
-        //         }
-        //     }
-        // }
-
-        // Handling local inputs
-        let local_inputs = get_local_input();
-        if let Some(input) = local_inputs {
-            if let Some(ref output_tx) = *output_tx.lock() {
-                let input_message = OutputMessage {
-                    event: "local_input".to_string(),
-                    details: format!("{:?}", input),
-                };
-                // if let Err(e) = output_tx.send(input_message) {
-                //     println!("Failed to send local inputs: {}", e);
-                // }
-                // clear_local_input(); // Clear inputs after sending
-            }
-        }
-
-        //save data
-
-        next_config.window_size = gfx_backend
-            .window()
-            .inner_size()
-            .to_logical(gfx_backend.window().scale_factor());
+        next_config.window_size = gfx_backend.window().inner_size().to_logical(gfx_backend.window().scale_factor());
 
         if next_config != old_config {
             last_config_dirty_time = Some(std::time::Instant::now());
             *config.write() = next_config.clone();
         }
 
-        if last_config_dirty_time
-            .map(|t| (std::time::Instant::now() - t) > std::time::Duration::from_secs(1))
-            .unwrap_or(false)
-        {
-            let r = next_config.save();
-            log::info!("config flushed: {:?}", r);
+        if last_config_dirty_time.map(|t| (std::time::Instant::now() - t) > std::time::Duration::from_secs(1)).unwrap_or(false) {
+            let _ = next_config.save();
             last_config_dirty_time = None;
         }
 
@@ -638,147 +573,22 @@ fn child_main(mut config: config::Config, args: Args) -> Result<(), anyhow::Erro
 
     Ok(())
 }
-use serde::Serialize;
 
-#[derive(Serialize, Debug)]
-struct GameState {
-    image_path: String,
-    input: String,
-    player_health: u16,
-    enemy_health: u16,
-    player_position: Option<(u16, u16)>,
-    enemy_position: Option<(u16, u16)>,
-    inside_window: Option<bool>,
-    reward: u16,
-    punishment: u16,
-    player_charge: u16,
-    enemy_charge: u16,
-}
-
-// Add a function to map Python command keys to physical keys in the game
-fn map_key_to_physical_key(key: &str) -> Option<Key> {
-    match key.to_lowercase().as_str() {
-        "up" => Some(Key::Up),
-        "down" => Some(Key::Down),
-        "left" => Some(Key::Left),
-        "right" => Some(Key::Right),
-        "z" => Some(Key::Z),
-        "x" => Some(Key::X),
-        "a" => Some(Key::A),
-        "s" => Some(Key::S),
-        "return" => Some(Key::Return),
-        _ => None,
-    }
-}
-
-use anyhow::Result;
-use image::codecs::jpeg::JpegEncoder; // <--- ADD THIS
-use image::ColorType;
-use serde_json::to_string_pretty;
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-/// Saves the game state by writing the screenshot and the corresponding JSON data.
-///
-/// # Arguments
-///
-/// * `image_bytes` - A slice of bytes representing the PNG-encoded image.
-/// * `input_binary` - A string representing the input binary data.
-/// * `player_health` - The player's health value.
-/// * `enemy_health` - The enemy's health value.
-/// * `player_position` - The player's position as an optional tuple.
-/// * `enemy_position` - The enemy's position as an optional tuple.
-/// * `inside_window` - Whether the player is inside the window.
-/// * `reward` - An optional reward.
-/// * `punishment` - An optional punishment.
-/// * `training_data_dir` - The directory where the JSON file will be saved.
-///
-/// # Returns
-///
-/// * `Result<()>` - Ok if successful, Err otherwise.
-///
-fn save_game_state(
-    image_bytes: &[u8],
-    input_binary: &str,
-    player_health: u16,
-    enemy_health: u16,
-    player_position: Option<(u16, u16)>,
-    enemy_position: Option<(u16, u16)>,
-    inside_window: Option<bool>,
-    reward: Option<RewardPunishment>,
-    punishment: Option<RewardPunishment>,
-    player_charge: u16,
-    enemy_charge: u16,
-    training_data_dir: &Path,
-) -> Result<()> {
-    // Convert to absolute path
-    // let absolute_path = env::current_dir()?.join(training_data_dir);
-    // println!("Saving game state to directory: {:?}", absolute_path);
-
-    // // Ensure the training_data_dir exists
-    // fs::create_dir_all(&absolute_path)?;
-
-    // // Create a timestamp for the filename
-    // let start = SystemTime::now();
-    // let since_the_epoch = start.duration_since(UNIX_EPOCH)?;
-    // let timestamp = since_the_epoch.as_millis();
-
-    // // Define the image and JSON filenames
-    // let image_filename = format!("{}.png", timestamp);
-    // let json_filename = format!("{}.json", timestamp);
-
-    // let image_path = training_data_dir.join(&image_filename);
-    // let json_path = training_data_dir.join(&json_filename);
-
-    // // Save the image
-    // fs::write(&image_path, image_bytes)?;
-
-    // let reward = reward.map(|reward| reward.damage).unwrap_or(0);
-    // let punishment = punishment.map(|punishment| punishment.damage).unwrap_or(0);
-    // // Create the GameState instance
-    // let game_state = GameState {
-    //     image_path: image_path.to_string_lossy().to_string(),
-    //     input: input_binary.to_string(),
-    //     player_health,
-    //     enemy_health,
-    //     player_position,
-    //     enemy_position,
-    //     inside_window,
-    //     reward,
-    //     punishment,
-    //     player_charge,
-    //     enemy_charge,
-    // };
-
-    // // Serialize the GameState to pretty JSON
-    // let json_data = to_string_pretty(&game_state)?;
-
-    // // Write the JSON data to the file
-    // fs::write(&json_path, json_data)?;
-
-    Ok(())
-}
-
-// Function to map bits to specific keys
 fn map_bit_to_key(bit: usize) -> Option<Key> {
     match bit {
-        8 => Some(Key::A),      // 0000000100000000
-        7 => Some(Key::Down),   // 0000000010000000
-        6 => Some(Key::Up),     // 0000000001000000
-        5 => Some(Key::Left),   // 0000000000100000
-        4 => Some(Key::Right),  // 0000000000010000
-        9 => Some(Key::S),      // 0000001000000000
-        1 => Some(Key::X),      // 0000000000000010
-        0 => Some(Key::Z),      // 0000000000000001
-        3 => Some(Key::Return), // 0000000000001000 -> enter
+        8 => Some(Key::A),      
+        7 => Some(Key::Down),   
+        6 => Some(Key::Up),     
+        5 => Some(Key::Left),   
+        4 => Some(Key::Right),  
+        9 => Some(Key::S),      
+        1 => Some(Key::X),      
+        0 => Some(Key::Z),      
+        3 => Some(Key::Return), 
         _ => None,
     }
 }
 
-// Use this helper function to handle input consistently
-
-// Function to handle input events consistently
 fn handle_input_event(
     input_state: &mut input::State,
     state: &mut gui::State,
@@ -799,47 +609,14 @@ fn handle_input_event(
         }
     }
 }
-// Modify setup_tcp_listener to accept output_tx
-async fn setup_tcp_listener(
-    port: u16,
-    tx: mpsc::UnboundedSender<InputCommand>,
-    output_tx: Arc<Mutex<Option<mpsc::UnboundedSender<OutputMessage>>>>,
-) -> Result<(), anyhow::Error> {
-    let listener = TcpListener::bind(("127.0.0.1", port)).await?;
-    println!("Listening for input events on port {}", port);
 
-    loop {
-        match listener.accept().await {
-            Ok((socket, addr)) => {
-                println!("Accepted connection from {} on port {}", addr, port);
-                
-                // [FIX] Disable Nagle's Algorithm to remove the ~40ms latency floor
-                if let Err(e) = socket.set_nodelay(true) {
-                    println!("Warning: Failed to set TCP_NODELAY: {}", e);
-                }
-
-                tokio::spawn(handle_tcp_client(socket, tx.clone(), output_tx.clone()));
-            }
-            Err(e) => {
-                println!("Failed to accept connection: {}", e);
-            }
-        }
-    }
-}
-
-use parking_lot::Mutex;
-use serde::Deserialize;
-use tokio::io::AsyncWriteExt; // Add this for sending data back
-use tokio::sync::mpsc; // Add this for thread safety
-
-#[derive(Deserialize, Serialize, Debug, Clone)] // Add Clone here
+#[derive(Deserialize, Serialize, Debug, Clone)]
 struct InputCommand {
     #[serde(rename = "type")]
     command_type: String,
     key: String,
 }
 
-// Define a struct for messages sent back to the Python app
 #[derive(Serialize, Debug)]
 struct OutputMessage {
     event: String,
@@ -848,7 +625,7 @@ struct OutputMessage {
 
 #[derive(Serialize, Debug)]
 struct ScreenImageDetails {
-    image: String, // Base64-encoded PNG image
+    image: String,
     player_health: u16,
     enemy_health: u16,
     player_position: Option<(u16, u16)>,
@@ -891,23 +668,40 @@ struct ScreenImageDetails {
     own_navi_cust: Vec<u16>,
     enemy_navi_cust: Vec<u16>,
 }
-use egui::Color32;
-use image::ImageEncoder;
+
+async fn setup_tcp_listener(
+    port: u16,
+    tx: mpsc::UnboundedSender<InputCommand>,
+    output_tx: Arc<Mutex<Option<mpsc::UnboundedSender<OutputMessage>>>>,
+) -> Result<(), anyhow::Error> {
+    let listener = TcpListener::bind(("127.0.0.1", port)).await?;
+    println!("Listening for input events on port {}", port);
+
+    loop {
+        match listener.accept().await {
+            Ok((socket, addr)) => {
+                println!("Accepted connection from {} on port {}", addr, port);
+                if let Err(e) = socket.set_nodelay(true) {
+                    println!("Warning: Failed to set TCP_NODELAY: {}", e);
+                }
+                tokio::spawn(handle_tcp_client(socket, tx.clone(), output_tx.clone()));
+            }
+            Err(e) => {
+                println!("Failed to accept connection: {}", e);
+            }
+        }
+    }
+}
 
 async fn handle_tcp_client(
     mut socket: tokio::net::TcpStream,
     tx: mpsc::UnboundedSender<InputCommand>,
     output_tx: Arc<Mutex<Option<mpsc::UnboundedSender<OutputMessage>>>>,
 ) {
-    // Register the output_tx for sending messages
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<OutputMessage>();
     *output_tx.lock() = Some(msg_tx);
 
-    // Reuse this buffer for pixel data to avoid re-allocating 38k times per frame
-    // GBA resolution is 240x160. RGB is 3 bytes per pixel.
     let mut rgb_bytes: Vec<u8> = Vec::with_capacity(240 * 160 * 3);
-    
-    // Reuse this buffer for the compressed image data
     let mut img_data_buffer: Vec<u8> = Vec::with_capacity(1024 * 50);
 
     let mut buf = vec![0; 8192];
@@ -915,7 +709,7 @@ async fn handle_tcp_client(
         tokio::select! {
             n = socket.read(&mut buf) => {
                 match n {
-                    Ok(0) => break, // Connection closed
+                    Ok(0) => break,
                     Ok(n) => {
                         let data = &buf[..n];
                         if let Ok(command_str) = std::str::from_utf8(data) {
@@ -924,42 +718,34 @@ async fn handle_tcp_client(
                                     match cmd.command_type.as_str() {
                                         "request_screen" => {
                                             if let Some(image) = get_screen_image() {
-                                                // [OPTIMIZATION 1] Fast Pixel Copy
-                                                // Reset buffer length but keep capacity
                                                 rgb_bytes.clear();
-                                                
-                                                // Direct loop to avoid per-pixel heap allocations
-                                                // We drop Alpha channel (RGB) to save 25% size and processing time
                                                 for pixel in &image.pixels {
                                                     rgb_bytes.push(pixel.r());
                                                     rgb_bytes.push(pixel.g());
                                                     rgb_bytes.push(pixel.b());
                                                 }
 
-                                                // [OPTIMIZATION 2] JPEG instead of PNG
-                                                // JPEG is much faster to encode/decode
                                                 img_data_buffer.clear();
                                                 let mut encoder = JpegEncoder::new_with_quality(&mut img_data_buffer, 75);
                                                 
-                                                encoder.encode(
+                                                if let Err(e) = encoder.encode(
                                                     &rgb_bytes,
                                                     image.size[0] as u32,
                                                     image.size[1] as u32,
-                                                    ColorType::Rgb8.into(), // Changed to Rgb8
-                                                ).expect("Failed to encode image");
+                                                    ColorType::Rgb8.into(), 
+                                                ) {
+                                                    println!("Failed to encode image: {}", e);
+                                                    continue;
+                                                }
 
                                                 let encoded_image = encode(&img_data_buffer);
 
-                                                // ... [Rest of your state gathering code remains identical] ...
                                                 let player_health = get_player_health();
                                                 let enemy_health = get_enemy_health();
                                                 
-                                                // [PASTE THE REST OF YOUR STATE GATHERING LOGIC HERE]
-                                                // ...
                                                 let screen_details = ScreenImageDetails {
                                                     image: encoded_image,
                                                     player_health,
-                                                    // ... fill in the rest as before ...
                                                     enemy_health,
                                                     player_position: get_player_position(),
                                                     enemy_position: get_enemy_position(),
@@ -1014,7 +800,6 @@ async fn handle_tcp_client(
                                                     details: details_json,
                                                 };
 
-                                                //exit app if player or enemy health is 0
                                                 if player_health == 0 && enemy_health != 0
                                                 || enemy_health == 0 && player_health != 0 {
                                                     println!("Game Over");
@@ -1027,7 +812,6 @@ async fn handle_tcp_client(
                                             }
                                         }
                                         _ => {
-                                            // Handle other commands
                                             if tx.send(cmd.clone()).is_err() { }
                                             let response = OutputMessage {
                                                 event: "command_received".to_string(),
@@ -1057,7 +841,7 @@ async fn handle_tcp_client(
         }
     }
 }
-// Function to send messages back to the Python app
+
 async fn send_message_to_python(
     socket: &mut tokio::net::TcpStream,
     message: &OutputMessage,
@@ -1065,10 +849,5 @@ async fn send_message_to_python(
     let message_json = serde_json::to_string(message)?;
     socket.write_all(message_json.as_bytes()).await?;
     socket.write_all(b"\n").await?;
-
-    //clear rewards
-    // clear_rewards();
-    // clear_punishments();
-
     Ok(())
 }

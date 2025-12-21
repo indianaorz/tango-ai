@@ -96,12 +96,13 @@ class DebugStrategyWrapper:
             ng_key_bin = snap.get("ng_key_bin") or ""
 
             action_type = snap.get("action_type") or "—"
-
-            print(
-                f"[port {port}] inside_window={inside} action={action_type} "
-                f"mapped_int={mapped_key_int} mapped={mapped_pressed} mapped_bin={mapped_key_bin} "
-                f"ng_int={ng_key_int} ng={ng_pressed} ng_bin={ng_key_bin}"
-            )
+            #only print port 12350
+            if port == 12350:
+                print(
+                    f"[port {port}] inside_window={inside} action={action_type} "
+                    f"mapped_int={mapped_key_int} mapped={mapped_pressed} mapped_bin={mapped_key_bin} "
+                    f"ng_int={ng_key_int} ng={ng_pressed} ng_bin={ng_key_bin}"
+                )
 
 
         return decision

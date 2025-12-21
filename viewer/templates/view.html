@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Viewing: {{ replay_name }}</title>
+    <style>
+        body {
+            background: #111;
+            color: #fff;
+            font-family: monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+        }
+
+        h2 {
+            margin-bottom: 10px;
+        }
+
+        .container {
+            display: flex;
+            gap: 20px;
+            align-items: flex-start;
+        }
+
+        /* Video Container */
+        video {
+            border: 2px solid #444;
+            border-radius: 4px;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+            max-height: 80vh;
+        }
+
+        /* Controller Visualization */
+        .controller {
+            background: #e0e0e0;
+            width: 300px;
+            height: 180px;
+            border-radius: 20px 20px 40px 40px;
+            position: relative;
+            box-shadow: inset 0 -5px 10px rgba(0, 0, 0, 0.2), 0 5px 15px rgba(0, 0, 0, 0.5);
+            border: 2px solid #999;
+        }
+
+        /* Generic Button Style */
+        .btn {
+            position: absolute;
+            background: #555;
+            transition: background 0.05s, transform 0.05s;
+            border: 1px solid #333;
+        }
+
+        .btn.active {
+            background: #00ff00 !important;
+            /* Green Highlight */
+            box-shadow: 0 0 10px #00ff00;
+            border-color: #00cc00;
+        }
+
+        /* D-Pad */
+        .dpad {
+            position: absolute;
+            top: 60px;
+            left: 30px;
+            width: 90px;
+            height: 90px;
+        }
+
+        .dpad .btn {
+            background: #333;
+        }
+
+        .btn.up {
+            top: 0;
+            left: 30px;
+            width: 30px;
+            height: 30px;
+            border-radius: 3px 3px 0 0;
+        }
+
+        .btn.down {
+            bottom: 0;
+            left: 30px;
+            width: 30px;
+            height: 30px;
+            border-radius: 0 0 3px 3px;
+        }
+
+        .btn.left {
+            top: 30px;
+            left: 0;
+            width: 30px;
+            height: 30px;
+            border-radius: 3px 0 0 3px;
+        }
+
+        .btn.right {
+            top: 30px;
+            right: 0;
+            width: 30px;
+            height: 30px;
+            border-radius: 0 3px 3px 0;
+        }
+
+        .dpad-center {
+            position: absolute;
+            top: 30px;
+            left: 30px;
+            width: 30px;
+            height: 30px;
+            background: #333;
+        }
+
+        /* A/B Buttons */
+        .btn.a {
+            top: 70px;
+            right: 20px;
+            width: 35px;
+            height: 35px;
+            border-radius: 50%;
+            background: #a00;
+            border: 2px solid #600;
+            color: rgba(255, 255, 255, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn.b {
+            top: 90px;
+            right: 65px;
+            width: 35px;
+            height: 35px;
+            border-radius: 50%;
+            background: #a00;
+            border: 2px solid #600;
+            color: rgba(255, 255, 255, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn.a.active,
+        .btn.b.active {
+            background: #ff3333 !important;
+            box-shadow: 0 0 15px #ff0000;
+        }
+
+        /* Start/Select */
+        .btn.start {
+            bottom: 20px;
+            left: 120px;
+            width: 30px;
+            height: 10px;
+            border-radius: 10px;
+            transform: rotate(-25deg);
+            background: #999;
+        }
+
+        .btn.select {
+            bottom: 20px;
+            left: 80px;
+            width: 30px;
+            height: 10px;
+            border-radius: 10px;
+            transform: rotate(-25deg);
+            background: #999;
+        }
+
+        /* L/R Shoulders */
+        .btn.l {
+            top: -10px;
+            left: 10px;
+            width: 80px;
+            height: 20px;
+            border-radius: 10px 10px 0 0;
+            background: #ccc;
+            z-index: -1;
+        }
+
+        .btn.r {
+            top: -10px;
+            right: 10px;
+            width: 80px;
+            height: 20px;
+            border-radius: 10px 10px 0 0;
+            background: #ccc;
+            z-index: -1;
+        }
+
+        /* Info Panel */
+        #info {
+            margin-top: 20px;
+            font-size: 14px;
+            color: #aaa;
+            text-align: center;
+        }
+
+        .frame-counter {
+            font-size: 20px;
+            color: #fff;
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+
+    <a href="/" style="color: #888; align-self: flex-start; margin-bottom: 20px;">&larr; Back to List</a>
+    <h2>{{ replay_name }}</h2>
+
+    <div class="container">
+        <video id="vid" controls width="720">
+            <source src="/video/{{ replay_name }}" type="video/mp4">
+            Your browser does not support HTML5 video.
+        </video>
+
+        <div>
+            <div class="controller">
+                <div class="btn l" id="btn-L"></div>
+                <div class="btn r" id="btn-R"></div>
+
+                <div class="dpad">
+                    <div class="dpad-center"></div>
+                    <div class="btn up" id="btn-UP"></div>
+                    <div class="btn down" id="btn-DOWN"></div>
+                    <div class="btn left" id="btn-LEFT"></div>
+                    <div class="btn right" id="btn-RIGHT"></div>
+                </div>
+
+                <div class="btn b" id="btn-B">B</div>
+                <div class="btn a" id="btn-A">A</div>
+
+                <div class="btn select" id="btn-SELECT"></div>
+                <div class="btn start" id="btn-START"></div>
+            </div>
+
+            <div id="info">
+                Frame: <span id="frame-idx" class="frame-counter">0</span> / <span id="total-frames">0</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('vid');
+        const frameDisplay = document.getElementById('frame-idx');
+        const totalDisplay = document.getElementById('total-frames');
+
+        let actions = [];
+        const FPS = 60; // GBA/Tango native FPS
+
+        // Map Nitrogen keys to HTML IDs
+        // Note: Nitrogen output uses specific names (NORTH, SOUTH) -> We map them to GBA (A, B)
+        // Map Nitrogen keys to HTML IDs
+        const KEY_MAP = {
+            'DPAD_UP': 'btn-UP',
+            'DPAD_DOWN': 'btn-DOWN',
+            'DPAD_LEFT': 'btn-LEFT',
+            'DPAD_RIGHT': 'btn-RIGHT',
+
+            // [FIX] Swapped A and B mappings to match visualizer
+            'EAST': 'btn-A',       // Was btn-A
+            'SOUTH': 'btn-B',      // Was btn-B
+
+            'LEFT_SHOULDER': 'btn-L',
+            'RIGHT_SHOULDER': 'btn-R',
+            'START': 'btn-START',
+            'BACK': 'btn-SELECT'
+        };
+
+        // Fetch inputs
+        fetch('/inputs/{{ replay_name }}')
+            .then(res => res.json())
+            .then(data => {
+                actions = data;
+                totalDisplay.innerText = actions.length;
+                console.log(`Loaded ${actions.length} frames of input.`);
+                requestAnimationFrame(updateLoop);
+            });
+
+        function updateLoop() {
+            if (actions.length > 0 && !video.paused && !video.ended) {
+                // Calculate current frame index based on video time
+                const currentTime = video.currentTime;
+                const frameIdx = Math.floor(currentTime * FPS);
+
+                if (frameIdx < actions.length) {
+                    frameDisplay.innerText = frameIdx;
+                    renderInputs(actions[frameIdx]);
+                }
+            } else if (video.paused && actions.length > 0) {
+                // Handle seeking while paused
+                const frameIdx = Math.floor(video.currentTime * FPS);
+                if (frameIdx < actions.length) {
+                    frameDisplay.innerText = frameIdx;
+                    renderInputs(actions[frameIdx]);
+                }
+            }
+            requestAnimationFrame(updateLoop);
+        }
+
+        function renderInputs(frameData) {
+            // Reset all buttons
+            document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+
+            // Check each mapped key
+            for (const [nitroKey, htmlId] of Object.entries(KEY_MAP)) {
+                const val = frameData[nitroKey];
+                // Check if pressed (1.0)
+                // Note: Arrays like triggers might be [1.0]
+                let pressed = false;
+                if (Array.isArray(val)) {
+                    pressed = val[0] > 0.5;
+                } else {
+                    pressed = val > 0.5;
+                }
+
+                if (pressed) {
+                    const el = document.getElementById(htmlId);
+                    if (el) el.classList.add('active');
+                }
+            }
+        }
+    </script>
+</body>
+
+</html>

@@ -1,6 +1,8 @@
 use byteorder::ByteOrder;
 use image::EncodableLayout;
 use tokio::io::AsyncWriteExt;
+use std::io::Write; // Added for JSONL writing
+use serde_json::json; // Added for JSONL serialization
 
 pub struct Settings {
     pub ffmpeg: Option<std::path::PathBuf>,
@@ -214,6 +216,11 @@ pub async fn export(
 ) -> anyhow::Result<()> {
     let mut vbuf = image::RgbaImage::new(mgba::gba::SCREEN_WIDTH, mgba::gba::SCREEN_HEIGHT);
 
+    // [NEW] Setup JSONL logging
+    let json_path = output_path.with_extension("jsonl");
+    let mut json_file = std::fs::File::create(&json_path)?;
+    let mut global_frame_count: usize = 0;
+
     let video_output = tempfile::NamedTempFile::new()?;
     let mut video_child = make_video_ffmpeg(
         &settings.ffmpeg,
@@ -245,6 +252,13 @@ pub async fn export(
         let replay_len = replay.input_pairs.len();
 
         loop {
+            // [NEW] Capture input state before running frame
+            // We read the next pending input pair directly from the stepper state lock
+            let current_input_pair = {
+                let s = state.lock_inner();
+                s.peek_input_pair().cloned() 
+            };
+
             {
                 let state = state.lock_inner();
                 if (!replay.is_complete && state.input_pairs_left() == 0) || state.is_round_ended() {
@@ -256,12 +270,24 @@ pub async fn export(
                 Err(err)?;
             }
 
+            // [NEW] Write input to JSONL
+            if let Some(pair) = current_input_pair {
+                 let entry = json!({
+                    "frame": global_frame_count,
+                    "input": pair.local.joyflags
+                });
+                writeln!(json_file, "{}", entry.to_string())?;
+            }
+
             let samples = run_frame(&mut core, &mut samples, &mut vbuf);
             video_child.stdin.as_mut().unwrap().write_all(&vbuf).await?;
 
             let mut audio_bytes = vec![0u8; samples.len() * 2];
             byteorder::LittleEndian::write_i16_into(samples, &mut audio_bytes[..]);
             audio_child.stdin.as_mut().unwrap().write_all(&audio_bytes).await?;
+            
+            global_frame_count += 1;
+            
             progress_callback(
                 replay_len - state.lock_inner().input_pairs_left() + completed_total,
                 total_frames,
@@ -303,6 +329,14 @@ pub async fn export_twosided(
 ) -> anyhow::Result<()> {
     let mut vbuf = image::RgbaImage::new(mgba::gba::SCREEN_WIDTH, mgba::gba::SCREEN_HEIGHT);
     let mut composed_vbuf = image::RgbaImage::new(mgba::gba::SCREEN_WIDTH * 2, mgba::gba::SCREEN_HEIGHT);
+
+    // [NEW] Setup JSONL logging for two-sided export
+    let json_path_local = output_path.with_extension("local.jsonl");
+    let json_path_remote = output_path.with_extension("remote.jsonl");
+    let mut json_file_local = std::fs::File::create(&json_path_local)?;
+    let mut json_file_remote = std::fs::File::create(&json_path_remote)?;
+    let mut global_frame_count: usize = 0;
+
 
     let video_output = tempfile::NamedTempFile::new()?;
     let mut video_child = make_video_ffmpeg(
@@ -351,6 +385,10 @@ pub async fn export_twosided(
         let replay_len = replay.input_pairs.len();
 
         loop {
+            // [NEW] Capture inputs
+            let input_pair_local = { local_state.lock_inner().peek_input_pair().cloned() };
+            let input_pair_remote = { remote_state.lock_inner().peek_input_pair().cloned() };
+
             {
                 let local_state = local_state.lock_inner();
                 if (!local_replay.is_complete && local_state.input_pairs_left() == 0) || local_state.is_round_ended() {
@@ -364,6 +402,16 @@ pub async fn export_twosided(
                 {
                     break;
                 }
+            }
+
+            // [NEW] Write to JSONL logs
+            if let Some(pair) = input_pair_local {
+                 let entry = json!({ "frame": global_frame_count, "input": pair.local.joyflags });
+                 writeln!(json_file_local, "{}", entry.to_string())?;
+            }
+            if let Some(pair) = input_pair_remote {
+                 let entry = json!({ "frame": global_frame_count, "input": pair.local.joyflags });
+                 writeln!(json_file_remote, "{}", entry.to_string())?;
             }
 
             let current_tick = local_state.lock_inner().current_tick();
@@ -418,6 +466,8 @@ pub async fn export_twosided(
                     .unwrap()
                     .write_all(composed_vbuf.as_bytes())
                     .await?;
+                
+                global_frame_count += 1;
             }
 
             while local_state.lock_inner().current_tick() == current_tick {

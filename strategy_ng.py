@@ -1,4 +1,4 @@
-# ── Begin: strategy_ng.py ──
+
 # strategy_ng.py
 from __future__ import annotations
 
@@ -121,23 +121,53 @@ class GlobalBatchManager:
 # -----------------------------------------------------------------------------
 # Small, explicit model->intent mapping (configurable)
 # -----------------------------------------------------------------------------
+# Must match precache_dataset.py exactly
+_TRAIN_BUTTON_TOKENS = [
+    'BACK', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'DPAD_UP', 'EAST', 'GUIDE',
+    'LEFT_SHOULDER', 'LEFT_THUMB', 'LEFT_TRIGGER', 'NORTH', 'RIGHT_SHOULDER',
+    'RIGHT_THUMB', 'RIGHT_TRIGGER', 'SOUTH', 'START', 'WEST',
+    'RIGHT_BOTTOM', 'RIGHT_LEFT', 'RIGHT_RIGHT', 'RIGHT_UP'
+]
+
+def _btn_index(name: str) -> int:
+    """
+    Returns the absolute index in the 25-dim action vector for a given button token.
+    Layout is: [4 axes] + [21 buttons]
+    """
+    name = name.strip().upper()
+    try:
+        return 4 + _TRAIN_BUTTON_TOKENS.index(name)
+    except ValueError:
+        return -1
 
 @dataclass(frozen=True)
 class NgActionSchema:
-    move_x_idx: int = 0
-    move_y_idx: int = 1
-    a_idx: int = 2
-    b_idx: int = 3
-    start_idx: int = 4
+    # Axes (match training)
+    axis_leftx: int = 0
+    axis_lefty: int = 1
 
-    deadzone: float = 0.25
-    button_threshold: float = 0.25
+    # Dpad buttons (preferred for movement if present in data)
+    dpad_up: int = _btn_index("DPAD_UP")
+    dpad_down: int = _btn_index("DPAD_DOWN")
+    dpad_left: int = _btn_index("DPAD_LEFT")
+    dpad_right: int = _btn_index("DPAD_RIGHT")
+
+    # Buttons (defaults assume Xbox-style naming: SOUTH=A, EAST=B)
+    # You can override with env: NG_BTN_A=SOUTH / NG_BTN_B=EAST etc.
+    a_btn: str = os.getenv("NG_BTN_A", "SOUTH").strip().upper()
+    b_btn: str = os.getenv("NG_BTN_B", "EAST").strip().upper()
+    start_btn: str = os.getenv("NG_BTN_START", "START").strip().upper()
+
+    deadzone: float = 0.05
+    button_threshold: float = 0.05
 
     @staticmethod
     def from_env() -> "NgActionSchema":
-        dz = float(os.getenv("NG_MOVE_DEADZONE", "0.25"))
-        bt = float(os.getenv("NG_BTN_THRESH", "0.25"))
+        dz = float(os.getenv("NG_MOVE_DEADZONE", "0.05"))
+        bt = float(os.getenv("NG_BTN_THRESH", "0.05"))
+        # Rebuild so env overrides apply
         return NgActionSchema(deadzone=dz, button_threshold=bt)
+
 
 def _tanh_scalar(x: float) -> float:
     return float(torch.tanh(torch.tensor(x)).item())
@@ -188,16 +218,51 @@ def _logical_buttons_to_mask(key_bit_positions: Dict[str, int], logical_buttons:
     return int(mask)
 
 def _intent_from_action_vec(action_vec_1d: torch.Tensor, schema: NgActionSchema) -> List[str]:
-    mx = _tanh_scalar(_safe_get(action_vec_1d, schema.move_x_idx))
-    my = _tanh_scalar(_safe_get(action_vec_1d, schema.move_y_idx))
+    """
+    Decode model output into logical emulator buttons.
+    Priority:
+      1) DPAD_* channels (because many datasets won't use analog axes)
+      2) fallback to LEFT stick axes if DPAD is inactive
+    """
     btns: List[str] = []
 
-    if abs(mx) >= schema.deadzone: btns.append("RIGHT" if mx > 0 else "LEFT")
-    if abs(my) >= schema.deadzone: btns.append("DOWN" if my > 0 else "UP")
+    # --- Movement from DPAD probabilities ---
+    up_v = _tanh_scalar(_safe_get(action_vec_1d, schema.dpad_up))
+    dn_v = _tanh_scalar(_safe_get(action_vec_1d, schema.dpad_down))
+    lf_v = _tanh_scalar(_safe_get(action_vec_1d, schema.dpad_left))
+    rt_v = _tanh_scalar(_safe_get(action_vec_1d, schema.dpad_right))
 
-    if _tanh_scalar(_safe_get(action_vec_1d, schema.a_idx)) >= schema.button_threshold: btns.append("A")
-    if _tanh_scalar(_safe_get(action_vec_1d, schema.b_idx)) >= schema.button_threshold: btns.append("B")
-    if _tanh_scalar(_safe_get(action_vec_1d, schema.start_idx)) >= schema.button_threshold: btns.append("START")
+    used_dpad = False
+    if up_v >= schema.button_threshold:
+        btns.append("UP"); used_dpad = True
+    if dn_v >= schema.button_threshold:
+        btns.append("DOWN"); used_dpad = True
+    if lf_v >= schema.button_threshold:
+        btns.append("LEFT"); used_dpad = True
+    if rt_v >= schema.button_threshold:
+        btns.append("RIGHT"); used_dpad = True
+
+    # --- Fallback to analog axes if DPAD is quiet ---
+    if not used_dpad:
+        mx = _tanh_scalar(_safe_get(action_vec_1d, schema.axis_leftx))
+        my = _tanh_scalar(_safe_get(action_vec_1d, schema.axis_lefty))
+
+        if abs(mx) >= schema.deadzone:
+            btns.append("RIGHT" if mx > 0 else "LEFT")
+        if abs(my) >= schema.deadzone:
+            btns.append("DOWN" if my > 0 else "UP")
+
+    # --- Buttons ---
+    a_idx = _btn_index(schema.a_btn)
+    b_idx = _btn_index(schema.b_btn)
+    s_idx = _btn_index(schema.start_btn)
+
+    if _tanh_scalar(_safe_get(action_vec_1d, a_idx)) >= schema.button_threshold:
+        btns.append("A")
+    if _tanh_scalar(_safe_get(action_vec_1d, b_idx)) >= schema.button_threshold:
+        btns.append("B")
+    if _tanh_scalar(_safe_get(action_vec_1d, s_idx)) >= schema.button_threshold:
+        btns.append("START")
 
     return btns
 
@@ -380,6 +445,10 @@ class NGAgentStrategy:
             if pil is None: return _no_op({"reason": "bad image"})
             frame_chw = _pil_to_chw_float01(pil, out_h=self.frame_h, out_w=self.frame_w)
 
+        if frame_chw.is_cuda:
+            frame_chw = frame_chw.cpu()
+        frame_chw = frame_chw.to(dtype=torch.float32, copy=False)
+
         seq = self._push_frame(p, frame_chw)
 
         # [BATCH INFERENCE]
@@ -419,4 +488,3 @@ class NGAgentStrategy:
         
         self.last_decision = result
         return result
-# ── End: strategy_ng.py ──

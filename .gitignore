@@ -9,3 +9,6 @@
 /__pycache__
 #ignore checkpoitns pt and trained files
 *.pt
+*.gba
+/data
+/replays
