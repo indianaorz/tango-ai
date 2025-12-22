@@ -10,6 +10,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 import torch
 import torchvision.io
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 from PIL import Image
 from ng_policy import NgNitroGenPolicy, load_ng_checkpoint, NgPolicyError
 import shutil
@@ -78,9 +79,6 @@ def print_action_dashboard(probs, chosen_idx, fps=0, threshold=0.05):
             color = GRAY
             prefix = "  "
             
-        # Hide purely dead buttons (optional, keeps log clean)
-        # if p < 0.01 and color == GRAY: continue 
-
         entry = f"{color}{prefix} {token[:10]:<10} {p:.2f}{RESET}"
         row += entry + "  "
         
@@ -92,14 +90,12 @@ def print_action_dashboard(probs, chosen_idx, fps=0, threshold=0.05):
     
     print("\n".join(output))
     print("-" * 50)
+
 def _resolve_autocast_dtype(device: torch.device) -> Optional[torch.dtype]:
     dt = os.getenv("NG_DTYPE", "").strip().lower()
-    if device.type != "cuda":
-        return None
-    if dt == "fp16":
-        return torch.float16
-    if dt == "fp32":
-        return None
+    if device.type != "cuda": return None
+    if dt == "fp16": return torch.float16
+    if dt == "fp32": return None
     return torch.bfloat16
 
 # -----------------------------------------------------------------------------
@@ -217,6 +213,8 @@ def _btn_index(name: str) -> int:
     except ValueError:
         return -1
 
+THRESHOLD = 0.1
+
 @dataclass(frozen=True)
 class NgActionSchema:
     axis_leftx: int = 0
@@ -243,7 +241,7 @@ class NgActionSchema:
     @staticmethod
     def from_env() -> "NgActionSchema":
         dz = float(os.getenv("NG_MOVE_DEADZONE", "0.10"))
-        bt = float(os.getenv("NG_BTN_THRESH", "0.05"))
+        bt = float(os.getenv("NG_BTN_THRESH", THRESHOLD))
         act = os.getenv("NG_BTN_ACTIVATION", "raw01").strip().lower()
         return NgActionSchema(deadzone=dz, button_threshold=bt, btn_activation=act)
 
@@ -282,9 +280,6 @@ def _decode_pil_from_b64(b64: Optional[str]) -> Optional[Image.Image]:
     except Exception:
         return None
 
-import torchvision.transforms.functional as TF
-
-
 def _pil_to_chw_float01(pil_img: Image.Image, *, out_h: int, out_w: int) -> torch.Tensor:
     if pil_img.mode != "RGB":
         pil_img = pil_img.convert("RGB")
@@ -303,6 +298,7 @@ def _pil_to_chw_float01(pil_img: Image.Image, *, out_h: int, out_w: int) -> torc
     tensor = TF.to_tensor(new_img)
     
     # 4. --- NEW: SigLIP Normalization ---
+    # This is critical for matching the pre-trained vision encoder
     tensor = (tensor - 0.5) / 0.5
     
     return tensor
@@ -342,11 +338,17 @@ def _intent_from_action_vec(action_vec_1d: torch.Tensor, schema: NgActionSchema)
     if lf_v >= schema.button_threshold: btns.append("LEFT"); used_dpad = True
     if rt_v >= schema.button_threshold: btns.append("RIGHT"); used_dpad = True
 
-    if not used_dpad:
-        mx = _axis_act(_safe_get(action_vec_1d, schema.axis_leftx))
-        my = _axis_act(_safe_get(action_vec_1d, schema.axis_lefty))
-        if abs(mx) >= schema.deadzone: btns.append("RIGHT" if mx > 0 else "LEFT")
-        if abs(my) >= schema.deadzone: btns.append("DOWN" if my > 0 else "UP")
+    # --- FIX: DISABLE ANALOG STICK READING FOR GBA ---
+    # Foundation models often output noise (e.g. 0.12) on sticks. 
+    # Since GBA is digital, we only want to listen to the D-Pad.
+    # We comment this out so the "Stick Drift" never triggers a button press.
+    
+    # if not used_dpad:
+    #     mx = _axis_act(_safe_get(action_vec_1d, schema.axis_leftx))
+    #     my = _axis_act(_safe_get(action_vec_1d, schema.axis_lefty))
+    #     if abs(mx) >= schema.deadzone: btns.append("RIGHT" if mx > 0 else "LEFT")
+    #     if abs(my) >= schema.deadzone: btns.append("DOWN" if my > 0 else "UP")
+    # -------------------------------------------------
 
     a_idx = _btn_index(schema.a_btn)
     b_idx = _btn_index(schema.b_btn)
@@ -547,6 +549,11 @@ class NGAgentStrategy:
                     raw_probs = torch.sigmoid(action_1d).tolist()
                 else:
                     raw_probs = action_1d.tolist()
+
+                # --- NEW: DEBUG FOUNDATION MODEL NOISE ---
+                sticks = raw_probs[:4]
+                print(f"\n🎮 STICKS: LX={sticks[0]:.3f} LY={sticks[1]:.3f} RX={sticks[2]:.3f} RY={sticks[3]:.3f}")
+                # ----------------------------------------
                 
                 # Slice: skip first 4 (sticks)
                 btn_data = raw_probs[4:] 
@@ -570,7 +577,7 @@ class NGAgentStrategy:
                     chosen_val = max(masked_data)
                     chosen_idx = masked_data.index(chosen_val)
                     # Pass the MASKED data to the print function so the green text is correct
-                    print_action_dashboard(masked_data, chosen_idx, fps)
+                    print_action_dashboard(masked_data, chosen_idx, fps, threshold=THRESHOLD)
             # --- END DASHBOARD LOGGING ---
 
         except Exception as e:
