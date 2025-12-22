@@ -1,329 +1,180 @@
 <!DOCTYPE html>
 <html>
-
 <head>
     <title>Viewing: {{ replay_name }}</title>
     <style>
-        body {
-            background: #111;
-            color: #fff;
-            font-family: monospace;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            margin: 0;
-            padding: 20px;
-        }
+        body { background: #111; color: #fff; font-family: 'Consolas', monospace; display: flex; flex-direction: column; align-items: center; margin: 0; padding: 20px; }
+        h2 { margin-bottom: 10px; color: #ccc; }
+        a { color: #888; text-decoration: none; align-self: flex-start; margin-bottom: 20px; font-size: 14px; }
+        a:hover { color: #fff; text-decoration: underline; }
+        .container { display: flex; gap: 30px; align-items: flex-start; }
+        
+        video { border: 2px solid #444; border-radius: 4px; box-shadow: 0 0 20px rgba(0,0,0,0.5); background: #000; image-rendering: pixelated; }
+        .sidebar { display: flex; flex-direction: column; gap: 15px; width: 320px; }
 
-        h2 {
-            margin-bottom: 10px;
-        }
+        /* --- CONTROLLER --- */
+        .controller { background: #e0e0e0; width: 300px; height: 180px; border-radius: 20px 20px 40px 40px; position: relative; border: 2px solid #999; flex-shrink: 0; margin: 0 auto; box-shadow: inset 0 -5px 10px rgba(0,0,0,0.2), 0 5px 15px rgba(0,0,0,0.5); }
+        .btn { position: absolute; background: #555; border: 1px solid #333; transition: background 0.05s; }
+        .btn.active { background: #00ff00 !important; box-shadow: 0 0 10px #00ff00; border-color: #00cc00; }
+        
+        .dpad { position: absolute; top: 60px; left: 30px; width: 90px; height: 90px; }
+        .dpad .btn { background: #333; }
+        .btn.up { top: 0; left: 30px; width: 30px; height: 30px; border-radius: 3px 3px 0 0; }
+        .btn.down { bottom: 0; left: 30px; width: 30px; height: 30px; border-radius: 0 0 3px 3px; }
+        .btn.left { top: 30px; left: 0; width: 30px; height: 30px; border-radius: 3px 0 0 3px; }
+        .btn.right { top: 30px; right: 0; width: 30px; height: 30px; border-radius: 0 3px 3px 0; }
+        .dpad-center { position: absolute; top: 30px; left: 30px; width: 30px; height: 30px; background: #333; }
 
-        .container {
-            display: flex;
-            gap: 20px;
-            align-items: flex-start;
-        }
+        .btn.a { top: 70px; right: 20px; width: 35px; height: 35px; border-radius: 50%; background: #a00; border: 2px solid #600; display: flex; justify-content: center; align-items: center; color: rgba(255,255,255,0.5); }
+        .btn.b { top: 90px; right: 65px; width: 35px; height: 35px; border-radius: 50%; background: #a00; border: 2px solid #600; display: flex; justify-content: center; align-items: center; color: rgba(255,255,255,0.5); }
+        .btn.a.active, .btn.b.active { background: #ff3333 !important; box-shadow: 0 0 15px #ff0000; }
 
-        /* Video Container */
-        video {
-            border: 2px solid #444;
-            border-radius: 4px;
-            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
-            max-height: 80vh;
-        }
+        .btn.start { bottom: 20px; left: 120px; width: 30px; height: 10px; border-radius: 10px; transform: rotate(-25deg); background: #999; }
+        .btn.select { bottom: 20px; left: 80px; width: 30px; height: 10px; border-radius: 10px; transform: rotate(-25deg); background: #999; }
+        .btn.l { top: -10px; left: 10px; width: 80px; height: 20px; border-radius: 10px 10px 0 0; background: #ccc; z-index: -1; }
+        .btn.r { top: -10px; right: 10px; width: 80px; height: 20px; border-radius: 10px 10px 0 0; background: #ccc; z-index: -1; }
 
-        /* Controller Visualization */
-        .controller {
-            background: #e0e0e0;
-            width: 300px;
-            height: 180px;
-            border-radius: 20px 20px 40px 40px;
-            position: relative;
-            box-shadow: inset 0 -5px 10px rgba(0, 0, 0, 0.2), 0 5px 15px rgba(0, 0, 0, 0.5);
-            border: 2px solid #999;
-        }
+        /* --- PANELS --- */
+        .panel { background: #222; border: 1px solid #444; border-radius: 8px; padding: 10px; width: 100%; box-sizing: border-box; }
+        .row { display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 13px; border-bottom: 1px solid #333; padding-bottom: 2px; }
+        .row:last-child { border: none; margin: 0; }
+        .stat { font-weight: bold; color: #4db8ff; }
+        .stat.enemy { color: #ff4d4d; }
 
-        /* Generic Button Style */
-        .btn {
-            position: absolute;
-            background: #555;
-            transition: background 0.05s, transform 0.05s;
-            border: 1px solid #333;
-        }
+        /* Battle Grid */
+        .battle-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 2px; margin-top: 5px; background: #000; padding: 2px; border: 1px solid #555; }
+        .grid-cell { height: 25px; background: #333; display: flex; justify-content: center; align-items: center; font-size: 10px; color: #777; position: relative; }
+        .cell-p1 { background: rgba(77, 184, 255, 0.3); border: 1px solid #4db8ff; }
+        .cell-p2 { background: rgba(255, 77, 77, 0.3); border: 1px solid #ff4d4d; }
+        .broken { border: 1px dashed #555 !important; background: #111 !important; }
 
-        .btn.active {
-            background: #00ff00 !important;
-            /* Green Highlight */
-            box-shadow: 0 0 10px #00ff00;
-            border-color: #00cc00;
-        }
-
-        /* D-Pad */
-        .dpad {
-            position: absolute;
-            top: 60px;
-            left: 30px;
-            width: 90px;
-            height: 90px;
-        }
-
-        .dpad .btn {
-            background: #333;
-        }
-
-        .btn.up {
-            top: 0;
-            left: 30px;
-            width: 30px;
-            height: 30px;
-            border-radius: 3px 3px 0 0;
-        }
-
-        .btn.down {
-            bottom: 0;
-            left: 30px;
-            width: 30px;
-            height: 30px;
-            border-radius: 0 0 3px 3px;
-        }
-
-        .btn.left {
-            top: 30px;
-            left: 0;
-            width: 30px;
-            height: 30px;
-            border-radius: 3px 0 0 3px;
-        }
-
-        .btn.right {
-            top: 30px;
-            right: 0;
-            width: 30px;
-            height: 30px;
-            border-radius: 0 3px 3px 0;
-        }
-
-        .dpad-center {
-            position: absolute;
-            top: 30px;
-            left: 30px;
-            width: 30px;
-            height: 30px;
-            background: #333;
-        }
-
-        /* A/B Buttons */
-        .btn.a {
-            top: 70px;
-            right: 20px;
-            width: 35px;
-            height: 35px;
-            border-radius: 50%;
-            background: #a00;
-            border: 2px solid #600;
-            color: rgba(255, 255, 255, 0.5);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .btn.b {
-            top: 90px;
-            right: 65px;
-            width: 35px;
-            height: 35px;
-            border-radius: 50%;
-            background: #a00;
-            border: 2px solid #600;
-            color: rgba(255, 255, 255, 0.5);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .btn.a.active,
-        .btn.b.active {
-            background: #ff3333 !important;
-            box-shadow: 0 0 15px #ff0000;
-        }
-
-        /* Start/Select */
-        .btn.start {
-            bottom: 20px;
-            left: 120px;
-            width: 30px;
-            height: 10px;
-            border-radius: 10px;
-            transform: rotate(-25deg);
-            background: #999;
-        }
-
-        .btn.select {
-            bottom: 20px;
-            left: 80px;
-            width: 30px;
-            height: 10px;
-            border-radius: 10px;
-            transform: rotate(-25deg);
-            background: #999;
-        }
-
-        /* L/R Shoulders */
-        .btn.l {
-            top: -10px;
-            left: 10px;
-            width: 80px;
-            height: 20px;
-            border-radius: 10px 10px 0 0;
-            background: #ccc;
-            z-index: -1;
-        }
-
-        .btn.r {
-            top: -10px;
-            right: 10px;
-            width: 80px;
-            height: 20px;
-            border-radius: 10px 10px 0 0;
-            background: #ccc;
-            z-index: -1;
-        }
-
-        /* Info Panel */
-        #info {
-            margin-top: 20px;
-            font-size: 14px;
-            color: #aaa;
-            text-align: center;
-        }
-
-        .frame-counter {
-            font-size: 20px;
-            color: #fff;
-            font-weight: bold;
-        }
+        /* Chip Hand */
+        .hand-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 2px; margin-top: 5px; }
+        .hand-slot { background: #333; border: 1px solid #555; height: 30px; display: flex; justify-content: center; align-items: center; font-size: 10px; color: #fff; }
     </style>
 </head>
-
 <body>
-
-    <a href="/" style="color: #888; align-self: flex-start; margin-bottom: 20px;">&larr; Back to List</a>
+    <a href="/">&larr; Back to List</a>
     <h2>{{ replay_name }}</h2>
-
     <div class="container">
-        <video id="vid" controls width="720">
-            <source src="/video/{{ replay_name }}" type="video/mp4">
-            Your browser does not support HTML5 video.
-        </video>
-
-        <div>
+        <video id="vid" controls width="720"><source src="/video/{{ replay_name }}" type="video/mp4"></video>
+        <div class="sidebar">
+            
             <div class="controller">
-                <div class="btn l" id="btn-L"></div>
-                <div class="btn r" id="btn-R"></div>
-
+                <div class="btn l" id="btn-L"></div><div class="btn r" id="btn-R"></div>
                 <div class="dpad">
                     <div class="dpad-center"></div>
-                    <div class="btn up" id="btn-UP"></div>
-                    <div class="btn down" id="btn-DOWN"></div>
-                    <div class="btn left" id="btn-LEFT"></div>
-                    <div class="btn right" id="btn-RIGHT"></div>
+                    <div class="btn up" id="btn-UP"></div><div class="btn down" id="btn-DOWN"></div>
+                    <div class="btn left" id="btn-LEFT"></div><div class="btn right" id="btn-RIGHT"></div>
                 </div>
-
-                <div class="btn b" id="btn-B">B</div>
-                <div class="btn a" id="btn-A">A</div>
-
-                <div class="btn select" id="btn-SELECT"></div>
-                <div class="btn start" id="btn-START"></div>
+                <div class="btn b" id="btn-B">B</div><div class="btn a" id="btn-A">A</div>
+                <div class="btn select" id="btn-SELECT"></div><div class="btn start" id="btn-START"></div>
             </div>
 
-            <div id="info">
-                Frame: <span id="frame-idx" class="frame-counter">0</span> / <span id="total-frames">0</span>
+            <div class="panel">
+                <div class="row">
+                    <span>Frame: <span id="frame" style="color:#fff">0</span></span>
+                    <span id="win-state" style="color:#888">[BATTLE]</span>
+                </div>
+                <div class="row">
+                    <span>P1 HP: <span id="p-hp" class="stat">---</span></span>
+                    <span>P2 HP: <span id="e-hp" class="stat enemy">---</span></span>
+                </div>
+                <div class="row">
+                    <span>Charge: <span id="p-chg">0</span></span>
+                    <span>Gauge: <span id="cust">0</span></span>
+                </div>
+                <div class="row">
+                    <span>Chip: <span id="p-chip">--</span></span>
+                    <span>Chip: <span id="e-chip">--</span></span>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div style="text-align:center; font-size:11px; color:#888;">BATTLE GRID</div>
+                <div id="grid" class="battle-grid"></div>
+            </div>
+
+            <div class="panel">
+                <div style="text-align:center; font-size:11px; color:#888;">HAND (IDs)</div>
+                <div id="hand" class="hand-grid"></div>
             </div>
         </div>
     </div>
 
     <script>
-        const video = document.getElementById('vid');
-        const frameDisplay = document.getElementById('frame-idx');
-        const totalDisplay = document.getElementById('total-frames');
-
+        const vid = document.getElementById('vid');
         let actions = [];
-        const FPS = 60; // GBA/Tango native FPS
-
-        // Map Nitrogen keys to HTML IDs
-        // Note: Nitrogen output uses specific names (NORTH, SOUTH) -> We map them to GBA (A, B)
-        // Map Nitrogen keys to HTML IDs
-        const KEY_MAP = {
-            'DPAD_UP': 'btn-UP',
-            'DPAD_DOWN': 'btn-DOWN',
-            'DPAD_LEFT': 'btn-LEFT',
-            'DPAD_RIGHT': 'btn-RIGHT',
-
-            // [FIX] Swapped A and B mappings to match visualizer
-            'EAST': 'btn-A',       // Was btn-A
-            'SOUTH': 'btn-B',      // Was btn-B
-
-            'LEFT_SHOULDER': 'btn-L',
-            'RIGHT_SHOULDER': 'btn-R',
-            'START': 'btn-START',
-            'BACK': 'btn-SELECT'
+        const FPS = 60;
+        
+        // Key Map (Nitrogen -> HTML ID)
+        const KEYS = {
+            'DPAD_UP':'btn-UP', 'DPAD_DOWN':'btn-DOWN', 'DPAD_LEFT':'btn-LEFT', 'DPAD_RIGHT':'btn-RIGHT',
+            'EAST':'btn-A', 'SOUTH':'btn-B', 'LEFT_SHOULDER':'btn-L', 'RIGHT_SHOULDER':'btn-R', 'START':'btn-START', 'BACK':'btn-SELECT'
         };
 
-        // Fetch inputs
-        fetch('/inputs/{{ replay_name }}')
-            .then(res => res.json())
-            .then(data => {
-                actions = data;
-                totalDisplay.innerText = actions.length;
-                console.log(`Loaded ${actions.length} frames of input.`);
-                requestAnimationFrame(updateLoop);
-            });
+        // Init Grid & Hand
+        for(let i=0; i<18; i++) document.getElementById('grid').innerHTML += `<div class="grid-cell" id="c-${i}"></div>`;
+        for(let i=0; i<10; i++) document.getElementById('hand').innerHTML += `<div class="hand-slot" id="h-${i}"></div>`;
 
-        function updateLoop() {
-            if (actions.length > 0 && !video.paused && !video.ended) {
-                // Calculate current frame index based on video time
-                const currentTime = video.currentTime;
-                const frameIdx = Math.floor(currentTime * FPS);
+        fetch('/inputs/{{ replay_name }}').then(r=>r.json()).then(d => {
+            actions = d;
+            requestAnimationFrame(loop);
+        });
 
-                if (frameIdx < actions.length) {
-                    frameDisplay.innerText = frameIdx;
-                    renderInputs(actions[frameIdx]);
-                }
-            } else if (video.paused && actions.length > 0) {
-                // Handle seeking while paused
-                const frameIdx = Math.floor(video.currentTime * FPS);
-                if (frameIdx < actions.length) {
-                    frameDisplay.innerText = frameIdx;
-                    renderInputs(actions[frameIdx]);
-                }
+        function loop() {
+            if(actions.length) {
+                const idx = Math.floor(vid.currentTime * FPS);
+                if(idx < actions.length) render(actions[idx]);
             }
-            requestAnimationFrame(updateLoop);
+            requestAnimationFrame(loop);
         }
 
-        function renderInputs(frameData) {
-            // Reset all buttons
+        function render(d) {
+            document.getElementById('frame').innerText = d.frame_idx;
+            
+            // 1. Controller
             document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+            for(let k in KEYS) {
+                const v = d[k];
+                if((Array.isArray(v) ? v[0] : v) > 0.5) document.getElementById(KEYS[k]).classList.add('active');
+            }
 
-            // Check each mapped key
-            for (const [nitroKey, htmlId] of Object.entries(KEY_MAP)) {
-                const val = frameData[nitroKey];
-                // Check if pressed (1.0)
-                // Note: Arrays like triggers might be [1.0]
-                let pressed = false;
-                if (Array.isArray(val)) {
-                    pressed = val[0] > 0.5;
-                } else {
-                    pressed = val > 0.5;
+            // 2. Stats
+            document.getElementById('p-hp').innerText = d.player_health || 0;
+            document.getElementById('e-hp').innerText = d.enemy_health || 0;
+            document.getElementById('p-chg').innerText = d.player_charge || 0;
+            document.getElementById('cust').innerText = d.cust_gauge || 0;
+            document.getElementById('p-chip').innerText = d.player_chip || "-";
+            document.getElementById('e-chip').innerText = d.enemy_chip || "-";
+
+            // 3. Window State
+            const w = document.getElementById('win-state');
+            if(d.inside_window) { w.innerText = "[MENU OPEN]"; w.style.color = "#ffff00"; }
+            else { w.innerText = "[BATTLE]"; w.style.color = "#444"; }
+
+            // 4. Grid
+            if(d.grid_state && d.grid_owner_state) {
+                for(let i=0; i<18; i++) {
+                    const c = document.getElementById(`c-${i}`);
+                    c.className = 'grid-cell';
+                    if(d.grid_owner_state[i] === 0) c.classList.add('cell-p1');
+                    else if(d.grid_owner_state[i] === 1) c.classList.add('cell-p2');
+                    
+                    if(d.grid_state[i] === 2) c.classList.add('broken'); // Broken panel
+                    c.innerText = d.grid_state[i] !== 0 ? d.grid_state[i] : "";
                 }
+            }
 
-                if (pressed) {
-                    const el = document.getElementById(htmlId);
-                    if (el) el.classList.add('active');
+            // 5. Hand
+            if(d.player_hand) {
+                for(let i=0; i<10; i++) {
+                    const val = d.player_hand[i];
+                    const el = document.getElementById(`h-${i}`);
+                    el.innerText = (val !== 255 && val !== undefined) ? val : "";
                 }
             }
         }
     </script>
 </body>
-
 </html>

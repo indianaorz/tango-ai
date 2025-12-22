@@ -63,7 +63,8 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
-use image::codecs::jpeg::JpegEncoder;
+use image::codecs::png::PngEncoder;
+use image::ImageEncoder; 
 use image::ColorType;
 
 const TANGO_CHILD_ENV_VAR: &str = "TANGO_CHILD";
@@ -726,17 +727,23 @@ async fn handle_tcp_client(
                                                 }
 
                                                 img_data_buffer.clear();
-                                                let mut encoder = JpegEncoder::new_with_quality(&mut img_data_buffer, 75);
+
+                                                // [FIX START] Switch from JpegEncoder to PngEncoder
+                                                // PNG is lossless. It will be slightly slower to encode than JPEG,
+                                                // but for 240x160 resolution, it is negligible.
+                                                let encoder = PngEncoder::new(&mut img_data_buffer);
                                                 
-                                                if let Err(e) = encoder.encode(
+                                                // Encode the image
+                                                if let Err(e) = encoder.write_image(
                                                     &rgb_bytes,
                                                     image.size[0] as u32,
                                                     image.size[1] as u32,
-                                                    ColorType::Rgb8.into(), 
+                                                    image::ExtendedColorType::Rgb8, 
                                                 ) {
                                                     println!("Failed to encode image: {}", e);
                                                     continue;
                                                 }
+                                                // [FIX END]
 
                                                 let encoded_image = encode(&img_data_buffer);
 

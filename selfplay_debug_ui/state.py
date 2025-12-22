@@ -1,6 +1,6 @@
-# ── Begin: selfplay_debug_ui/state.py ──
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections import deque
@@ -56,7 +56,7 @@ class PortDebugSnapshot:
 class DebugState:
     """
     Thread-safe store for per-port debug data and history.
-    Uses Condition variables to allow the server to stream updates 
+    Uses Condition variables to allow the server to stream updates
     immediately (push) instead of polling.
     """
 
@@ -75,10 +75,21 @@ class DebugState:
 
         self._lock = threading.Lock()
         self._by_port: Dict[int, PortDebugSnapshot] = {}
+
+        # Original mapping (as provided)
         self._key_bits = dict(key_bit_positions or {})
 
+        # Normalized lookup so we can accept "up", "UP", "DPAD_UP", "z", etc.
+        # We normalize keys to: UPPERCASE with '_' separators.
+        self._key_bits_norm: Dict[str, int] = {}
+        for btn, bit in self._key_bits.items():
+            try:
+                b = int(bit)
+            except Exception:
+                continue
+            self._key_bits_norm[self._norm_btn(btn)] = b
+
         # Event notification for streaming (Push vs Poll)
-        # Each port gets a Condition variable that the web server waits on.
         self._port_conditions: Dict[int, threading.Condition] = {}
 
         # Rolling inference tracking
@@ -93,15 +104,96 @@ class DebugState:
         self._max_history_per_port = int(max_history_per_port)
         self._hist: Dict[int, Deque[HistoryEntry]] = {}
 
-    def get_render_condition(self, port: int) -> threading.Condition:
+    # ----------------------------
+    # Normalization / parsing
+    # ----------------------------
+
+    @staticmethod
+    def _norm_btn(x: Any) -> str:
+        return (
+            str(x or "")
+            .strip()
+            .upper()
+            .replace("-", "_")
+            .replace(" ", "_")
+        )
+
+    _SPLIT_RE = re.compile(r"[,\+\|/]+|\s+")
+
+    def _button_list_from_any(self, raw: Any) -> List[str]:
         """
-        Returns a threading.Condition specific to this port. 
-        Waiters can wait() on this to be notified of new frames.
+        Accept:
+          - "up" / "up+z" / "up,z" / "up z"
+          - ["up","z"]
+          - ("up","z")
+        Returns normalized tokens (original casing not preserved).
         """
-        with self._lock:
-            if port not in self._port_conditions:
-                self._port_conditions[port] = threading.Condition()
-            return self._port_conditions[port]
+        if raw is None:
+            return []
+        if isinstance(raw, (list, tuple)):
+            out: List[str] = []
+            for v in raw:
+                s = self._norm_btn(v)
+                if s:
+                    out.append(s)
+            return out
+
+        s = self._norm_btn(raw)
+        if not s:
+            return []
+        parts = [p for p in self._SPLIT_RE.split(s) if p]
+        return parts
+
+    def _mask_from_button_tokens(self, tokens_norm: List[str]) -> int:
+        """
+        Convert normalized button tokens to a bitmask using key_bit_positions.
+
+        We support some common aliases so "UP" can match "DPAD_UP" keys, etc.
+        """
+        def expand_aliases(k: str) -> List[str]:
+            # Canonical -> possible names present in key_bit_positions
+            if k == "UP":
+                return ["UP", "DPAD_UP"]
+            if k == "DOWN":
+                return ["DOWN", "DPAD_DOWN"]
+            if k == "LEFT":
+                return ["LEFT", "DPAD_LEFT"]
+            if k == "RIGHT":
+                return ["RIGHT", "DPAD_RIGHT"]
+
+            # If your KEY_BIT_POSITIONS uses keyboard names z/x directly, keep them.
+            # If it uses EAST/SOUTH, allow mapping:
+            if k == "Z":
+                return ["Z", "EAST", "A"]
+            if k == "X":
+                return ["X", "SOUTH", "B"]
+
+            if k == "A":
+                return ["A", "EAST", "Z"]
+            if k == "B":
+                return ["B", "SOUTH", "X"]
+
+            if k == "SELECT":
+                return ["SELECT", "BACK"]
+            if k == "BACK":
+                return ["BACK", "SELECT"]
+
+            if k == "L":
+                return ["L", "LEFT_SHOULDER", "LB", "L1"]
+            if k == "R":
+                return ["R", "RIGHT_SHOULDER", "RB", "R1"]
+
+            return [k]
+
+        mask = 0
+        for tok in tokens_norm:
+            for cand in expand_aliases(tok):
+                bit = self._key_bits_norm.get(cand)
+                if bit is None:
+                    continue
+                mask |= (1 << int(bit))
+                break
+        return int(mask)
 
     def _pressed_buttons_from_mask(self, mask_int: int) -> List[str]:
         pressed: List[str] = []
@@ -110,12 +202,16 @@ class DebugState:
                 b = int(bit)
             except Exception:
                 continue
-            if (mask_int >> b) & 1:
+            if (int(mask_int) >> b) & 1:
                 pressed.append(str(btn))
         pressed.sort()
         return pressed
 
     def _parse_key_bin(self, key_bin: str) -> Tuple[str, int]:
+        """
+        If key_bin is a valid binary string, return (s, int(s,2)).
+        Otherwise return (original string, 0).
+        """
         if not key_bin:
             return "", 0
         s = str(key_bin)
@@ -125,6 +221,60 @@ class DebugState:
             return s, int(s, 2)
         except Exception:
             return s, 0
+
+    def _coerce_key_to_mask_and_buttons(self, key_raw: Any) -> Tuple[str, int, List[str]]:
+        """
+        Accepts key_raw in multiple formats:
+
+          1) int mask:  123
+          2) bitstring: "010101"
+          3) button name(s): "up", "up+z", "up z", ["up","z"], etc.
+
+        Returns:
+          (key_bin_display, key_int_mask, pressed_buttons_list)
+        """
+        if key_raw is None:
+            return "", 0, []
+
+        # (1) int mask
+        if isinstance(key_raw, int):
+            key_int = int(key_raw)
+            key_bin = format(key_int, "b") if key_int != 0 else "0"
+            pressed = self._pressed_buttons_from_mask(key_int) if key_int != 0 else []
+            return key_bin, key_int, pressed
+
+        # (2) bitstring
+        if isinstance(key_raw, str):
+            key_bin, key_int = self._parse_key_bin(key_raw)
+            if key_int != 0 or (key_bin and all(c in "01" for c in key_bin)):
+                pressed = self._pressed_buttons_from_mask(key_int) if key_int != 0 else []
+                return key_bin, key_int, pressed
+
+        # (3) button names
+        tokens = self._button_list_from_any(key_raw)
+        if not tokens:
+            # Keep whatever string form for display, but no mask/buttons.
+            return str(key_raw), 0, []
+
+        key_int = self._mask_from_button_tokens(tokens)
+        if key_int != 0:
+            pressed = self._pressed_buttons_from_mask(key_int)
+            key_bin = format(key_int, "b")
+            return key_bin, key_int, pressed
+
+        # Fallback: can't map tokens to bits, but still surface tokens to UI
+        # (This keeps debugging useful even if key_bit_positions doesn't include them.)
+        return "+".join(tokens), 0, [t.lower() for t in tokens]
+
+    # ----------------------------
+    # Rate tracking
+    # ----------------------------
+
+    def get_render_condition(self, port: int) -> threading.Condition:
+        with self._lock:
+            if port not in self._port_conditions:
+                self._port_conditions[port] = threading.Condition()
+            return self._port_conditions[port]
 
     def _record_infer(self, port: int, ts: float) -> Tuple[int, float, float]:
         dq = self._infer_ts.get(port)
@@ -152,35 +302,43 @@ class DebugState:
 
         return total, hz, self._rate_window_s
 
-    def _extract_action_type_and_mapped_key(self, decision: Dict[str, Any]) -> Tuple[str, str]:
+    # ----------------------------
+    # Decision extraction
+    # ----------------------------
+
+    def _extract_action_type_and_mapped_key(self, decision: Dict[str, Any]) -> Tuple[str, Any]:
         action_type = ""
-        mapped_key_bin = ""
+        mapped_key = None
         try:
             cmd = (decision or {}).get("button_command") or {}
             action_type = str(cmd.get("type") or "")
             if action_type == "key_press":
-                mapped_key_bin = str(cmd.get("key") or "")
+                mapped_key = cmd.get("key")
             else:
                 action_type = action_type or "unknown"
         except Exception:
-            return "error_parsing_decision", ""
-        return action_type, mapped_key_bin
+            return "error_parsing_decision", None
+        return action_type, mapped_key
 
-    def _extract_ng_key(self, decision: Dict[str, Any]) -> str:
+    def _extract_ng_key(self, decision: Dict[str, Any]) -> Any:
         if not decision:
-            return ""
+            return None
         v = decision.get("ng_key_bin")
-        if v:
-            return str(v)
+        if v is not None and v != "":
+            return v
         dbg = decision.get("debug") or {}
         v = dbg.get("ng_key_bin")
-        if v:
-            return str(v)
+        if v is not None and v != "":
+            return v
         mdl = decision.get("model") or {}
         v = mdl.get("ng_key_bin")
-        if v:
-            return str(v)
-        return ""
+        if v is not None and v != "":
+            return v
+        return None
+
+    # ----------------------------
+    # Public update / export
+    # ----------------------------
 
     def update(
         self,
@@ -193,24 +351,20 @@ class DebugState:
         p = int(port)
         inside_window = bool(game_state.get("inside_window", False))
 
-        action_type, mapped_key_bin_raw = self._extract_action_type_and_mapped_key(decision or {})
-        ng_key_bin_raw = self._extract_ng_key(decision or {})
+        action_type, mapped_key_raw = self._extract_action_type_and_mapped_key(decision or {})
+        ng_key_raw = self._extract_ng_key(decision or {})
 
-        mapped_key_bin, mapped_key_int = self._parse_key_bin(mapped_key_bin_raw)
-        ng_key_bin, ng_key_int = self._parse_key_bin(ng_key_bin_raw)
-
-        try:
-            mapped_pressed = self._pressed_buttons_from_mask(mapped_key_int)
-        except Exception:
-            mapped_pressed = []
-
-        if ng_key_bin:
-            try:
-                ng_pressed = self._pressed_buttons_from_mask(ng_key_int)
-            except Exception:
-                ng_pressed = []
+        # Compute mapped key mask/buttons (supports int, bitstring, or "up+z" etc.)
+        if action_type == "key_press":
+            mapped_key_bin, mapped_key_int, mapped_pressed = self._coerce_key_to_mask_and_buttons(mapped_key_raw)
         else:
-            ng_pressed = []
+            mapped_key_bin, mapped_key_int, mapped_pressed = "", 0, []
+
+        # Compute NG key mask/buttons (same flexible decoding)
+        if ng_key_raw is not None and ng_key_raw != "":
+            ng_key_bin, ng_key_int, ng_pressed = self._coerce_key_to_mask_and_buttons(ng_key_raw)
+        else:
+            ng_key_bin, ng_key_int, ng_pressed = "", 0, []
 
         jpg_bytes: Optional[bytes] = None
         img_w = 0
@@ -228,7 +382,6 @@ class DebugState:
                 img_w = 0
                 img_h = 0
 
-        # Update data store
         with self._lock:
             total, hz, win = self._record_infer(p, ts)
 
@@ -273,8 +426,6 @@ class DebugState:
             while len(dq) > self._max_history_per_port:
                 dq.popleft()
 
-        # Notification phase (Outside of data lock, but inside Condition lock)
-        # This wakes up the streaming server immediately
         cond = self.get_render_condition(p)
         with cond:
             cond.notify_all()
@@ -354,4 +505,3 @@ class DebugState:
         with self._lock:
             s = self._by_port.get(int(port))
             return None if s is None else s.jpg_bytes
-# ── End: selfplay_debug_ui/state.py ──

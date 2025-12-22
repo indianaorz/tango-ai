@@ -1,3 +1,5 @@
+use crate::telemetry::FrameTelemetry;
+
 #[derive(Clone)]
 pub struct CompletionToken {
     flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -46,6 +48,14 @@ pub trait Hooks {
     fn prepare_for_fastforward(&self, core: mgba::core::CoreMutRef);
 
     fn predict_rx(&self, _rx: &mut Vec<u8>) {}
+
+    /// Optional: per-frame telemetry snapshot for replay export.
+    /// Return None if unsupported for this game.
+// [FIX] Change argument from &mgba::core::Core to mgba::core::CoreMutRef
+    // This allows us to use raw_read_16 which requires the mutable wrapper.
+    fn capture_frame_telemetry(&self, _core: mgba::core::CoreMutRef) -> Option<FrameTelemetry> {
+        None
+    }
 }
 
 pub fn hooks_for_gamedb_entry(entry: &tango_gamedb::Game) -> Option<&'static (dyn Hooks + Send + Sync)> {

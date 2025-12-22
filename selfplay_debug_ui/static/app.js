@@ -1,17 +1,9 @@
 // selfplay_debug_ui/static/app.js
-let timer = null;
 
 function fmtTs(ts) {
   if (!ts) return "—";
   const d = new Date(ts * 1000);
   return d.toLocaleTimeString();
-}
-
-function esc(s) {
-  return (s || "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
 }
 
 function fmtHz(x) {
@@ -52,44 +44,150 @@ function chipsEl(containerEl, list) {
   containerEl.appendChild(wrap);
 }
 
-function renderHistoryRows(hist, n) {
-  const rows = Array.isArray(hist) ? hist.slice(0, n) : [];
-  if (rows.length === 0) {
-    return `<tr><td colspan="4" class="small">No history yet.</td></tr>`;
+// -----------------------------------------------------------------------------
+// Controller mapping (scope-safe, no global IDs)
+// -----------------------------------------------------------------------------
+
+function normBtnName(x) {
+  return String(x ?? "")
+    .trim()
+    .toUpperCase()
+    .replaceAll("-", "_")
+    .replaceAll(" ", "_");
+}
+
+/**
+ * Map DebugState pressed button token -> controller slot.
+ * Slots: UP/DOWN/LEFT/RIGHT, A/B, L/R, START/SELECT.
+ *
+ * Supports tokens like:
+ *  - UP/DOWN/LEFT/RIGHT
+ *  - DPAD_UP etc
+ *  - EAST/SOUTH
+ *  - Z/X
+ *  - L/R, LEFT_SHOULDER/RIGHT_SHOULDER
+ *  - START, BACK/SELECT
+ */
+function btnNameToSlot(btnNameRaw) {
+  const k = normBtnName(btnNameRaw);
+  if (!k) return null;
+
+  // D-pad
+  if (k === "DPAD_UP" || k === "UP") return "UP";
+  if (k === "DPAD_DOWN" || k === "DOWN") return "DOWN";
+  if (k === "DPAD_LEFT" || k === "LEFT") return "LEFT";
+  if (k === "DPAD_RIGHT" || k === "RIGHT") return "RIGHT";
+
+  // Face buttons (match your viewer mapping EAST->A, SOUTH->B)
+  if (k === "EAST" || k === "A" || k === "BTN_A" || k === "BUTTON_A") return "A";
+  if (k === "SOUTH" || k === "B" || k === "BTN_B" || k === "BUTTON_B") return "B";
+
+  // Keyboard style
+  if (k === "Z") return "A";
+  if (k === "X") return "B";
+
+  // Shoulders
+  if (k === "LEFT_SHOULDER" || k === "L" || k === "LB" || k === "L1") return "L";
+  if (k === "RIGHT_SHOULDER" || k === "R" || k === "RB" || k === "R1") return "R";
+
+  // Start/Select
+  if (k === "START") return "START";
+  if (k === "BACK" || k === "SELECT") return "SELECT";
+
+  return null;
+}
+
+function mountController(hostEl) {
+  // IMPORTANT: no IDs at all. Everything is scoped to this host.
+  hostEl.innerHTML = `
+    <div class="controller" data-controller="1">
+      <div class="btn l" data-slot="L"></div>
+      <div class="btn r" data-slot="R"></div>
+
+      <div class="dpad">
+        <div class="dpad-center"></div>
+        <div class="btn up" data-slot="UP"></div>
+        <div class="btn down" data-slot="DOWN"></div>
+        <div class="btn left" data-slot="LEFT"></div>
+        <div class="btn right" data-slot="RIGHT"></div>
+      </div>
+
+      <div class="btn b" data-slot="B">B</div>
+      <div class="btn a" data-slot="A">A</div>
+
+      <div class="btn select" data-slot="SELECT"></div>
+      <div class="btn start" data-slot="START"></div>
+    </div>
+  `;
+
+  const ctrlEl = hostEl.querySelector('[data-controller="1"]');
+  const els = {};
+  for (const slot of ["UP","DOWN","LEFT","RIGHT","A","B","L","R","START","SELECT"]) {
+    els[slot] = ctrlEl.querySelector(`[data-slot="${slot}"]`);
   }
 
-  return rows.map(h => {
-    const ngBtns = (h.ng_pressed_buttons || []).join(", ");
-    const mappedBtns = (h.mapped_pressed_buttons || []).join(", ");
+  return { ctrlEl, els };
+}
 
-    const ngBin = h.ng_key_bin || "—";
-    const mappedBin = h.mapped_key_bin || "—";
+function setActiveVisual(el, active) {
+  if (!el) return;
 
-    return `
-      <tr>
-        <td class="mono">${esc(fmtTs(h.ts))}</td>
-        <td class="mono">${esc(h.action_type || "—")}<div class="small">inside_window: ${h.inside_window ? "true" : "false"}</div></td>
-        <td class="mono">
-          <div>${esc(ngBin)}</div>
-          <div class="small">${esc(ngBtns || "—")}</div>
-        </td>
-        <td class="mono">
-          <div>${esc(mappedBin)}</div>
-          <div class="small">${esc(mappedBtns || "—")}</div>
-        </td>
-      </tr>
-    `;
-  }).join("");
+  // Keep class for CSS (nice if it works)
+  el.classList.toggle("active", !!active);
+
+  // Force visible highlight inline (no dependency on CSS specificity/order)
+  if (!active) {
+    el.style.background = "";
+    el.style.boxShadow = "";
+    el.style.borderColor = "";
+    el.style.outline = "";
+    return;
+  }
+
+  const slot = (el.getAttribute("data-slot") || "").toUpperCase();
+  const isFace = slot === "A" || slot === "B";
+
+  if (isFace) {
+    el.style.background = "#ff3333";
+    el.style.boxShadow = "0 0 15px #ff0000";
+    el.style.borderColor = "#aa0000";
+    el.style.outline = "2px solid rgba(255,0,0,.35)";
+  } else {
+    el.style.background = "#00ff00";
+    el.style.boxShadow = "0 0 10px #00ff00";
+    el.style.borderColor = "#00cc00";
+    el.style.outline = "2px solid rgba(0,255,0,.25)";
+  }
+}
+
+function clearController(ctrl) {
+  if (!ctrl) return;
+  for (const el of Object.values(ctrl.els)) setActiveVisual(el, false);
+}
+
+function setControllerPressed(ctrl, pressedButtonsList) {
+  if (!ctrl) return;
+
+  clearController(ctrl);
+
+  const xs = Array.isArray(pressedButtonsList) ? pressedButtonsList : [];
+  const slots = [];
+
+  for (const raw of xs) {
+    const slot = btnNameToSlot(raw);
+    if (!slot) continue;
+    slots.push(slot);
+    const el = ctrl.els[slot];
+    setActiveVisual(el, true);
+  }
+
+  return slots; // for debug display
 }
 
 // -----------------------------------------------------------------------------
-// Incremental DOM: create cards once, then update fields only.
+// Cards
 // -----------------------------------------------------------------------------
 const cardsByPort = new Map();
-
-// Rate-limit history DOM churn so higher refresh Hz doesn’t tank FPS.
-let lastHistoryRenderAt = 0;
-const HISTORY_RENDER_MIN_MS = 500;
 
 function createPortCard(port) {
   const card = document.createElement("div");
@@ -129,6 +227,8 @@ function createPortCard(port) {
   boxNg.innerHTML = `
     <div class="label">NG wants to press (raw)</div>
     <div class="kbd" data-role="ngBin">—</div>
+    <div class="padwrap" data-role="ngPad"></div>
+    <div class="small muted" data-role="ngSlots" style="margin-top:6px;">slots: —</div>
     <div style="margin-top: 8px;" data-role="ngBtns"></div>
     <div class="small" style="margin-top:8px; display:none;" data-role="ngHint">(Waiting for decision.ng_key_bin)</div>
   `;
@@ -138,6 +238,8 @@ function createPortCard(port) {
   boxMapped.innerHTML = `
     <div class="label">We interpret / send to game</div>
     <div class="kbd" data-role="mappedBin">—</div>
+    <div class="padwrap" data-role="mappedPad"></div>
+    <div class="small muted" data-role="mappedSlots" style="margin-top:6px;">slots: —</div>
     <div style="margin-top: 8px;" data-role="mappedBtns"></div>
   `;
 
@@ -155,47 +257,23 @@ function createPortCard(port) {
   img.alt = `port ${port} image`;
   img.loading = "eager";
   img.decoding = "async";
-  
-  // ---------------------------------------------------------
-  // MJPEG Stream Setup with Reconnection Logic
-  // ---------------------------------------------------------
+
   const mjpegUrl = `/api/mjpeg/${port}`;
   img.src = mjpegUrl;
 
-  // If the server restarts or connection dies, retry every 2s
   img.onerror = () => {
-    img.style.opacity = "0.5"; // visual cue that it's reconnecting
+    img.style.opacity = "0.5";
     setTimeout(() => {
-        // Add timestamp to bust cache / force reconnect
-        img.src = `${mjpegUrl}?t=${Date.now()}`;
-        img.style.opacity = "1.0";
+      img.src = `${mjpegUrl}?t=${Date.now()}`;
+      img.style.opacity = "1.0";
     }, 2000);
   };
-  
-  imgwrap.appendChild(img);
 
-  const tablewrap = document.createElement("div");
-  tablewrap.className = "tablewrap";
-  tablewrap.innerHTML = `
-    <table>
-      <thead>
-        <tr>
-          <th style="width: 90px;">Time</th>
-          <th style="width: 190px;">Context</th>
-          <th>NG raw</th>
-          <th>Mapped</th>
-        </tr>
-      </thead>
-      <tbody data-role="histBody">
-        <tr><td colspan="4" class="small">No history yet.</td></tr>
-      </tbody>
-    </table>
-  `;
+  imgwrap.appendChild(img);
 
   card.appendChild(h2);
   card.appendChild(meta);
   card.appendChild(imgwrap);
-  card.appendChild(tablewrap);
 
   const refs = {
     card,
@@ -204,20 +282,31 @@ function createPortCard(port) {
     hzEl: card.querySelector('[data-role="hz"]'),
     totalEl: card.querySelector('[data-role="total"]'),
     dimsEl: card.querySelector('[data-role="dims"]'),
+
     ngBinEl: card.querySelector('[data-role="ngBin"]'),
     mappedBinEl: card.querySelector('[data-role="mappedBin"]'),
     ngBtnsEl: card.querySelector('[data-role="ngBtns"]'),
     mappedBtnsEl: card.querySelector('[data-role="mappedBtns"]'),
     ngHintEl: card.querySelector('[data-role="ngHint"]'),
-    histBodyEl: card.querySelector('[data-role="histBody"]'),
+
+    ngSlotsEl: card.querySelector('[data-role="ngSlots"]'),
+    mappedSlotsEl: card.querySelector('[data-role="mappedSlots"]'),
+
+    ngController: null,
+    mappedController: null,
   };
+
+  const ngPadHost = card.querySelector('[data-role="ngPad"]');
+  const mappedPadHost = card.querySelector('[data-role="mappedPad"]');
+
+  if (ngPadHost) refs.ngController = mountController(ngPadHost);
+  if (mappedPadHost) refs.mappedController = mountController(mappedPadHost);
 
   return refs;
 }
 
 function ensureCardsForPorts(ports) {
   const root = document.getElementById("cards");
-
   for (const p of ports) {
     if (!cardsByPort.has(p)) {
       const refs = createPortCard(p);
@@ -230,7 +319,10 @@ function ensureCardsForPorts(ports) {
 function updateFromPayload(payload) {
   const meta = payload.meta || {};
   const portsObj = payload.ports || {};
-  const ports = Object.keys(portsObj).map(x => parseInt(x, 10)).filter(Number.isFinite).sort((a, b) => a - b);
+  const ports = Object.keys(portsObj)
+    .map((x) => parseInt(x, 10))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
 
   document.getElementById("overallHz").textContent = fmtHz(meta.overall_infer_hz);
 
@@ -256,11 +348,6 @@ function updateFromPayload(payload) {
 
   ensureCardsForPorts(ports);
 
-  const histN = Math.max(5, Math.min(400, parseInt(document.getElementById("histN").value || "40", 10)));
-  const nowMs = performance.now();
-  const doHistory = (nowMs - lastHistoryRenderAt) >= HISTORY_RENDER_MIN_MS;
-  if (doHistory) lastHistoryRenderAt = nowMs;
-
   for (const p of ports) {
     const s = portsObj[String(p)] || {};
     const refs = cardsByPort.get(p);
@@ -276,7 +363,7 @@ function updateFromPayload(payload) {
     refs.hzEl.textContent = fmtHz(s.infer_hz);
     refs.totalEl.textContent = String(s.infer_count_total ?? 0);
 
-    const dims = (s.img_w && s.img_h) ? `${s.img_w}×${s.img_h}` : "—";
+    const dims = s.img_w && s.img_h ? `${s.img_w}×${s.img_h}` : "—";
     refs.dimsEl.textContent = dims;
 
     const ngBin = s.ng_key_bin || "—";
@@ -284,15 +371,20 @@ function updateFromPayload(payload) {
     refs.ngBinEl.textContent = ngBin;
     refs.mappedBinEl.textContent = mappedBin;
 
-    chipsEl(refs.ngBtnsEl, s.ng_pressed_buttons || []);
-    chipsEl(refs.mappedBtnsEl, s.mapped_pressed_buttons || []);
+    const ngPressed = s.ng_pressed_buttons || [];
+    const mappedPressed = s.mapped_pressed_buttons || [];
+
+    chipsEl(refs.ngBtnsEl, ngPressed);
+    chipsEl(refs.mappedBtnsEl, mappedPressed);
+
+    const ngSlots = setControllerPressed(refs.ngController, ngPressed) || [];
+    const mappedSlots = setControllerPressed(refs.mappedController, mappedPressed) || [];
+
+    // On-screen proof that mapping ran
+    refs.ngSlotsEl.textContent = `slots: ${ngSlots.length ? ngSlots.join(", ") : "—"}`;
+    refs.mappedSlotsEl.textContent = `slots: ${mappedSlots.length ? mappedSlots.join(", ") : "—"}`;
 
     refs.ngHintEl.style.display = (ngBin === "—") ? "block" : "none";
-
-    if (doHistory) {
-      const hist = s.history || [];
-      refs.histBodyEl.innerHTML = renderHistoryRows(hist, histN);
-    }
   }
 }
 
@@ -304,11 +396,11 @@ async function tick() {
     updateFromPayload(payload);
     document.getElementById("status").textContent = "OK";
   } catch (e) {
-    document.getElementById("status").textContent = "Error fetching state";
+    document.getElementById("status").textContent = `Error fetching state`;
+    // If you open DevTools you’ll see the real error
+    console.error(e);
   }
 }
 
-// Start polling for stats (10 Hz = 100ms)
-document.getElementById("histN").addEventListener("change", tick);
 setInterval(tick, 100);
 tick();

@@ -1,3 +1,5 @@
+// tango-pvp/src/game/bn6.rs
+
 mod munger;
 mod offsets;
 
@@ -77,6 +79,117 @@ impl crate::hooks::Hooks for Hooks {
                 })
             }),
         ]
+    }
+/// Per-frame telemetry snapshot for replay export.
+    fn capture_frame_telemetry(&self, mut core: mgba::core::CoreMutRef) -> Option<crate::telemetry::FrameTelemetry> {
+        // --- 1. Define Addresses ---
+        const SERVER_HEALTH_ADDR: u32 = 0x0203A9D4;
+        const CLIENT_HEALTH_ADDR: u32 = 0x0203AAAC;
+        const P1_X_ADDR: u32 = 0x0203AA4C;
+        const P1_Y_ADDR: u32 = 0x0203A9C4;
+        const P2_X_ADDR: u32 = 0x02036A8C; 
+        const P2_Y_ADDR: u32 = 0x0203AA9C;
+        const P1_CHARGE_ADDR: u32 = 0x0203409D;
+        const P2_CHARGE_ADDR: u32 = 0x0203419D;
+        const P1_SELECTED_CHIP_ADDR: u32 = 0x0203A9DA;
+        const P2_SELECTED_CHIP_ADDR: u32 = 0x0203AAB2;
+        const CUST_GAUGE_ADDR: u32 = 0x020352A1;
+        const WINDOW_ADDR: u32 = 0x02035288; // 0=Closed, 255=Open
+
+        let grid_addresses = [
+            0x02039C06, 0x02039C26, 0x02039C46, 0x02039C66, 0x02039C86, 0x02039CA6, 0x02039D06, 0x02039D26,
+            0x02039D46, 0x02039D66, 0x02039D86, 0x02039DA6, 0x02039E06, 0x02039E26, 0x02039E46, 0x02039E66,
+            0x02039E86, 0x02039EA6,
+        ];
+        let grid_owner_addresses = [
+            0x02039C07, 0x02039C27, 0x02039C47, 0x02039C67, 0x02039C87, 0x02039CA7, 0x02039D07, 0x02039D27,
+            0x02039D47, 0x02039D67, 0x02039D87, 0x02039DA7, 0x02039E07, 0x02039E27, 0x02039E47, 0x02039E67,
+            0x02039E87, 0x02039EA7,
+        ];
+
+        // --- 2. Read Values using core.raw_read ---
+        
+        let p1_hp = core.raw_read_16(SERVER_HEALTH_ADDR, -1);
+        let p2_hp = core.raw_read_16(CLIENT_HEALTH_ADDR, -1);
+
+        if p1_hp == 0 && p2_hp == 0 {
+            return None; 
+        }
+
+        let p1_x = core.raw_read_16(P1_X_ADDR, -1);
+        let p1_y = core.raw_read_16(P1_Y_ADDR, -1);
+        let p2_x = core.raw_read_16(P2_X_ADDR, -1);
+        let p2_y = core.raw_read_16(P2_Y_ADDR, -1);
+
+        let p1_charge = core.raw_read_8(P1_CHARGE_ADDR, -1) as u16;
+        let p2_charge = core.raw_read_8(P2_CHARGE_ADDR, -1) as u16;
+
+        let p1_chip = core.raw_read_16(P1_SELECTED_CHIP_ADDR, -1);
+        let p2_chip = core.raw_read_16(P2_SELECTED_CHIP_ADDR, -1);
+
+        let cust_gauge = core.raw_read_8(CUST_GAUGE_ADDR, -1) as u16;
+        
+        // Window State
+        let window_val = core.raw_read_8(WINDOW_ADDR, -1);
+        let inside_window = window_val == 255;
+
+        let mut grid_state = Vec::with_capacity(18);
+        for addr in &grid_addresses {
+            grid_state.push(core.raw_read_8(*addr, -1) as u16);
+        }
+
+        let mut grid_owner_state = Vec::with_capacity(18);
+        for addr in &grid_owner_addresses {
+            grid_owner_state.push(core.raw_read_8(*addr, -1) as u16);
+        }
+
+        // Hand (Custom Screen Chips in RAM)
+        let mut hand_chips = Vec::new();
+        for i in 0..16 {
+             let address = 0x0203CDB0 + i as u32;
+             hand_chips.push(core.raw_read_8(address, -1) as u16);
+        }
+
+        // --- 3. Construct Telemetry ---
+        // Note: Static data (Folder/NaviCust) is None because accessing global.rs 
+        // from inside the library crate is architecturally forbidden.
+        Some(crate::telemetry::FrameTelemetry::V1(crate::telemetry::FrameTelemetryV1 {
+            // Dynamic RAM
+            player_health: Some(p1_hp),
+            enemy_health: Some(p2_hp),
+            player_pos: Some((p1_x, p1_y)),
+            enemy_pos: Some((p2_x, p2_y)),
+            player_charge: Some(p1_charge),
+            enemy_charge: Some(p2_charge),
+            player_chip: Some(p1_chip),
+            enemy_chip: Some(p2_chip),
+            cust_gauge: Some(cust_gauge),
+            inside_window: Some(inside_window),
+            
+            grid_state: Some(grid_state),
+            grid_owner_state: Some(grid_owner_state),
+            
+            // Hand (RAM)
+            player_hand: Some(hand_chips), 
+
+            // Static Save Data - Must be None here
+            player_folder: None,
+            enemy_folder: None,
+            player_code_folder: None,
+            enemy_code_folder: None,
+            player_tag_chips: None,
+            enemy_tag_chips: None,
+            player_reg_chip: None,
+            enemy_reg_chip: None,
+            player_navi_cust: None,
+            enemy_navi_cust: None,
+        }))
+    }
+
+    fn prepare_for_fastforward(&self, mut core: mgba::core::CoreMutRef) {
+        core.gba_mut()
+            .cpu_mut()
+            .set_thumb_pc(self.offsets.rom.main_read_joyflags);
     }
 
     fn primary_traps(
@@ -972,11 +1085,5 @@ impl crate::hooks::Hooks for Hooks {
                 })
             }),
         ]
-    }
-
-    fn prepare_for_fastforward(&self, mut core: mgba::core::CoreMutRef) {
-        core.gba_mut()
-            .cpu_mut()
-            .set_thumb_pc(self.offsets.rom.main_read_joyflags);
     }
 }

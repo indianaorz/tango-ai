@@ -26,6 +26,11 @@ from strategy_ng import NGAgentStrategy
 
 from selfplay_debug_ui import DebugState, start_debug_ui
 
+import logging
+
+# Silence Werkzeug request logs (the "127.0.0.1 - - ..." lines)
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
 
 # ----------------------------
 # Debug helpers
@@ -97,12 +102,12 @@ class DebugStrategyWrapper:
 
             action_type = snap.get("action_type") or "—"
             #only print port 12350
-            if port == 12350:
-                print(
-                    f"[port {port}] inside_window={inside} action={action_type} "
-                    f"mapped_int={mapped_key_int} mapped={mapped_pressed} mapped_bin={mapped_key_bin} "
-                    f"ng_int={ng_key_int} ng={ng_pressed} ng_bin={ng_key_bin}"
-                )
+            # if port == 12350:
+            #     print(
+            #         f"[port {port}] inside_window={inside} action={action_type} "
+            #         f"mapped_int={mapped_key_int} mapped={mapped_pressed} mapped_bin={mapped_key_bin} "
+            #         f"ng_int={ng_key_int} ng={ng_pressed} ng_bin={ng_key_bin}"
+            #     )
 
 
         return decision
@@ -142,8 +147,8 @@ def _make_strategy(cfg: dict, util_funcs: dict):
                 frame_w=config.FRAME_WIDTH,
                 seq_len_frames=config.SEQ_LEN_FRAMES,
                 use_images=True,  # NG is vision-based
-                allow_actions_in_window=False,
-                forbid_actions_in_battle=["START"],
+                allow_actions_in_window=True,
+                forbid_actions_in_battle=[]#["START"],
             )
 
         raise RuntimeError(

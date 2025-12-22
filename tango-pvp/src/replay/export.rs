@@ -1,8 +1,16 @@
+// tango_pvp/src/replay/export.rs
+
 use byteorder::ByteOrder;
 use image::EncodableLayout;
+use serde_json::json;
 use tokio::io::AsyncWriteExt;
-use std::io::Write; // Added for JSONL writing
-use serde_json::json; // Added for JSONL serialization
+
+use std::io::Write; // for writeln / write_all on File
+
+// If you implement the optional per-frame telemetry hook as discussed:
+// - trait Hooks gets fn capture_frame_telemetry(&self, core: &mgba::core::Core) -> Option<FrameTelemetry> { None }
+// - crate::telemetry defines FrameTelemetry (serde::Serialize)
+use crate::telemetry::FrameTelemetry;
 
 pub struct Settings {
     pub ffmpeg: Option<std::path::PathBuf>,
@@ -22,7 +30,10 @@ impl Settings {
                 "-c:a flac".to_string()
             },
             ffmpeg_video_flags: if let Some(factor) = factor {
-                format!("-c:v libx264 -vf scale=iw*{}:ih*{}:flags=neighbor,format=yuv420p -force_key_frames expr:gte(t,n_forced/2) -crf 18 -bf 2", factor, factor)
+                format!(
+                    "-c:v libx264 -vf scale=iw*{}:ih*{}:flags=neighbor,format=yuv420p -force_key_frames expr:gte(t,n_forced/2) -crf 18 -bf 2",
+                    factor, factor
+                )
             } else {
                 "-c:v libx264rgb -preset ultrafast -qp 0".to_string()
             },
@@ -49,7 +60,8 @@ fn make_core_and_state(
     let mut core = mgba::core::Core::new_gba("tango")?;
     core.enable_video_buffer();
 
-    core.as_mut().load_rom(mgba::vfile::VFile::from_vec(rom.to_vec()))?;
+    core.as_mut()
+        .load_rom(mgba::vfile::VFile::from_vec(rom.to_vec()))?;
     core.as_mut().reset();
 
     let input_pairs = replay.input_pairs.clone();
@@ -61,7 +73,9 @@ fn make_core_and_state(
         0,
         Box::new(|| {}),
     );
-    stepper_state.lock_inner().set_disable_bgm(settings.disable_bgm);
+    stepper_state
+        .lock_inner()
+        .set_disable_bgm(settings.disable_bgm);
 
     hooks.patch(core.as_mut());
     {
@@ -76,7 +90,11 @@ fn make_core_and_state(
     Ok((core, stepper_state))
 }
 
-fn run_frame<'a>(core: &mut mgba::core::Core, samples: &'a mut [i16], emu_vbuf: &mut [u8]) -> &'a [i16] {
+fn run_frame<'a>(
+    core: &mut mgba::core::Core,
+    samples: &'a mut [i16],
+    emu_vbuf: &mut [u8],
+) -> &'a [i16] {
     core.as_mut().run_frame();
 
     let clock_rate = core.as_ref().frequency();
@@ -98,6 +116,7 @@ fn run_frame<'a>(core: &mut mgba::core::Core, samples: &'a mut [i16], emu_vbuf: 
 
     emu_vbuf.copy_from_slice(core.video_buffer().unwrap());
     fix_vbuf_alpha(emu_vbuf);
+
     samples
 }
 
@@ -151,8 +170,10 @@ fn make_video_ffmpeg(
         .args(flags)
         .args(["-f", "matroska"])
         .arg(output_path);
+
     #[cfg(windows)]
     child.creation_flags(CREATE_NO_WINDOW);
+
     Ok(child.spawn()?)
 }
 
@@ -172,8 +193,10 @@ fn make_audio_ffmpeg(
         .args(flags)
         .args(["-f", "matroska"])
         .arg(output_path);
+
     #[cfg(windows)]
     child.creation_flags(CREATE_NO_WINDOW);
+
     Ok(child.spawn()?)
 }
 
@@ -185,7 +208,11 @@ fn make_mux_ffmpeg(
     flags: &[std::ffi::OsString],
 ) -> anyhow::Result<tokio::process::Child> {
     let mut child = tokio::process::Command::new(resolve_ffmpeg_path(ffmpeg));
-    child.kill_on_drop(true).args(["-y"]).args(["-i"]).arg(video_input_path);
+    child
+        .kill_on_drop(true)
+        .args(["-y"])
+        .args(["-i"])
+        .arg(video_input_path);
 
     for path in audio_input_paths {
         child.args(["-i"]).arg(path);
@@ -203,9 +230,59 @@ fn make_mux_ffmpeg(
 
     #[cfg(windows)]
     child.creation_flags(CREATE_NO_WINDOW);
+
     Ok(child.spawn()?)
 }
 
+fn write_jsonl<T: serde::Serialize>(mut w: impl std::io::Write, value: &T) -> anyhow::Result<()> {
+    serde_json::to_writer(&mut w, value)?;
+    w.write_all(b"\n")?;
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct FrameInput {
+    local: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<u16>,
+}
+
+#[derive(serde::Serialize)]
+struct FrameRecord<'a> {
+    v: u8,
+    frame: usize,
+    tick: u64,
+    input: FrameInput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<&'a FrameTelemetry>,
+}
+
+#[derive(serde::Serialize)]
+struct TwoSidedInput {
+    local: u16,
+    remote: u16,
+}
+
+#[derive(serde::Serialize)]
+struct TwoSidedFrameRecord<'a> {
+    v: u8,
+    frame: usize,
+    tick: u64,
+    input: TwoSidedInput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_state: Option<&'a FrameTelemetry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_state: Option<&'a FrameTelemetry>,
+}
+
+/// Export a replay to a video file, and write per-frame JSONL next to it.
+///
+/// Files created:
+/// - `<output>.mkv` (or whatever your output path is)
+/// - `<output>.jsonl`  : per-frame inputs + optional telemetry (hooks.capture_frame_telemetry)
+///
+/// JSONL schema (each line):
+/// { v, frame, tick, input:{local,remote?}, state?:{...} }
 pub async fn export(
     rom: &[u8],
     hooks: &(dyn crate::hooks::Hooks + Send + Sync + 'static),
@@ -216,7 +293,7 @@ pub async fn export(
 ) -> anyhow::Result<()> {
     let mut vbuf = image::RgbaImage::new(mgba::gba::SCREEN_WIDTH, mgba::gba::SCREEN_HEIGHT);
 
-    // [NEW] Setup JSONL logging
+    // JSONL logging: inputs + telemetry.
     let json_path = output_path.with_extension("jsonl");
     let mut json_file = std::fs::File::create(&json_path)?;
     let mut global_frame_count: usize = 0;
@@ -243,8 +320,8 @@ pub async fn export(
             .collect::<Vec<_>>(),
     )?;
 
-    let total_frames = replays.iter().map(|replay| replay.input_pairs.len()).sum();
-    let mut completed_total = 0;
+    let total_frames: usize = replays.iter().map(|replay| replay.input_pairs.len()).sum();
+    let mut completed_total = 0usize;
     let mut samples = vec![0i16; SAMPLE_RATE as usize];
 
     for replay in replays {
@@ -252,16 +329,18 @@ pub async fn export(
         let replay_len = replay.input_pairs.len();
 
         loop {
-            // [NEW] Capture input state before running frame
-            // We read the next pending input pair directly from the stepper state lock
+            // Capture input *intended* for this frame (before traps/stepper advance).
             let current_input_pair = {
                 let s = state.lock_inner();
-                s.peek_input_pair().cloned() 
+                s.peek_input_pair().cloned()
             };
 
+            // Tick alignment marker for this exported frame.
+            let tick_before = state.lock_inner().current_tick() as u64;
+
             {
-                let state = state.lock_inner();
-                if (!replay.is_complete && state.input_pairs_left() == 0) || state.is_round_ended() {
+                let s = state.lock_inner();
+                if (!replay.is_complete && s.input_pairs_left() == 0) || s.is_round_ended() {
                     break;
                 }
             }
@@ -270,26 +349,57 @@ pub async fn export(
                 Err(err)?;
             }
 
-            // [NEW] Write input to JSONL
+            // Run the frame and write video/audio.
+            let frame_samples = run_frame(&mut core, &mut samples, &mut vbuf);
+            video_child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(&vbuf)
+                .await?;
+
+            let mut audio_bytes = vec![0u8; frame_samples.len() * 2];
+            byteorder::LittleEndian::write_i16_into(frame_samples, &mut audio_bytes[..]);
+            audio_child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(&audio_bytes)
+                .await?;
+
+            // After run_frame: snapshot telemetry (optional).
+            let telemetry = hooks.capture_frame_telemetry(core.as_mut());
+
+            // Write JSONL line if we have an input pair (we generally should).
             if let Some(pair) = current_input_pair {
-                 let entry = json!({
+                let rec = FrameRecord {
+                    v: 1,
+                    frame: global_frame_count,
+                    tick: tick_before,
+                    input: FrameInput {
+                        local: pair.local.joyflags,
+                        remote: None,
+                    },
+                    state: telemetry.as_ref(),
+                };
+                write_jsonl(&mut json_file, &rec)?;
+            } else {
+                // Keep a breadcrumb in JSONL even if peek_input_pair was None.
+                let entry = json!({
+                    "v": 1,
                     "frame": global_frame_count,
-                    "input": pair.local.joyflags
+                    "tick": tick_before,
+                    "input": { "local": 0, "remote": null },
+                    "state": telemetry,
+                    "note": "peek_input_pair was None"
                 });
                 writeln!(json_file, "{}", entry.to_string())?;
             }
 
-            let samples = run_frame(&mut core, &mut samples, &mut vbuf);
-            video_child.stdin.as_mut().unwrap().write_all(&vbuf).await?;
-
-            let mut audio_bytes = vec![0u8; samples.len() * 2];
-            byteorder::LittleEndian::write_i16_into(samples, &mut audio_bytes[..]);
-            audio_child.stdin.as_mut().unwrap().write_all(&audio_bytes).await?;
-            
             global_frame_count += 1;
-            
+
             progress_callback(
-                replay_len - state.lock_inner().input_pairs_left() + completed_total,
+                replay_len.saturating_sub(state.lock_inner().input_pairs_left()) + completed_total,
                 total_frames,
             );
         }
@@ -297,6 +407,7 @@ pub async fn export(
         completed_total += replay_len;
     }
 
+    // Finalize ffmpeg children
     video_child.stdin = None;
     video_child.wait().await?;
     audio_child.stdin = None;
@@ -317,6 +428,12 @@ pub async fn export(
     Ok(())
 }
 
+/// Two-sided export (composed video + 2 audio tracks) and telemetry.
+///
+/// Files created:
+/// - `<output>` (video)
+/// - `<output>.telemetry.jsonl` : combined per-frame record including both sides’ telemetry
+/// - (optional legacy) `<output>.local.jsonl` / `<output>.remote.jsonl` inputs-only logs (kept here)
 pub async fn export_twosided(
     local_rom: &[u8],
     local_hooks: &(dyn crate::hooks::Hooks + Send + Sync + 'static),
@@ -330,13 +447,17 @@ pub async fn export_twosided(
     let mut vbuf = image::RgbaImage::new(mgba::gba::SCREEN_WIDTH, mgba::gba::SCREEN_HEIGHT);
     let mut composed_vbuf = image::RgbaImage::new(mgba::gba::SCREEN_WIDTH * 2, mgba::gba::SCREEN_HEIGHT);
 
-    // [NEW] Setup JSONL logging for two-sided export
+    // Legacy per-side input logs (kept for compatibility)
     let json_path_local = output_path.with_extension("local.jsonl");
     let json_path_remote = output_path.with_extension("remote.jsonl");
     let mut json_file_local = std::fs::File::create(&json_path_local)?;
     let mut json_file_remote = std::fs::File::create(&json_path_remote)?;
-    let mut global_frame_count: usize = 0;
 
+    // New combined telemetry log
+    let telemetry_path = output_path.with_extension("telemetry.jsonl");
+    let mut telemetry_file = std::fs::File::create(&telemetry_path)?;
+
+    let mut global_frame_count: usize = 0;
 
     let video_output = tempfile::NamedTempFile::new()?;
     let mut video_child = make_video_ffmpeg(
@@ -370,9 +491,9 @@ pub async fn export_twosided(
             .collect::<Vec<_>>(),
     )?;
 
-    let total_frames = replays.iter().map(|replay| replay.input_pairs.len()).sum();
+    let total_frames: usize = replays.iter().map(|replay| replay.input_pairs.len()).sum();
 
-    let mut completed_total = 0;
+    let mut completed_total = 0usize;
     let mut samples = vec![0i16; SAMPLE_RATE as usize];
 
     for replay in replays {
@@ -380,40 +501,41 @@ pub async fn export_twosided(
         let remote_replay = local_replay.clone().into_remote();
 
         let (mut local_core, local_state) = make_core_and_state(local_rom, local_hooks, &local_replay, settings)?;
-        let (mut remote_core, remote_state) = make_core_and_state(remote_rom, remote_hooks, &remote_replay, settings)?;
+        let (mut remote_core, remote_state) =
+            make_core_and_state(remote_rom, remote_hooks, &remote_replay, settings)?;
 
         let replay_len = replay.input_pairs.len();
 
         loop {
-            // [NEW] Capture inputs
+            // Capture inputs (before stepping)
             let input_pair_local = { local_state.lock_inner().peek_input_pair().cloned() };
             let input_pair_remote = { remote_state.lock_inner().peek_input_pair().cloned() };
 
             {
-                let local_state = local_state.lock_inner();
-                if (!local_replay.is_complete && local_state.input_pairs_left() == 0) || local_state.is_round_ended() {
+                let s = local_state.lock_inner();
+                if (!local_replay.is_complete && s.input_pairs_left() == 0) || s.is_round_ended() {
                     break;
                 }
             }
 
             {
-                let remote_state = remote_state.lock_inner();
-                if (!remote_replay.is_complete && remote_state.input_pairs_left() == 0) || remote_state.is_round_ended()
-                {
+                let s = remote_state.lock_inner();
+                if (!remote_replay.is_complete && s.input_pairs_left() == 0) || s.is_round_ended() {
                     break;
                 }
             }
 
-            // [NEW] Write to JSONL logs
-            if let Some(pair) = input_pair_local {
-                 let entry = json!({ "frame": global_frame_count, "input": pair.local.joyflags });
-                 writeln!(json_file_local, "{}", entry.to_string())?;
+            // Legacy: per-side inputs-only JSONL
+            if let Some(pair) = input_pair_local.as_ref() {
+                let entry = json!({ "frame": global_frame_count, "input": pair.local.joyflags });
+                writeln!(json_file_local, "{}", entry.to_string())?;
             }
-            if let Some(pair) = input_pair_remote {
-                 let entry = json!({ "frame": global_frame_count, "input": pair.local.joyflags });
-                 writeln!(json_file_remote, "{}", entry.to_string())?;
+            if let Some(pair) = input_pair_remote.as_ref() {
+                let entry = json!({ "frame": global_frame_count, "input": pair.local.joyflags });
+                writeln!(json_file_remote, "{}", entry.to_string())?;
             }
 
+            // Tick alignment checks (existing)
             let current_tick = local_state.lock_inner().current_tick();
             if remote_state.lock_inner().current_tick() != current_tick {
                 anyhow::bail!(
@@ -423,20 +545,21 @@ pub async fn export_twosided(
                 );
             }
 
+            // Produce composed frames while both cores are on the same tick.
             while local_state.lock_inner().current_tick() == current_tick
                 && remote_state.lock_inner().current_tick() == current_tick
             {
                 if let Some(err) = local_state.lock_inner().take_error() {
                     Err(err)?;
                 }
-
                 if let Some(err) = remote_state.lock_inner().take_error() {
                     Err(err)?;
                 }
 
+                // Local frame
+                let local_samples = run_frame(&mut local_core, &mut samples, &mut vbuf);
+                image::imageops::replace(&mut composed_vbuf, &vbuf, 0, 0);
                 {
-                    let local_samples = run_frame(&mut local_core, &mut samples, &mut vbuf);
-                    image::imageops::replace(&mut composed_vbuf, &vbuf, 0, 0);
                     let mut audio_bytes = vec![0u8; local_samples.len() * 2];
                     byteorder::LittleEndian::write_i16_into(local_samples, &mut audio_bytes[..]);
                     local_audio_child
@@ -447,9 +570,15 @@ pub async fn export_twosided(
                         .await?;
                 }
 
+                // Remote frame
+                let remote_samples = run_frame(&mut remote_core, &mut samples, &mut vbuf);
+                image::imageops::replace(
+                    &mut composed_vbuf,
+                    &vbuf,
+                    mgba::gba::SCREEN_WIDTH as i64,
+                    0,
+                );
                 {
-                    let remote_samples = run_frame(&mut remote_core, &mut samples, &mut vbuf);
-                    image::imageops::replace(&mut composed_vbuf, &vbuf, mgba::gba::SCREEN_WIDTH as i64, 0);
                     let mut audio_bytes = vec![0u8; remote_samples.len() * 2];
                     byteorder::LittleEndian::write_i16_into(remote_samples, &mut audio_bytes[..]);
                     remote_audio_child
@@ -460,20 +589,55 @@ pub async fn export_twosided(
                         .await?;
                 }
 
+                // Video write
                 video_child
                     .stdin
                     .as_mut()
                     .unwrap()
                     .write_all(composed_vbuf.as_bytes())
                     .await?;
-                
+
+                // Telemetry snapshot AFTER both sides advanced this composed frame.
+                let local_tel = local_hooks.capture_frame_telemetry(local_core.as_mut());
+                let remote_tel = remote_hooks.capture_frame_telemetry(remote_core.as_mut());
+
+                // Prefer writing only when we have both inputs.
+                if let (Some(lp), Some(rp)) = (input_pair_local.as_ref(), input_pair_remote.as_ref()) {
+                    let rec = TwoSidedFrameRecord {
+                        v: 1,
+                        frame: global_frame_count,
+                        tick: current_tick as u64,
+                        input: TwoSidedInput {
+                            local: lp.local.joyflags,
+                            remote: rp.local.joyflags,
+                        },
+                        local_state: local_tel.as_ref(),
+                        remote_state: remote_tel.as_ref(),
+                    };
+                    write_jsonl(&mut telemetry_file, &rec)?;
+                } else {
+                    let entry = json!({
+                        "v": 1,
+                        "frame": global_frame_count,
+                        "tick": current_tick as u64,
+                        "input": {
+                            "local": input_pair_local.as_ref().map(|p| p.local.joyflags).unwrap_or(0),
+                            "remote": input_pair_remote.as_ref().map(|p| p.local.joyflags).unwrap_or(0),
+                        },
+                        "local_state": local_tel,
+                        "remote_state": remote_tel,
+                        "note": "one or both peek_input_pair were None"
+                    });
+                    writeln!(telemetry_file, "{}", entry.to_string())?;
+                }
+
                 global_frame_count += 1;
             }
 
+            // Drain any remaining frames at this tick (existing behavior)
             while local_state.lock_inner().current_tick() == current_tick {
                 run_frame(&mut local_core, &mut samples, &mut vbuf);
             }
-
             while remote_state.lock_inner().current_tick() == current_tick {
                 run_frame(&mut remote_core, &mut samples, &mut vbuf);
             }
@@ -484,6 +648,7 @@ pub async fn export_twosided(
         completed_total += replay_len;
     }
 
+    // Finalize ffmpeg children
     video_child.stdin = None;
     video_child.wait().await?;
     local_audio_child.stdin = None;
