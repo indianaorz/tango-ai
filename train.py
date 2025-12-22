@@ -91,12 +91,16 @@ class CachedTangoDataset(Dataset):
             self.cache_idx = file_idx
         
         # 3. Retrieve Data
-        # Frame: uint8 [0-255] -> float [0.0-1.0]
-        # Data is stored as [T, 3, H, W] in the .pt file
         frame_uint8 = self.cache_data["frames"][local_idx] 
+        
+        # [0, 255] -> [0.0, 1.0]
         frames_tensor = frame_uint8.float().div_(255.0)
 
-        # Action: float32 [25]
+        # --- NEW: SigLIP Normalization (Mean=0.5, Std=0.5) ---
+        # Shifts data from [0, 1] -> [-1, 1]
+        frames_tensor = (frames_tensor - 0.5) / 0.5
+        # -----------------------------------------------------
+
         action_vec = self.cache_data["actions"][local_idx]
         
         # Split action vector

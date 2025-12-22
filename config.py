@@ -101,7 +101,7 @@ RANDOM_ACTION_KEYS_FOR_SKIP_STRATEGY = ["B", "DOWN", "UP", "LEFT", "RIGHT", "A"]
 # =============================================================================
 # Nitrogen (ng.pt) policy config
 # =============================================================================
-NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", os.path.join(PROJECT_ROOT, "checkpoints", "step_55000.pt"))
+NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", os.path.join(PROJECT_ROOT, "checkpoints", "step_5000.pt"))
 USE_NG_POLICY = 1
 NG_DEVICE = os.getenv("NG_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
 # NEW: Use FP16 for speed on TensorCores

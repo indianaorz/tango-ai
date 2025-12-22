@@ -102,15 +102,36 @@ def bitmask_to_action_index(bitmask: int) -> int:
 def preprocess_frame(frame_pil_image, height, width):
     """
     Converts a PIL image to a [C,H,W] float tensor in **RGB**.
-    Scales pixels to [0,1].  If image is missing, returns zeros.
+    Matches training logic: 
+    1. Force Resize to Native GBA (240x160) using Nearest Neighbor.
+    2. Center-pad onto the target canvas (e.g., 256x256).
     """
     if frame_pil_image is None:
         return torch.zeros((3, height, width), dtype=torch.float32)
 
-    img = frame_pil_image.convert("RGB")                # keep colour
-    img = TF.resize(img, [height, width], antialias=True)
-    img_tensor = TF.to_tensor(img)                      # [3,H,W], float32 0‑1
+    # 1. Define Native GBA Resolution
+    NATIVE_W, NATIVE_H = 240, 160
+    
+    img = frame_pil_image.convert("RGB")
+    
+    # 2. Resize to Native (Nearest Neighbor preserves pixel art crispness)
+    # This handles cases where the incoming stream might be scaled differently
+    if img.size != (NATIVE_W, NATIVE_H):
+        img = img.resize((NATIVE_W, NATIVE_H), resample=Image.NEAREST)
+    
+    # 3. Create Black Canvas (Target Size)
+    new_img = Image.new("RGB", (width, height), (0, 0, 0))
+    
+    # 4. Paste in Center
+    left = (width - NATIVE_W) // 2
+    top = (height - NATIVE_H) // 2
+    new_img.paste(img, (left, top))
+    
+    # 5. Convert to Tensor [3, H, W] (Scales 0-255 -> 0.0-1.0 automatically)
+    img_tensor = TF.to_tensor(new_img)
+    
     return img_tensor
+
 
 def normalize_value(value, current_max, default_max=1.0):
     """Normalizes a value, updating current_max if value is higher."""

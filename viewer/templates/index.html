@@ -3,19 +3,34 @@
 <head>
     <title>Tango Dataset Viewer</title>
     <style>
-        body { font-family: sans-serif; background: #222; color: #eee; padding: 20px; }
-        a { color: #4db8ff; text-decoration: none; font-size: 18px; display: block; margin: 5px 0; }
-        a:hover { text-decoration: underline; }
-        h1 { border-bottom: 1px solid #444; padding-bottom: 10px; }
+        body { font-family: 'Consolas', sans-serif; background: #222; color: #eee; padding: 20px; display: flex; gap: 40px;}
+        h2 { border-bottom: 1px solid #444; padding-bottom: 10px; color: #4db8ff; }
+        .col { flex: 1; }
+        a { color: #aaa; text-decoration: none; font-size: 14px; display: block; margin: 5px 0; padding: 5px; background: #333; border-radius: 4px; }
+        a:hover { background: #444; color: #fff; }
+        .tag { font-size: 10px; background: #000; padding: 2px 5px; border-radius: 3px; float: right; color: #666; }
     </style>
 </head>
 <body>
-    <h1>Tango Replays</h1>
-    <div id="list">
+    <div class="col">
+        <h2>📂 Raw Replays (Video + JSONL)</h2>
         {% for replay in replays %}
-            <a href="/view/{{ replay }}">📁 {{ replay }}</a>
+            <a href="/view/{{ replay }}">
+                {{ replay }}
+            </a>
         {% else %}
-            <p>No replays found in data/dataset/</p>
+            <p style="color:#666">No raw datasets found in data/dataset/</p>
+        {% endfor %}
+    </div>
+
+    <div class="col">
+        <h2>📦 Cached Tensors (.pt)</h2>
+        {% for f in cached %}
+            <a href="/inspect/{{ f }}">
+                {{ f }} <span class="tag">PT</span>
+            </a>
+        {% else %}
+            <p style="color:#666">No cached files in data/dataset_cached/</p>
         {% endfor %}
     </div>
 </body>

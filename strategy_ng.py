@@ -282,45 +282,30 @@ def _decode_pil_from_b64(b64: Optional[str]) -> Optional[Image.Image]:
     except Exception:
         return None
 
+import torchvision.transforms.functional as TF
+
+
 def _pil_to_chw_float01(pil_img: Image.Image, *, out_h: int, out_w: int) -> torch.Tensor:
     if pil_img.mode != "RGB":
         pil_img = pil_img.convert("RGB")
     
-    w, h = pil_img.size
+    # 1. Force Native Resolution (240x160)
+    NATIVE_W, NATIVE_H = 240, 160
+    img = pil_img.resize((NATIVE_W, NATIVE_H), resample=Image.NEAREST)
     
-    # 1. Calculate Integer Scale
-    scale = min(out_w // w, out_h // h)
-    scale = max(1, scale)
+    # 2. Center Pad
+    new_img = Image.new("RGB", (out_w, out_h), (0, 0, 0))
+    left = (out_w - NATIVE_W) // 2
+    top = (out_h - NATIVE_H) // 2
+    new_img.paste(img, (left, top))
     
-    new_w = w * scale
-    new_h = h * scale
+    # 3. To Tensor [0.0, 1.0]
+    tensor = TF.to_tensor(new_img)
     
-    # 2. Resize (Integer steps only)
-    if scale > 1:
-        pil_img = pil_img.resize((new_w, new_h), resample=Image.NEAREST)
+    # 4. --- NEW: SigLIP Normalization ---
+    tensor = (tensor - 0.5) / 0.5
     
-    # 3. Create black canvas
-    canvas = Image.new("RGB", (out_w, out_h), (0, 0, 0))
-    
-    # 4. Paste Center
-    x_off = (out_w - new_w) // 2
-    y_off = (out_h - new_h) // 2
-    
-    # Safety crop if source > target
-    if new_w > out_w or new_h > out_h:
-        left = (new_w - out_w) // 2
-        top = (new_h - out_h) // 2
-        right = left + out_w
-        bottom = top + out_h
-        pil_img = pil_img.crop((left, top, right, bottom))
-        x_off = 0
-        y_off = 0
-
-    canvas.paste(pil_img, (x_off, y_off))
-    
-    px = torch.tensor(list(canvas.getdata()), dtype=torch.float32)
-    px = px.view(out_h, out_w, 3).permute(2, 0, 1).contiguous()
-    return px / 255.0
+    return tensor
 
 _DEFAULT_BUTTON_ALIAS = { "A": "Z", "B": "X", "START": "RETURN", "SELECT": "BACKSPACE", "L": "A", "R": "S" }
 

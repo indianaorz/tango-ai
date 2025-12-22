@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Inspecting Cache: {{ filename }}</title>
+    <style>
+        body { background: #111; color: #fff; font-family: 'Consolas', monospace; display: flex; flex-direction: column; align-items: center; margin: 0; padding: 20px; }
+        h2 { margin-bottom: 10px; color: #ccc; }
+        a { color: #888; text-decoration: none; align-self: flex-start; margin-bottom: 20px; font-size: 14px; }
+        .container { display: flex; gap: 20px; align-items: flex-start; justify-content: center; width: 100%; max-width: 1200px; }
+        
+        /* IMAGE DISPLAY */
+        .viewer-box { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+        img#tensor-view { width: 512px; height: 512px; border: 2px solid #444; image-rendering: pixelated; background: #000; }
+        
+        /* SLIDER */
+        input[type=range] { width: 512px; margin: 10px 0; }
+        
+        .sidebar { width: 320px; }
+
+        /* CONTROLLER (Reuse) */
+        .controller { background: #e0e0e0; width: 300px; height: 180px; border-radius: 20px 20px 40px 40px; position: relative; border: 2px solid #999; margin: 0 auto; box-shadow: inset 0 -5px 10px rgba(0,0,0,0.2), 0 5px 15px rgba(0,0,0,0.5); }
+        .btn { position: absolute; background: #555; border: 1px solid #333; transition: background 0.05s; }
+        .btn.active { background: #00ff00 !important; box-shadow: 0 0 10px #00ff00; border-color: #00cc00; }
+        .dpad { position: absolute; top: 60px; left: 30px; width: 90px; height: 90px; }
+        .dpad .btn { background: #333; }
+        .btn.up { top: 0; left: 30px; width: 30px; height: 30px; border-radius: 3px 3px 0 0; }
+        .btn.down { bottom: 0; left: 30px; width: 30px; height: 30px; border-radius: 0 0 3px 3px; }
+        .btn.left { top: 30px; left: 0; width: 30px; height: 30px; border-radius: 3px 0 0 3px; }
+        .btn.right { top: 30px; right: 0; width: 30px; height: 30px; border-radius: 0 3px 3px 0; }
+        .dpad-center { position: absolute; top: 30px; left: 30px; width: 30px; height: 30px; background: #333; }
+        .btn.a { top: 70px; right: 20px; width: 35px; height: 35px; border-radius: 50%; background: #a00; border: 2px solid #600; display: flex; justify-content: center; align-items: center; color: rgba(255,255,255,0.5); font-weight: bold;}
+        .btn.b { top: 90px; right: 65px; width: 35px; height: 35px; border-radius: 50%; background: #a00; border: 2px solid #600; display: flex; justify-content: center; align-items: center; color: rgba(255,255,255,0.5); font-weight: bold;}
+        .btn.a.active, .btn.b.active { background: #ff3333 !important; box-shadow: 0 0 15px #ff0000; }
+        .btn.start { bottom: 20px; left: 120px; width: 30px; height: 10px; border-radius: 10px; transform: rotate(-25deg); background: #999; }
+        .btn.select { bottom: 20px; left: 80px; width: 30px; height: 10px; border-radius: 10px; transform: rotate(-25deg); background: #999; }
+        .btn.l { top: -10px; left: 10px; width: 80px; height: 20px; border-radius: 10px 10px 0 0; background: #ccc; z-index: -1; }
+        .btn.r { top: -10px; right: 10px; width: 80px; height: 20px; border-radius: 10px 10px 0 0; background: #ccc; z-index: -1; }
+
+        .loading-ov { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(0,0,0,0.8); padding:10px; border-radius:5px; display:none; }
+    </style>
+</head>
+<body>
+    <a href="/">&larr; Back to List</a>
+    <h2>📦 {{ filename }}</h2>
+
+    <div class="container">
+        <div class="viewer-box">
+            <div style="position:relative">
+                <img id="tensor-view" src="" />
+                <div id="loading" class="loading-ov">Loading...</div>
+            </div>
+            
+            <input type="range" id="slider" min="0" max="0" value="0" style="width: 512px">
+            <div>Frame: <span id="frame-idx">0</span> / <span id="frame-total">0</span></div>
+        </div>
+
+        <div class="sidebar">
+            <div class="controller">
+                <div class="btn l" id="btn-L"></div><div class="btn r" id="btn-R"></div>
+                <div class="dpad">
+                    <div class="dpad-center"></div>
+                    <div class="btn up" id="btn-UP"></div><div class="btn down" id="btn-DOWN"></div>
+                    <div class="btn left" id="btn-LEFT"></div><div class="btn right" id="btn-RIGHT"></div>
+                </div>
+                <div class="btn b" id="btn-B">B</div><div class="btn a" id="btn-A">A</div>
+                <div class="btn select" id="btn-SELECT"></div><div class="btn start" id="btn-START"></div>
+            </div>
+            
+            <div style="margin-top:20px; padding:10px; border:1px solid #444; background:#222; font-size:12px; color:#aaa;">
+                <strong>Debug Info:</strong><br>
+                Raw Left: <span id="ax-l">[0.0, 0.0]</span><br>
+                Raw Right: <span id="ax-r">[0.0, 0.0]</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const filename = "{{ filename }}";
+        const slider = document.getElementById('slider');
+        const img = document.getElementById('tensor-view');
+        const frameLbl = document.getElementById('frame-idx');
+        const loading = document.getElementById('loading');
+
+        const KEYS = {'DPAD_UP':'btn-UP', 'DPAD_DOWN':'btn-DOWN', 'DPAD_LEFT':'btn-LEFT', 'DPAD_RIGHT':'btn-RIGHT',
+                      'EAST':'btn-A', 'SOUTH':'btn-B', 'LEFT_SHOULDER':'btn-L', 'RIGHT_SHOULDER':'btn-R', 'START':'btn-START', 'BACK':'btn-SELECT'};
+
+        // 1. Get Metadata
+        fetch(`/api/cache_meta/${filename}`)
+            .then(r => r.json())
+            .then(data => {
+                if(data.error) { alert(data.error); return; }
+                slider.max = data.count - 1;
+                document.getElementById('frame-total').innerText = data.count - 1;
+                loadFrame(0);
+            });
+
+        // 2. Slider Interaction
+        slider.addEventListener('input', (e) => {
+            frameLbl.innerText = e.target.value;
+        });
+
+        slider.addEventListener('change', (e) => {
+            loadFrame(e.target.value);
+        });
+
+        function loadFrame(idx) {
+            loading.style.display = "block";
+            fetch(`/api/cache_frame/${filename}/${idx}`)
+                .then(r => r.json())
+                .then(d => {
+                    loading.style.display = "none";
+                    if(d.error) return;
+
+                    // Update Image
+                    img.src = d.image;
+
+                    // Update Controller
+                    updateController(d.action);
+                });
+        }
+
+        function updateController(act) {
+            document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+            for(let k in KEYS) {
+                const v = act[k];
+                if((Array.isArray(v) ? v[0] : v) > 0.5) document.getElementById(KEYS[k]).classList.add('active');
+            }
+            
+            document.getElementById('ax-l').innerText = `[${act['AXIS_LEFTX'][0].toFixed(2)}, ${act['AXIS_LEFTY'][0].toFixed(2)}]`;
+            document.getElementById('ax-r').innerText = `[${act['AXIS_RIGHTX'][0].toFixed(2)}, ${act['AXIS_RIGHTY'][0].toFixed(2)}]`;
+        }
+    </script>
+</body>
+</html>
