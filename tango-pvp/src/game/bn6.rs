@@ -80,22 +80,39 @@ impl crate::hooks::Hooks for Hooks {
             }),
         ]
     }
-/// Per-frame telemetry snapshot for replay export.
-    fn capture_frame_telemetry(&self, mut core: mgba::core::CoreMutRef) -> Option<crate::telemetry::FrameTelemetry> {
-        // --- 1. Define Addresses ---
-        const SERVER_HEALTH_ADDR: u32 = 0x0203A9D4;
-        const CLIENT_HEALTH_ADDR: u32 = 0x0203AAAC;
-        const P1_X_ADDR: u32 = 0x0203AA4C;
-        const P1_Y_ADDR: u32 = 0x0203A9C4;
-        const P2_X_ADDR: u32 = 0x02036A8C; 
-        const P2_Y_ADDR: u32 = 0x0203AA9C;
-        const P1_CHARGE_ADDR: u32 = 0x0203409D;
-        const P2_CHARGE_ADDR: u32 = 0x0203419D;
-        const P1_SELECTED_CHIP_ADDR: u32 = 0x0203A9DA;
-        const P2_SELECTED_CHIP_ADDR: u32 = 0x0203AAB2;
-        const CUST_GAUGE_ADDR: u32 = 0x020352A1;
-        const WINDOW_ADDR: u32 = 0x02035288; // 0=Closed, 255=Open
 
+/// Per-frame telemetry snapshot for replay export.
+fn capture_frame_telemetry(&self, mut core: mgba::core::CoreMutRef) -> Option<crate::telemetry::FrameTelemetry> {
+        // --- 1. MEMORY ADDRESSES ---
+        // Obj0 (Default P1 / Host / Left)
+        const HP_OBJ0_ADDR: u32 = 0x0203A9D4;
+        const X_OBJ0_ADDR: u32 = 0x0203AA4C; 
+        const Y_OBJ0_ADDR: u32 = 0x0203A9C4;
+        const CHARGE_OBJ0_ADDR: u32 = 0x0203409D;
+        const CHIP_OBJ0_ADDR: u32 = 0x0203A9DA; 
+        const EMO_GAME_OBJ0_ADDR: u32 = 0x0203CE90;
+
+        // Obj1 (Default P2 / Client / Right)
+        const HP_OBJ1_ADDR: u32 = 0x0203AAAC;
+        const X_OBJ1_ADDR: u32 = 0x0203AB24;
+        const Y_OBJ1_ADDR: u32 = 0x0203AA9C;
+        const CHARGE_OBJ1_ADDR: u32 = 0x0203419D;
+        const CHIP_OBJ1_ADDR: u32 = 0x0203AAB2;
+        const EMO_GAME_OBJ1_ADDR: u32 = 0x0203CE2C;
+
+        // Local Console State (Always "My" view)
+        const EMO_WIN_LOCAL_ADDR: u32 = 0x020352CC; 
+        const CUST_GAUGE_ADDR: u32 = 0x020352A1;
+        const WINDOW_ADDR: u32 = 0x02035288; 
+        const BEAST_SELECTABLE_ADDR: u32 = 0x0203664B;
+        const CROSS_WINDOW_ADDR: u32 = 0x020364C2;
+        const CHIP_SEL_COUNT_ADDR: u32 = 0x020364C8;
+        const CHIP_VISIBLE_COUNT_ADDR: u32 = 0x020047D6;
+        const MENU_INDEX_ADDR: u32 = 0x020364C7;
+        const CROSS_INDEX_ADDR: u32 = 0x020364DB;
+        const SELECTED_INDICES_BASE: u32 = 0x02036508; 
+
+        // Grids
         let grid_addresses = [
             0x02039C06, 0x02039C26, 0x02039C46, 0x02039C66, 0x02039C86, 0x02039CA6, 0x02039D06, 0x02039D26,
             0x02039D46, 0x02039D66, 0x02039D86, 0x02039DA6, 0x02039E06, 0x02039E26, 0x02039E46, 0x02039E66,
@@ -107,92 +124,108 @@ impl crate::hooks::Hooks for Hooks {
             0x02039E87, 0x02039EA7,
         ];
 
-        // --- 2. Read Values using core.raw_read ---
+        // --- 2. READ RAW DATA (No Swapping Logic) ---
+        // We strictly map "player_*" to Obj0 and "enemy_*" to Obj1.
+        // If the recording is actually from P2's perspective, the Python script will detect this and swap them.
         
-        let p1_hp = core.raw_read_16(SERVER_HEALTH_ADDR, -1);
-        let p2_hp = core.raw_read_16(CLIENT_HEALTH_ADDR, -1);
+        let p_hp = core.raw_read_16(HP_OBJ0_ADDR, -1);
+        let e_hp = core.raw_read_16(HP_OBJ1_ADDR, -1);
+        
+        // Sanity check: If both are 0, we are likely not in a match yet.
+        if p_hp == 0 && e_hp == 0 { return None; }
 
-        if p1_hp == 0 && p2_hp == 0 {
-            return None; 
-        }
+        let p_x = core.raw_read_16(X_OBJ0_ADDR, -1);
+        let p_y = core.raw_read_16(Y_OBJ0_ADDR, -1);
+        let e_x = core.raw_read_16(X_OBJ1_ADDR, -1);
+        let e_y = core.raw_read_16(Y_OBJ1_ADDR, -1);
 
-        let p1_x = core.raw_read_16(P1_X_ADDR, -1);
-        let p1_y = core.raw_read_16(P1_Y_ADDR, -1);
-        let p2_x = core.raw_read_16(P2_X_ADDR, -1);
-        let p2_y = core.raw_read_16(P2_Y_ADDR, -1);
+        let p_chg = core.raw_read_8(CHARGE_OBJ0_ADDR, -1) as u16;
+        let e_chg = core.raw_read_8(CHARGE_OBJ1_ADDR, -1) as u16;
+        let p_chip = core.raw_read_16(CHIP_OBJ0_ADDR, -1);
+        let e_chip = core.raw_read_16(CHIP_OBJ1_ADDR, -1);
+        
+        let  e_game_emo= core.raw_read_8(EMO_GAME_OBJ0_ADDR, -1) as u16;
+        let p_game_emo = core.raw_read_8(EMO_GAME_OBJ1_ADDR, -1) as u16;
 
-        let p1_charge = core.raw_read_8(P1_CHARGE_ADDR, -1) as u16;
-        let p2_charge = core.raw_read_8(P2_CHARGE_ADDR, -1) as u16;
-
-        let p1_chip = core.raw_read_16(P1_SELECTED_CHIP_ADDR, -1);
-        let p2_chip = core.raw_read_16(P2_SELECTED_CHIP_ADDR, -1);
-
+        // --- 3. READ LOCAL DATA ---
         let cust_gauge = core.raw_read_8(CUST_GAUGE_ADDR, -1) as u16;
-        
-        // Window State
-        let window_val = core.raw_read_8(WINDOW_ADDR, -1);
-        let inside_window = window_val == 255;
+        let inside_window = core.raw_read_8(WINDOW_ADDR, -1) == 255;
+        let p_win_emo = core.raw_read_8(EMO_WIN_LOCAL_ADDR, -1) as u16; 
+        let beast = core.raw_read_8(BEAST_SELECTABLE_ADDR, -1) as u16;
+        let cross = core.raw_read_8(CROSS_WINDOW_ADDR, -1) as u16;
+        let sel_count = core.raw_read_8(CHIP_SEL_COUNT_ADDR, -1) as u16;
+        let vis_count = core.raw_read_8(CHIP_VISIBLE_COUNT_ADDR, -1) as u16;
+        let menu_idx = core.raw_read_8(MENU_INDEX_ADDR, -1) as u16;
+        let cross_idx = core.raw_read_8(CROSS_INDEX_ADDR, -1) as u16;
+
+        let mut selected_indices = Vec::with_capacity(5);
+        for i in 0..5 {
+            selected_indices.push(core.raw_read_8(SELECTED_INDICES_BASE + i, -1) as u16);
+        }
 
         let mut grid_state = Vec::with_capacity(18);
-        for addr in &grid_addresses {
-            grid_state.push(core.raw_read_8(*addr, -1) as u16);
-        }
-
+        for addr in &grid_addresses { grid_state.push(core.raw_read_8(*addr, -1) as u16); }
         let mut grid_owner_state = Vec::with_capacity(18);
-        for addr in &grid_owner_addresses {
-            grid_owner_state.push(core.raw_read_8(*addr, -1) as u16);
-        }
+        for addr in &grid_owner_addresses { grid_owner_state.push(core.raw_read_8(*addr, -1) as u16); }
 
-        // Hand (Custom Screen Chips in RAM)
-        let mut hand_chips = Vec::new();
+        let mut chip_slots = Vec::new();
+        let mut chip_codes = Vec::new();
         for i in 0..16 {
              let address = 0x0203CDB0 + i as u32;
-             hand_chips.push(core.raw_read_8(address, -1) as u16);
+             let val = core.raw_read_8(address, -1) as u16;
+             if i % 2 == 0 { chip_slots.push(val); } 
+             else { chip_codes.push(val); }
         }
 
-        // --- 3. Construct Telemetry ---
-        // Note: Static data (Folder/NaviCust) is None because accessing global.rs 
-        // from inside the library crate is architecturally forbidden.
+        // --- 4. CONSTRUCT TELEMETRY ---
         Some(crate::telemetry::FrameTelemetry::V1(crate::telemetry::FrameTelemetryV1 {
-            // Dynamic RAM
-            player_health: Some(p1_hp),
-            enemy_health: Some(p2_hp),
-            player_pos: Some((p1_x, p1_y)),
-            enemy_pos: Some((p2_x, p2_y)),
-            player_charge: Some(p1_charge),
-            enemy_charge: Some(p2_charge),
-            player_chip: Some(p1_chip),
-            enemy_chip: Some(p2_chip),
+            player_health: Some(p_hp),
+            enemy_health: Some(e_hp),
+            player_pos: Some((p_x, p_y)),
+            enemy_pos: Some((e_x, e_y)),
+            player_charge: Some(p_chg),
+            enemy_charge: Some(e_chg),
+            player_chip: Some(p_chip),
+            enemy_chip: Some(e_chip),
+            
+            // Emotions
+            player_emotion: Some(p_win_emo), // Window Face (Always Local)
+            enemy_emotion: Some(0),          // Window Face (Not visible for enemy)
+            
+            player_game_emotion: Some(p_game_emo), // Grid State (Obj0)
+            enemy_game_emotion: Some(e_game_emo),  // Grid State (Obj1)
+
             cust_gauge: Some(cust_gauge),
             inside_window: Some(inside_window),
-            
+            beast_mode: Some(beast),
+            cross_window: Some(cross),
+            chip_select_count: Some(sel_count),
+            chip_visible_count: Some(vis_count),
+            selected_menu_index: Some(menu_idx),
+            selected_cross_index: Some(cross_idx),
+
             grid_state: Some(grid_state),
             grid_owner_state: Some(grid_owner_state),
             
-            // Hand (RAM)
-            player_hand: Some(hand_chips), 
+            chip_slots: Some(chip_slots),
+            chip_codes: Some(chip_codes),
+            selected_chip_indices: Some(selected_indices),
 
-            // Static Save Data - Must be None here
-            player_folder: None,
-            enemy_folder: None,
-            player_code_folder: None,
-            enemy_code_folder: None,
-            player_tag_chips: None,
-            enemy_tag_chips: None,
-            player_reg_chip: None,
-            enemy_reg_chip: None,
-            player_navi_cust: None,
-            enemy_navi_cust: None,
+            // Static Placeholders
+            player_folder: None, enemy_folder: None,
+            player_code_folder: None, enemy_code_folder: None,
+            player_tag_chips: None, enemy_tag_chips: None,
+            player_reg_chip: None, enemy_reg_chip: None,
+            player_navi_cust: None, enemy_navi_cust: None,
         }))
     }
-
     fn prepare_for_fastforward(&self, mut core: mgba::core::CoreMutRef) {
         core.gba_mut()
             .cpu_mut()
             .set_thumb_pc(self.offsets.rom.main_read_joyflags);
     }
 
-    fn primary_traps(
+fn primary_traps(
         &self,
         joyflags: std::sync::Arc<std::sync::atomic::AtomicU32>,
         match_: std::sync::Arc<tokio::sync::Mutex<Option<std::sync::Arc<crate::battle::Match>>>>,
@@ -369,18 +402,17 @@ impl crate::hooks::Hooks for Hooks {
                 let match_ = match_.clone();
                 let munger = self.munger();
                 Box::new(move |core| {
-                    let match_ = match_.blocking_lock();
-                    let match_ = match &*match_ {
-                        Some(match_) => match_,
-                        _ => {
-                            return;
-                        }
+                    // [FIX] Lock and unwrap the match object first
+                    let match_lock = match_.blocking_lock();
+                    let match_inner = match &*match_lock {
+                        Some(m) => m,
+                        None => return,
                     };
 
-                    let mut rng = match_.lock_rng();
+                    let mut rng = match_inner.lock_rng();
                     munger.set_link_battle_settings_and_background(
                         core,
-                        random_battle_settings_and_background(&mut *rng, match_.match_type().0),
+                        random_battle_settings_and_background(&mut *rng, match_inner.match_type().0),
                     );
                 })
             }),

@@ -15,21 +15,28 @@ GBA_TO_NITROGEN = {
     'UP': 'DPAD_UP', 'DOWN': 'DPAD_DOWN', 'LEFT': 'DPAD_LEFT', 'RIGHT': 'DPAD_RIGHT'
 }
 
-# Fields that must be physically swapped if the perspective is Player 2
+# Fields that represent the "Player" and "Enemy" relative to the capture
+# These must be swapped if we detect the camera was actually on Player 2
 SWAP_PAIRS = [
+    # --- World State (These track Left vs Right side) ---
     ("player_health", "enemy_health"),
     ("player_pos", "enemy_pos"),
     ("player_charge", "enemy_charge"),
     ("player_chip", "enemy_chip"),
-    ("player_hand", "enemy_hand"),
-    ("player_folder", "enemy_folder"),
-    ("player_code_folder", "enemy_code_folder"),
-    ("player_tag_chips", "enemy_tag_chips"),
-    ("player_reg_chip", "enemy_reg_chip"),
-    ("player_navi_cust", "enemy_navi_cust"),
+    
+    # [FIX] Game Emotion (Full Synchro/Anger on grid) tracks Left/Right side.
+    # So we MUST swap this.
+    # ("player_game_emotion", "enemy_game_emotion"), 
+
+    # --- Local State (These track the "Camera/Console") ---
+    # DO NOT SWAP THESE:
+    # - player_emotion (Window Portrait)
+    # - player_hand
+    # - selected_chip_indices
+    # - selected_menu_index / cross_index
+    # - chip_select_count / visible_count
 ]
 
-# Base Action Template (Nitrogen Standard)
 NITROGEN_TEMPLATE = OrderedDict([
     ("WEST", 0.0), ("SOUTH", 0.0), ("BACK", 0.0),
     ("DPAD_DOWN", 0.0), ("DPAD_LEFT", 0.0), ("DPAD_RIGHT", 0.0), ("DPAD_UP", 0.0),
@@ -92,12 +99,10 @@ def main():
 
                 # 3. State Extraction & Swap
                 st = extract_state_v1(data, args.swap_players)
-                
-                # 4. MERGE ALL FIELDS (Passthrough)
                 for k, v in st.items():
                     final_row[k] = v
 
-                # 5. Calculate Damage Metrics
+                # 4. Metrics
                 p_hp = final_row.get("player_health")
                 e_hp = final_row.get("enemy_health")
                 curr_p = p_hp if isinstance(p_hp, (int, float)) else prev_hp["p"]

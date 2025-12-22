@@ -7,16 +7,17 @@
         h2 { margin-bottom: 10px; color: #ccc; }
         a { color: #888; text-decoration: none; align-self: flex-start; margin-bottom: 20px; font-size: 14px; }
         a:hover { color: #fff; text-decoration: underline; }
-        .container { display: flex; gap: 30px; align-items: flex-start; }
+        .container { display: flex; gap: 20px; align-items: flex-start; justify-content: center; width: 100%; max-width: 1400px; }
         
-        video { border: 2px solid #444; border-radius: 4px; box-shadow: 0 0 20px rgba(0,0,0,0.5); background: #000; image-rendering: pixelated; }
-        .sidebar { display: flex; flex-direction: column; gap: 15px; width: 320px; }
+        video { border: 2px solid #444; border-radius: 4px; box-shadow: 0 0 20px rgba(0,0,0,0.5); background: #000; image-rendering: pixelated; width: 100%; max-width: 720px; }
+        
+        .sidebar { display: flex; flex-direction: column; gap: 15px; width: 340px; flex-shrink: 0; }
+        .extra-sidebar { display: flex; flex-direction: column; gap: 15px; width: 220px; flex-shrink: 0; }
 
-        /* --- CONTROLLER --- */
+        /* CONTROLLER */
         .controller { background: #e0e0e0; width: 300px; height: 180px; border-radius: 20px 20px 40px 40px; position: relative; border: 2px solid #999; flex-shrink: 0; margin: 0 auto; box-shadow: inset 0 -5px 10px rgba(0,0,0,0.2), 0 5px 15px rgba(0,0,0,0.5); }
         .btn { position: absolute; background: #555; border: 1px solid #333; transition: background 0.05s; }
         .btn.active { background: #00ff00 !important; box-shadow: 0 0 10px #00ff00; border-color: #00cc00; }
-        
         .dpad { position: absolute; top: 60px; left: 30px; width: 90px; height: 90px; }
         .dpad .btn { background: #333; }
         .btn.up { top: 0; left: 30px; width: 30px; height: 30px; border-radius: 3px 3px 0 0; }
@@ -24,42 +25,69 @@
         .btn.left { top: 30px; left: 0; width: 30px; height: 30px; border-radius: 3px 0 0 3px; }
         .btn.right { top: 30px; right: 0; width: 30px; height: 30px; border-radius: 0 3px 3px 0; }
         .dpad-center { position: absolute; top: 30px; left: 30px; width: 30px; height: 30px; background: #333; }
-
-        .btn.a { top: 70px; right: 20px; width: 35px; height: 35px; border-radius: 50%; background: #a00; border: 2px solid #600; display: flex; justify-content: center; align-items: center; color: rgba(255,255,255,0.5); }
-        .btn.b { top: 90px; right: 65px; width: 35px; height: 35px; border-radius: 50%; background: #a00; border: 2px solid #600; display: flex; justify-content: center; align-items: center; color: rgba(255,255,255,0.5); }
+        .btn.a { top: 70px; right: 20px; width: 35px; height: 35px; border-radius: 50%; background: #a00; border: 2px solid #600; display: flex; justify-content: center; align-items: center; color: rgba(255,255,255,0.5); font-weight: bold;}
+        .btn.b { top: 90px; right: 65px; width: 35px; height: 35px; border-radius: 50%; background: #a00; border: 2px solid #600; display: flex; justify-content: center; align-items: center; color: rgba(255,255,255,0.5); font-weight: bold;}
         .btn.a.active, .btn.b.active { background: #ff3333 !important; box-shadow: 0 0 15px #ff0000; }
-
         .btn.start { bottom: 20px; left: 120px; width: 30px; height: 10px; border-radius: 10px; transform: rotate(-25deg); background: #999; }
         .btn.select { bottom: 20px; left: 80px; width: 30px; height: 10px; border-radius: 10px; transform: rotate(-25deg); background: #999; }
         .btn.l { top: -10px; left: 10px; width: 80px; height: 20px; border-radius: 10px 10px 0 0; background: #ccc; z-index: -1; }
         .btn.r { top: -10px; right: 10px; width: 80px; height: 20px; border-radius: 10px 10px 0 0; background: #ccc; z-index: -1; }
 
-        /* --- PANELS --- */
+        /* PANELS */
         .panel { background: #222; border: 1px solid #444; border-radius: 8px; padding: 10px; width: 100%; box-sizing: border-box; }
-        .row { display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 13px; border-bottom: 1px solid #333; padding-bottom: 2px; }
-        .row:last-child { border: none; margin: 0; }
-        .stat { font-weight: bold; color: #4db8ff; }
-        .stat.enemy { color: #ff4d4d; }
+        .panel h4 { margin: 0 0 10px 0; font-size: 11px; color: #888; text-align: center; text-transform: uppercase; border-bottom: 1px solid #333; padding-bottom: 3px; }
+        
+        /* DATA TABLE STYLE */
+        .data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        .data-table th { text-align: left; color: #666; padding-bottom: 4px; font-weight: normal; border-bottom: 1px solid #333; }
+        .data-table td { padding: 4px 0; border-bottom: 1px solid #2a2a2a; }
+        .col-p1 { color: #4db8ff; width: 40%; }
+        .col-p2 { color: #ff4d4d; width: 40%; text-align: right; }
+        .col-lbl { color: #888; width: 20%; text-align: center; font-size: 10px; }
 
-        /* Battle Grid */
-        .battle-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 2px; margin-top: 5px; background: #000; padding: 2px; border: 1px solid #555; }
+        /* GRID */
+        .battle-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 2px; background: #000; padding: 2px; border: 1px solid #555; }
         .grid-cell { height: 25px; background: #333; display: flex; justify-content: center; align-items: center; font-size: 10px; color: #777; position: relative; }
         .cell-p1 { background: rgba(77, 184, 255, 0.3); border: 1px solid #4db8ff; }
         .cell-p2 { background: rgba(255, 77, 77, 0.3); border: 1px solid #ff4d4d; }
         .broken { border: 1px dashed #555 !important; background: #111 !important; }
 
-        /* Chip Hand */
-        .hand-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 2px; margin-top: 5px; }
-        .hand-slot { background: #333; border: 1px solid #555; height: 30px; display: flex; justify-content: center; align-items: center; font-size: 10px; color: #fff; }
+        /* HAND & QUEUE */
+        .hand-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
+        .hand-slot { background: #2a2a2a; border: 1px solid #444; height: 35px; display: flex; flex-direction: column; justify-content: center; align-items: center; font-size: 9px; color: #fff; line-height: 10px; }
+        .hand-slot span { font-size: 8px; color: #888; }
+        
+        .queue-list { display: flex; gap: 5px; justify-content: center; }
+        .queue-slot { width: 35px; height: 35px; background: #442222; border: 1px solid #ff4d4d; display: flex; justify-content: center; align-items: center; font-size: 11px; color: #fff; border-radius: 4px; }
+
+        /* FOLDER */
+        .folder-list { height: 400px; overflow-y: auto; font-size: 11px; color: #aaa; }
+        .folder-item { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid #333; }
+        
+        .meta-row { display: flex; justify-content: space-between; font-size: 11px; color: #aaa; margin-bottom: 10px; }
     </style>
 </head>
 <body>
     <a href="/">&larr; Back to List</a>
     <h2>{{ replay_name }}</h2>
+    
     <div class="container">
-        <video id="vid" controls width="720"><source src="/video/{{ replay_name }}" type="video/mp4"></video>
+        <div class="extra-sidebar">
+            <div class="panel">
+                <h4>Player Folder</h4>
+                <div id="p-folder" class="folder-list">Loading...</div>
+            </div>
+            <div class="panel">
+                <h4>Navi Cust</h4>
+                <div id="p-navi" style="font-size:10px; color:#aaa; word-wrap:break-word;"></div>
+            </div>
+        </div>
+
+        <div style="flex-grow: 1; display:flex; justify-content:center;">
+            <video id="vid" controls><source src="/video/{{ replay_name }}" type="video/mp4"></video>
+        </div>
+
         <div class="sidebar">
-            
             <div class="controller">
                 <div class="btn l" id="btn-L"></div><div class="btn r" id="btn-R"></div>
                 <div class="dpad">
@@ -72,31 +100,79 @@
             </div>
 
             <div class="panel">
-                <div class="row">
+                <h4>Game State</h4>
+                <div class="meta-row">
                     <span>Frame: <span id="frame" style="color:#fff">0</span></span>
                     <span id="win-state" style="color:#888">[BATTLE]</span>
                 </div>
-                <div class="row">
-                    <span>P1 HP: <span id="p-hp" class="stat">---</span></span>
-                    <span>P2 HP: <span id="e-hp" class="stat enemy">---</span></span>
-                </div>
-                <div class="row">
-                    <span>Charge: <span id="p-chg">0</span></span>
-                    <span>Gauge: <span id="cust">0</span></span>
-                </div>
-                <div class="row">
-                    <span>Chip: <span id="p-chip">--</span></span>
-                    <span>Chip: <span id="e-chip">--</span></span>
+
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th class="col-p1">PLAYER</th>
+                            <th class="col-lbl">VS</th>
+                            <th class="col-p2">ENEMY</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td class="col-p1" id="p-hp">---</td>
+                            <td class="col-lbl">HP</td>
+                            <td class="col-p2" id="e-hp">---</td>
+                        </tr>
+                        <tr>
+                            <td class="col-p1" id="p-chip">--</td>
+                            <td class="col-lbl">Chip</td>
+                            <td class="col-p2" id="e-chip">--</td>
+                        </tr>
+                        <tr>
+                            <td class="col-p1" id="p-emo">0</td>
+                            <td class="col-lbl">Face</td>
+                            <td class="col-p2" id="e-emo">0</td>
+                        </tr>
+                        <tr>
+                            <td class="col-p1" id="p-game-emo">0</td>
+                            <td class="col-lbl">State</td>
+                            <td class="col-p2" id="e-game-emo">0</td>
+                        </tr>
+                        <tr>
+                            <td class="col-p1" id="p-chg">0</td>
+                            <td class="col-lbl">Chg</td>
+                            <td class="col-p2" id="e-chg">0</td>
+                        </tr>
+                        <tr>
+                            <td class="col-p1" id="p-pos">[0,0]</td>
+                            <td class="col-lbl">Pos</td>
+                            <td class="col-p2" id="e-pos">[0,0]</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div style="margin-top:10px; font-size:11px; color:#aaa; display:flex; justify-content:space-between;">
+                    <span>Gauge: <span id="cust" style="color:#fff">0</span></span>
+                    <span>Menu: <span id="menu-idx">0</span></span>
+                    <span>Cross: <span id="cross-idx">0</span></span>
                 </div>
             </div>
 
             <div class="panel">
-                <div style="text-align:center; font-size:11px; color:#888;">BATTLE GRID</div>
+                <h4>Selected Queue</h4>
+                <div id="queue" class="queue-list">
+                    <div class="queue-slot" id="q-0"></div>
+                    <div class="queue-slot" id="q-1"></div>
+                    <div class="queue-slot" id="q-2"></div>
+                    <div class="queue-slot" id="q-3"></div>
+                    <div class="queue-slot" id="q-4"></div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h4>Battle Grid</h4>
                 <div id="grid" class="battle-grid"></div>
             </div>
 
             <div class="panel">
-                <div style="text-align:center; font-size:11px; color:#888;">HAND (IDs)</div>
+                <h4>Active Hand (RAM)</h4>
                 <div id="hand" class="hand-grid"></div>
             </div>
         </div>
@@ -106,21 +182,33 @@
         const vid = document.getElementById('vid');
         let actions = [];
         const FPS = 60;
-        
-        // Key Map (Nitrogen -> HTML ID)
-        const KEYS = {
-            'DPAD_UP':'btn-UP', 'DPAD_DOWN':'btn-DOWN', 'DPAD_LEFT':'btn-LEFT', 'DPAD_RIGHT':'btn-RIGHT',
-            'EAST':'btn-A', 'SOUTH':'btn-B', 'LEFT_SHOULDER':'btn-L', 'RIGHT_SHOULDER':'btn-R', 'START':'btn-START', 'BACK':'btn-SELECT'
-        };
+        const KEYS = {'DPAD_UP':'btn-UP', 'DPAD_DOWN':'btn-DOWN', 'DPAD_LEFT':'btn-LEFT', 'DPAD_RIGHT':'btn-RIGHT',
+                      'EAST':'btn-A', 'SOUTH':'btn-B', 'LEFT_SHOULDER':'btn-L', 'RIGHT_SHOULDER':'btn-R', 'START':'btn-START', 'BACK':'btn-SELECT'};
 
-        // Init Grid & Hand
+        // Init Elements
         for(let i=0; i<18; i++) document.getElementById('grid').innerHTML += `<div class="grid-cell" id="c-${i}"></div>`;
         for(let i=0; i<10; i++) document.getElementById('hand').innerHTML += `<div class="hand-slot" id="h-${i}"></div>`;
 
-        fetch('/inputs/{{ replay_name }}').then(r=>r.json()).then(d => {
-            actions = d;
+        // Load Data
+        fetch('/inputs/{{ replay_name }}').then(r=>r.json()).then(data => {
+            actions = data.frames || [];
+            const staticData = data.static || {};
+            renderStatic(staticData);
             requestAnimationFrame(loop);
         });
+
+        function renderStatic(s) {
+            const folderEl = document.getElementById('p-folder');
+            if (s && s.player_folder_ids) {
+                let html = "";
+                s.player_folder_ids.forEach((id, idx) => {
+                    const code = s.player_folder_codes ? s.player_folder_codes[idx] : "?";
+                    html += `<div class="folder-item"><span>${idx+1}. ID:${id}</span><span>Code:${code}</span></div>`;
+                });
+                folderEl.innerHTML = html;
+            } else { folderEl.innerHTML = "No Static Data"; }
+            if(s && s.player_navi_cust) document.getElementById('p-navi').innerText = JSON.stringify(s.player_navi_cust);
+        }
 
         function loop() {
             if(actions.length) {
@@ -133,27 +221,39 @@
         function render(d) {
             document.getElementById('frame').innerText = d.frame_idx;
             
-            // 1. Controller
+            // Controller
             document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
             for(let k in KEYS) {
                 const v = d[k];
                 if((Array.isArray(v) ? v[0] : v) > 0.5) document.getElementById(KEYS[k]).classList.add('active');
             }
 
-            // 2. Stats
+            // Stats Table
             document.getElementById('p-hp').innerText = d.player_health || 0;
             document.getElementById('e-hp').innerText = d.enemy_health || 0;
-            document.getElementById('p-chg').innerText = d.player_charge || 0;
-            document.getElementById('cust').innerText = d.cust_gauge || 0;
             document.getElementById('p-chip').innerText = d.player_chip || "-";
             document.getElementById('e-chip').innerText = d.enemy_chip || "-";
+            document.getElementById('p-emo').innerText = d.player_emotion || 0;
+            document.getElementById('e-emo').innerText = d.enemy_emotion || 0;
+            document.getElementById('p-game-emo').innerText = d.player_game_emotion || 0;
+            document.getElementById('e-game-emo').innerText = d.enemy_game_emotion || 0;
+            document.getElementById('p-chg').innerText = d.player_charge || 0;
+            document.getElementById('e-chg').innerText = d.enemy_charge || 0;
+            
+            if(d.player_pos) document.getElementById('p-pos').innerText = `[${d.player_pos}]`;
+            if(d.enemy_pos) document.getElementById('e-pos').innerText = `[${d.enemy_pos}]`;
 
-            // 3. Window State
+            // Menu States
             const w = document.getElementById('win-state');
             if(d.inside_window) { w.innerText = "[MENU OPEN]"; w.style.color = "#ffff00"; }
             else { w.innerText = "[BATTLE]"; w.style.color = "#444"; }
 
-            // 4. Grid
+            // Counters
+            document.getElementById('cust').innerText = d.cust_gauge || 0;
+            document.getElementById('menu-idx').innerText = d.selected_menu_index || 0;
+            document.getElementById('cross-idx').innerText = d.selected_cross_index || 0;
+
+            // Grid
             if(d.grid_state && d.grid_owner_state) {
                 for(let i=0; i<18; i++) {
                     const c = document.getElementById(`c-${i}`);
@@ -161,17 +261,37 @@
                     if(d.grid_owner_state[i] === 0) c.classList.add('cell-p1');
                     else if(d.grid_owner_state[i] === 1) c.classList.add('cell-p2');
                     
-                    if(d.grid_state[i] === 2) c.classList.add('broken'); // Broken panel
+                    if(d.grid_state[i] === 2) c.classList.add('broken');
                     c.innerText = d.grid_state[i] !== 0 ? d.grid_state[i] : "";
                 }
             }
 
-            // 5. Hand
-            if(d.player_hand) {
+            // Hand
+            if(d.chip_slots) {
                 for(let i=0; i<10; i++) {
-                    const val = d.player_hand[i];
                     const el = document.getElementById(`h-${i}`);
+                    if (i < d.chip_slots.length) {
+                        const id = d.chip_slots[i];
+                        const code = d.chip_codes ? d.chip_codes[i] : "?";
+                        el.innerHTML = (id !== 255) ? `${id}<br><span>[${code}]</span>` : "";
+                        
+                        let maxVis = d.chip_visible_count || 5;
+                        el.style.opacity = (i >= maxVis) ? 0.3 : 1;
+                    } else {
+                        el.innerHTML = "";
+                    }
+                }
+            }
+
+            // Queue
+            if(d.selected_chip_indices) {
+                for(let i=0; i<5; i++) {
+                    const val = d.selected_chip_indices[i];
+                    const el = document.getElementById(`q-${i}`);
                     el.innerText = (val !== 255 && val !== undefined) ? val : "";
+                    
+                    let count = d.chip_select_count || 0;
+                    el.style.opacity = (i >= count) ? 0.3 : 1;
                 }
             }
         }

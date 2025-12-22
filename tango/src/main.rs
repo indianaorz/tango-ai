@@ -6,7 +6,7 @@ use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use std::io::Write; // [FIX] Added Write trait for writeln!
+use std::io::Write; 
 
 #[macro_use]
 extern crate lazy_static;
@@ -39,8 +39,10 @@ use fluent_templates::Loader;
 
 mod global;
 
-// [FIX] Ensure all used functions are imported. 
-// If any are missing from global.rs, you must verify global.rs exports them publicly.
+use tango_dataview::save::{NaviView, Save, Chip};
+use tango_dataview::rom::Assets;
+
+// Import all global functions
 use crate::global::{
     add_punishment, add_reward, clear_local_input, clear_punishments, clear_rewards, get_all_chip_codes,
     get_all_chip_slots, get_all_enemy_chip_folders, get_all_enemy_code_folders, get_all_enemy_tag_folders,
@@ -53,7 +55,6 @@ use crate::global::{
     get_all_grid_owner_states, get_all_grid_states, get_player_grid_position, get_enemy_grid_position, get_is_offerer,
     get_cust_gage,
     get_selected_chip_index, get_selected_cross_index, get_winner, RewardPunishment,
-    // [FIX] Add missing imports identified by compiler
     get_player_charge, get_selected_menu_index, get_all_player_chip_folders, 
     get_player_navi_cust_parts, get_enemy_navi_cust_parts
 };
@@ -123,6 +124,76 @@ impl EnvArgs {
     }
 }
 
+// --- STATIC DATA HELPERS ---
+
+#[derive(serde::Serialize)]
+struct StaticReplayData {
+    player_navi_cust: Vec<usize>,
+    enemy_navi_cust: Vec<usize>,
+    player_folder_ids: Vec<u16>,
+    player_folder_codes: Vec<u16>,
+    enemy_folder_ids: Vec<u16>,
+    enemy_folder_codes: Vec<u16>,
+    player_reg_chip: u16,
+    enemy_reg_chip: u16,
+    player_tags: Vec<u16>,
+    enemy_tags: Vec<u16>,
+}
+
+fn extract_navi_cust_ids(save: &dyn Save, _assets: &dyn Assets) -> Vec<usize> {
+    if let Some(navi_view) = save.view_navi() {
+        match navi_view {
+            NaviView::Navicust(navicust_view) => {
+                let size = navicust_view.size();
+                let mut ids = Vec::new();
+                for i in 0..(size[0] * size[1]) {
+                    if let Some(part) = navicust_view.navicust_part(i) {
+                        ids.push(part.id);
+                    }
+                }
+                ids
+            }
+            NaviView::LinkNavi(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    }
+}
+
+fn extract_chips(save: &dyn Save) -> Vec<Chip> {
+    let mut chips = Vec::new();
+    if let Some(chips_view) = save.view_chips() {
+        let folder_idx = chips_view.equipped_folder_index();
+        for i in 0..30 {
+            if let Some(chip) = chips_view.chip(folder_idx, i) {
+                chips.push(chip);
+            }
+        }
+    }
+    chips
+}
+
+fn extract_tags(save: &dyn Save) -> Vec<usize> {
+    let mut tags = Vec::new();
+    if let Some(chips_view) = save.view_chips() {
+        let folder_idx = chips_view.equipped_folder_index();
+        if let Some(indices) = chips_view.tag_chip_indexes(folder_idx) {
+            for &idx in &indices { tags.push(idx); }
+        }
+    }
+    tags
+}
+
+fn extract_reg(save: &dyn Save) -> usize {
+    if let Some(chips_view) = save.view_chips() {
+        let folder_idx = chips_view.equipped_folder_index();
+        if let Some(idx) = chips_view.regular_chip_index(folder_idx) {
+            return idx;
+        }
+    }
+    255 
+}
+
 // --- MAIN ENTRY POINT ---
 
 fn main() -> Result<(), anyhow::Error> {
@@ -135,31 +206,21 @@ fn main() -> Result<(), anyhow::Error> {
         .filter(Some("tango_pvp"), log::LevelFilter::Info)
         .init();
 
-    // Parse CLI Arguments
     let cli = Cli::parse();
 
     match cli.command {
-        // [MODE 1] Dataset Generation / Export
         Some(Commands::Export { replay_path, output_path, rom_path }) => {
             log::info!("Starting Export Mode...");
-            log::info!("   Replay: {:?}", replay_path);
-            log::info!("   Output: {:?}", output_path);
-            log::info!("   ROM:    {:?}", rom_path);
-
             let rt = Runtime::new()?;
             rt.block_on(run_export(replay_path, output_path, rom_path))?;
-            log::info!("Export Complete.");
             Ok(())
         }
         
-        // [MODE 2] AI Runner / Game Loop (Default)
         None => {
             log::info!("welcome to tango {}!", version::current());
 
             if std::env::var("INIT_LINK_CODE").is_err() && std::env::var(TANGO_CHILD_ENV_VAR).is_err() {
-                 println!("No command provided and INIT_LINK_CODE missing.");
                  println!("Usage: tango export <REPLAY> --output-path <OUT> --rom-path <ROM>");
-                 // [FIX] Uncomment this line so it exits gracefully instead of crashing
                  return Ok(()); 
             }
 
@@ -247,6 +308,82 @@ async fn run_export(replay_path: PathBuf, output_path: PathBuf, rom_path: PathBu
     let detected_game = tango_gamedb::detect(&rom)
         .ok_or(anyhow::anyhow!("ROM detection failed."))?;
     
+// --- [INJECTED STATIC DATA EXTRACTION] ---
+    // [FIX] Convert enum to string correctly
+    if let Some(game_impl) = game::find_by_family_and_variant(
+        detected_game.family_and_variant.0.to_string().as_str(),
+        detected_game.family_and_variant.1
+    ) {
+        println!("🎮 Static Data Extraction: Detected {:?}", detected_game.family_and_variant.0);
+        
+        // Local Player
+        let wram = replay.local_state.wram();
+        let mut p_navi = Vec::new();
+        let mut p_ids = Vec::new();
+        let mut p_codes = Vec::new();
+        let mut p_tags = Vec::new();
+        let mut p_reg = 255;
+
+        if let Ok(save) = game_impl.save_from_wram(wram) {
+            let assets = game_impl.load_rom_assets(&rom, wram, &rom::Overrides::default()).ok();
+            
+            if let Some(assets_ref) = assets.as_ref() {
+                p_navi = extract_navi_cust_ids(&*save, assets_ref.as_ref());
+            }
+            
+            let chips = extract_chips(&*save);
+            for c in chips { p_ids.push(c.id as u16); p_codes.push(c.code as u16); }
+            
+            let tags = extract_tags(&*save);
+            for t in tags { p_tags.push(t as u16); }
+            
+            p_reg = extract_reg(&*save) as u16;
+        }
+
+        // Remote Player (Enemy)
+        let wram_remote = replay.remote_state.wram();
+        let mut e_navi = Vec::new();
+        let mut e_ids = Vec::new();
+        let mut e_codes = Vec::new();
+        let mut e_tags = Vec::new();
+        let mut e_reg = 255;
+
+        if let Ok(save_remote) = game_impl.save_from_wram(wram_remote) {
+            let assets = game_impl.load_rom_assets(&rom, wram_remote, &rom::Overrides::default()).ok();
+            if let Some(assets_ref) = assets.as_ref() {
+                e_navi = extract_navi_cust_ids(&*save_remote, assets_ref.as_ref());
+            }
+            
+            let chips = extract_chips(&*save_remote);
+            for c in chips { e_ids.push(c.id as u16); e_codes.push(c.code as u16); }
+            
+            let tags = extract_tags(&*save_remote);
+            for t in tags { e_tags.push(t as u16); }
+            
+            e_reg = extract_reg(&*save_remote) as u16;
+        }
+
+        let static_data = StaticReplayData {
+            player_navi_cust: p_navi,
+            enemy_navi_cust: e_navi,
+            player_folder_ids: p_ids,
+            player_folder_codes: p_codes,
+            enemy_folder_ids: e_ids,
+            enemy_folder_codes: e_codes,
+            player_reg_chip: p_reg,
+            enemy_reg_chip: e_reg,
+            player_tags: p_tags,
+            enemy_tags: e_tags,
+        };
+
+        let f = std::fs::File::create("static_data.json").expect("Failed to create static_data.json");
+        serde_json::to_writer(f, &static_data).expect("Failed to write static_data.json");
+        println!("✅ Static Data Saved to static_data.json");
+    } else {
+        println!("⚠️ Warning: Could not resolve Game Implementation. Static data skipped.");
+    }
+    // -----------------------------------------
+
     let hooks = tango_pvp::hooks::hooks_for_gamedb_entry(detected_game)
         .ok_or(anyhow::anyhow!("No hooks found."))?;
 
@@ -258,7 +395,6 @@ async fn run_export(replay_path: PathBuf, output_path: PathBuf, rom_path: PathBu
         disable_bgm: false,
     };
 
-    // [FIX] Use indicatif via full path since we didn't import it at top to avoid conflict
     let bar = indicatif::ProgressBar::new(0);
     bar.set_style(indicatif::ProgressStyle::default_bar()
         .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
@@ -321,7 +457,6 @@ fn child_main(mut config: config::Config, args: EnvArgs) -> Result<(), anyhow::E
     let game_controller = sdl.game_controller().unwrap();
 
     let event_loop = winit::event_loop::EventLoopBuilder::<UserEvent>::with_user_event().build().unwrap();
-    // let mut sdl_event_loop = sdl.event_pump().unwrap(); // Unused
 
     let icon = image::load_from_memory(include_bytes!("icon.png"))?;
     let icon_width = icon.width();
@@ -550,8 +685,6 @@ fn child_main(mut config: config::Config, args: EnvArgs) -> Result<(), anyhow::E
                 };
                 let _ = output_tx.send(message);
             }
-            // Removed unreachable exit, using window_target to exit loop
-            // Note: std::process::exit(0) is fine if you want to kill the whole process instantly
             std::process::exit(0);
         }
 
