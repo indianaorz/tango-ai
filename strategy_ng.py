@@ -28,6 +28,15 @@ BUTTON_TOKENS = [
     'RIGHT_BOTTOM', 'RIGHT_LEFT', 'RIGHT_RIGHT', 'RIGHT_UP'
 ]
 
+# -----------------------------------------------------------------------------
+# NitroGen tokenizer-space action layout (confirmed in training):
+#   actions[t] = [buttons(21), j_left(x,y), j_right(x,y)]  -> 25 dims total
+# -----------------------------------------------------------------------------
+N_BUTTONS = len(BUTTON_TOKENS)  # 21
+IDX_JLEFT = N_BUTTONS           # 21
+IDX_JRIGHT = N_BUTTONS + 2      # 23
+ACTION_VEC_DIM = N_BUTTONS + 4  # 25
+
 def print_action_dashboard(probs, chosen_idx, fps=0, threshold=0.05):
     """
     probs: List of probabilities for all buttons
@@ -122,30 +131,32 @@ class GlobalBatchManager:
                 cls._instance = cls(policy, device, use_fp16)
             return cls._instance
 
-    def infer(self, frame_tensor, emit_raw=False, seed=None):
+    def infer(self, frame_tensor, emit_raw=False, seed=None, return_sequence: bool = False):
         my_event = threading.Event()
         my_result = {}
-        
+
         with self.batch_lock:
             self.pending_inputs.append({
                 "event": my_event,
                 "result": my_result,
                 "frame": frame_tensor,
                 "seed": seed,
-                "emit_raw": emit_raw
+                "emit_raw": emit_raw,
+                "return_sequence": return_sequence,
             })
             should_trigger = (len(self.pending_inputs) == 1)
 
         if should_trigger:
-            time.sleep(self.batch_timeout) 
+            time.sleep(self.batch_timeout)
             self._execute_batch()
         else:
             my_event.wait()
 
         if "error" in my_result:
             raise RuntimeError(my_result["error"])
-            
+
         return my_result["action_vec"], my_result["raw"]
+
 
     def _execute_batch(self):
         with self.batch_lock:
@@ -161,9 +172,8 @@ class GlobalBatchManager:
             batch_dev = batch_tensor.to(self.device, non_blocking=True).to(dtype=torch.float32)
             seed = batch_data[0]["seed"]
             emit_raw = batch_data[0]["emit_raw"]
-            
-            autocast_enabled = (self.autocast_dtype is not None)
-            
+            return_sequence = bool(batch_data[0].get("return_sequence", False))
+
             with torch.no_grad(), torch.autocast(
                 device_type="cuda",
                 dtype=self.autocast_dtype if autocast_enabled else torch.float32,
@@ -171,22 +181,34 @@ class GlobalBatchManager:
             ):
                 if emit_raw:
                     primary, raw_out = self.policy(
-                        batch_dev, seed=seed, take_step=0,
-                        return_continuous=True, return_raw=True, raw_max_items=8
+                        batch_dev,
+                        seed=seed,
+                        take_step=0,
+                        return_continuous=True,
+                        return_raw=True,
+                        raw_max_items=8,
+                        return_sequence=return_sequence,
                     )
                     raw_list = [raw_out] * len(batch_data)
                 else:
                     primary = self.policy(
-                        batch_dev, seed=seed, take_step=0,
-                        return_continuous=True, return_raw=False
+                        batch_dev,
+                        seed=seed,
+                        take_step=0,
+                        return_continuous=True,
+                        return_raw=False,
+                        return_sequence=return_sequence,
                     )
                     raw_list = [None] * len(batch_data)
-            
+
             primary_cpu = primary.detach().float().cpu()
-            
+
             for i, item in enumerate(batch_data):
+                # primary is either:
+                #   [B, 25] (single step)  OR  [B, T, 25] (sequence)
                 item["result"]["action_vec"] = primary_cpu[i].unsqueeze(0)
                 item["result"]["raw"] = raw_list[i]
+
                 
         except Exception as e:
             print(f"Batch Inference Failed: {e}")
@@ -207,36 +229,43 @@ _TRAIN_BUTTON_TOKENS = [
 ]
 
 def _btn_index(name: str) -> int:
+    """
+    Tokenizer-space: buttons are at indices [0..20] (NO +4 offset).
+    """
     name = name.strip().upper()
     try:
-        return 4 + _TRAIN_BUTTON_TOKENS.index(name)
+        return _TRAIN_BUTTON_TOKENS.index(name)  # 0..20
     except ValueError:
         return -1
+
 
 THRESHOLD = 0.1
 
 @dataclass(frozen=True)
 class NgActionSchema:
-    axis_leftx: int = 0
-    axis_lefty: int = 1
+    # Tokenizer-space stick positions (even if we ignore them for GBA movement)
+    axis_leftx: int = IDX_JLEFT + 0   # 21
+    axis_lefty: int = IDX_JLEFT + 1   # 22
+    axis_rightx: int = IDX_JRIGHT + 0 # 23
+    axis_righty: int = IDX_JRIGHT + 1 # 24
+
     dpad_up: int = _btn_index("DPAD_UP")
     dpad_down: int = _btn_index("DPAD_DOWN")
     dpad_left: int = _btn_index("DPAD_LEFT")
     dpad_right: int = _btn_index("DPAD_RIGHT")
-    
+
     a_btn: str = os.getenv("NG_BTN_A", "SOUTH").strip().upper()
     b_btn: str = os.getenv("NG_BTN_B", "EAST").strip().upper()
     start_btn: str = os.getenv("NG_BTN_START", "START").strip().upper()
-    
-    # NEW: Full GBA Support
+
     l_btn: int = _btn_index("LEFT_SHOULDER")
     r_btn: int = _btn_index("RIGHT_SHOULDER")
-    select_btn: int = _btn_index("BACK") # 'Back' is usually Select
-    
+    select_btn: int = _btn_index("BACK")
+
     btn_activation: str = os.getenv("NG_BTN_ACTIVATION", "raw01").strip().lower()
     deadzone: float = 0.10
-    # Lower threshold even more to capture flicker
-    button_threshold: float = float(os.getenv("NG_BTN_THRESH", "0.4")) 
+    button_threshold: float = float(os.getenv("NG_BTN_THRESH", "0.4"))
+
 
     @staticmethod
     def from_env() -> "NgActionSchema":
@@ -422,6 +451,17 @@ class NGAgentStrategy:
             print(f"Loading NitroGen policy from {ckpt_path}...")
             loaded = load_ng_checkpoint(ckpt_path, device=self.dev)
             policy = NgNitroGenPolicy(loaded, default_game_id=None).to(self.dev).eval()
+            # Prefer the horizon that the policy/tokenizer was trained with
+            vh = None
+            for obj in (policy, getattr(policy, "tokenizer", None), getattr(loaded, "tokenizer", None)):
+                if obj is None:
+                    continue
+                vh = getattr(obj, "vision_horizon", None)
+                if isinstance(vh, int) and vh > 0:
+                    break
+
+            self.V = int(vh) if isinstance(vh, int) and vh > 0 else 1
+
             
             if os.getenv("NG_CAST_WEIGHTS", "0").strip() in ("1", "true", "True"):
                 if os.getenv("NG_DTYPE", "").strip().lower() == "fp16":
@@ -432,7 +472,7 @@ class NGAgentStrategy:
             try:
                 print("⚡ Warming up model...")
                 with torch.no_grad():
-                    dummy = torch.zeros((1, self.T, 3, self.frame_h, self.frame_w), dtype=torch.float32, device=self.dev)
+                    dummy = torch.zeros((1, self.V, 3, self.frame_h, self.frame_w), dtype=torch.float32, device=self.dev)
                     if self.use_fp16: dummy = dummy.half()
                     policy(dummy, seed=None, take_step=0, return_continuous=True)
                 print("✅ Warmup complete.")
@@ -461,26 +501,28 @@ class NGAgentStrategy:
         return True
 
     def _push_frame(self, port: int, frame_chw: torch.Tensor) -> torch.Tensor:
-        if self.T == 1:
-            return frame_chw.unsqueeze(0).unsqueeze(0) 
-        
+        V = int(getattr(self, "V", 1))
+        if V <= 1:
+            return frame_chw.unsqueeze(0).unsqueeze(0)  # [1,1,3,H,W]
+
         p = int(port)
         dq = self._frames.get(p)
         if dq is None:
             dq = deque()
             self._frames[p] = dq
-            
+
         dq.append(frame_chw)
-        while len(dq) > self.T:
+        while len(dq) > V:
             dq.popleft()
-            
+
         xs = list(dq)
-        if len(xs) < self.T:
-            pad = [xs[0]] * (self.T - len(xs))
+        if len(xs) < V:
+            pad = [xs[0]] * (V - len(xs))
             xs = pad + xs
-            
-        seq = torch.stack(xs, dim=0).unsqueeze(0).contiguous()
+
+        seq = torch.stack(xs, dim=0).unsqueeze(0).contiguous()  # [1,V,3,H,W]
         return seq
+
 
     def _seed_for(self, port: int) -> Optional[int]:
         if not self._use_seed: return None
@@ -545,40 +587,36 @@ class NGAgentStrategy:
                 fps = 1.0 / (now - self.last_inference_time) if hasattr(self, 'last_inference_time') else 0.0
                 self.last_inference_time = now
 
+              # Decode model output -> probabilities in tokenizer-space
+                # action_1d is length 25: [buttons(21), j_left(2), j_right(2)]
                 if self.schema.btn_activation == "logits":
-                    raw_probs = torch.sigmoid(action_1d).tolist()
+                    probs_25 = torch.sigmoid(action_1d).tolist()
                 else:
-                    raw_probs = action_1d.tolist()
+                    # most of your runs are already raw01
+                    probs_25 = action_1d.tolist()
 
-                # --- NEW: DEBUG FOUNDATION MODEL NOISE ---
-                sticks = raw_probs[:4]
+                btn_probs = probs_25[:N_BUTTONS]
+                sticks = probs_25[IDX_JLEFT:IDX_JLEFT+2] + probs_25[IDX_JRIGHT:IDX_JRIGHT+2]
                 print(f"\n🎮 STICKS: LX={sticks[0]:.3f} LY={sticks[1]:.3f} RX={sticks[2]:.3f} RY={sticks[3]:.3f}")
-                # ----------------------------------------
-                
-                # Slice: skip first 4 (sticks)
-                btn_data = raw_probs[4:] 
-                
-                # --- FIX: GHOST MASKING ---
-                # These tokens are unused in GBA but have high "bias" (approx 0.5).
-                # We force them to -1.0 so they never win the selection.
+
+                # Mask tokens you never want to “win” the dashboard selection
                 IGNORED_TOKENS = {
-                    'RIGHT_BOTTOM', 'RIGHT_LEFT', 'RIGHT_RIGHT', 'RIGHT_UP', 
+                    'RIGHT_BOTTOM', 'RIGHT_LEFT', 'RIGHT_RIGHT', 'RIGHT_UP',
                     'LEFT_THUMB', 'RIGHT_THUMB', 'GUIDE', 'LEFT_TRIGGER', 'RIGHT_TRIGGER',
-                    'WEST', 'NORTH' # Assuming BN6 uses A(South)/B(East)
+                    'WEST', 'NORTH',
                 }
 
-                masked_data = list(btn_data) # Copy to avoid altering original tensor data if needed elsewhere
+                masked_btn = list(btn_probs)
                 for i, token in enumerate(BUTTON_TOKENS):
-                    if i < len(masked_data) and token in IGNORED_TOKENS:
-                        masked_data[i] = -1.0
-                
-                # Find Chosen Index for display
-                if masked_data:
-                    chosen_val = max(masked_data)
-                    chosen_idx = masked_data.index(chosen_val)
-                    # Pass the MASKED data to the print function so the green text is correct
-                    print_action_dashboard(masked_data, chosen_idx, fps, threshold=THRESHOLD)
-            # --- END DASHBOARD LOGGING ---
+                    if token in IGNORED_TOKENS and i < len(masked_btn):
+                        masked_btn[i] = -1.0
+
+                if masked_btn:
+                    chosen_val = max(masked_btn)
+                    chosen_idx = masked_btn.index(chosen_val)
+                    print_action_dashboard(masked_btn, chosen_idx, fps, threshold=THRESHOLD)
+
+                            # --- END DASHBOARD LOGGING ---
 
         except Exception as e:
             return _no_op({"reason": "ng_batch_failed", "error": str(e)})
