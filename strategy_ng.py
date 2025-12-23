@@ -107,6 +107,9 @@ def _resolve_autocast_dtype(device: torch.device) -> Optional[torch.dtype]:
     if dt == "fp32": return None
     return torch.bfloat16
 
+
+#autocast_enabled
+autocast_enabled = os.getenv("NG_AUTOMATIC_MIXED_PRECISION", "1") == "1"
 # -----------------------------------------------------------------------------
 # Global Batch Manager
 # -----------------------------------------------------------------------------
@@ -576,94 +579,84 @@ class NGAgentStrategy:
 
         seq = self._push_frame(p, frame_chw)
 
-        try:
-            seed = self._seed_for(p)
-            action_vec, raw = self.batch_mgr.infer(seq, emit_raw=self._emit_ng_raw, seed=seed)
-            action_1d = action_vec.squeeze(0)
-            
-            # --- START DASHBOARD LOGGING ---
-            if port == 12350:
-                now = time.time()
-                fps = 1.0 / (now - self.last_inference_time) if hasattr(self, 'last_inference_time') else 0.0
-                self.last_inference_time = now
-
-              # Decode model output -> probabilities in tokenizer-space
-                # action_1d is length 25: [buttons(21), j_left(2), j_right(2)]
-                if self.schema.btn_activation == "logits":
-                    probs_25 = torch.sigmoid(action_1d).tolist()
-                else:
-                    # most of your runs are already raw01
-                    probs_25 = action_1d.tolist()
-
-                btn_probs = probs_25[:N_BUTTONS]
-                sticks = probs_25[IDX_JLEFT:IDX_JLEFT+2] + probs_25[IDX_JRIGHT:IDX_JRIGHT+2]
-                print(f"\n🎮 STICKS: LX={sticks[0]:.3f} LY={sticks[1]:.3f} RX={sticks[2]:.3f} RY={sticks[3]:.3f}")
-
-                # Mask tokens you never want to “win” the dashboard selection
-                IGNORED_TOKENS = {
-                    'RIGHT_BOTTOM', 'RIGHT_LEFT', 'RIGHT_RIGHT', 'RIGHT_UP',
-                    'LEFT_THUMB', 'RIGHT_THUMB', 'GUIDE', 'LEFT_TRIGGER', 'RIGHT_TRIGGER',
-                    'WEST', 'NORTH',
-                }
-
-                masked_btn = list(btn_probs)
-                for i, token in enumerate(BUTTON_TOKENS):
-                    if token in IGNORED_TOKENS and i < len(masked_btn):
-                        masked_btn[i] = -1.0
-
-                if masked_btn:
-                    chosen_val = max(masked_btn)
-                    chosen_idx = masked_btn.index(chosen_val)
-                    print_action_dashboard(masked_btn, chosen_idx, fps, threshold=THRESHOLD)
-
-                            # --- END DASHBOARD LOGGING ---
-
-        except Exception as e:
-            return _no_op({"reason": "ng_batch_failed", "error": str(e)})
-
-        # 1. Get raw intent from model
-        # NOTE: _intent_from_action_vec ALREADY ignores the Right Stick tokens 
-        # because they aren't in your NgActionSchema. The issue was just visual in the log.
-        raw_intent = _intent_from_action_vec(action_1d, self.schema)
-        
-        # 2. Update Sticky State
-        expired = []
-        for btn in self.held_buttons:
-            self.held_buttons[btn] -= 1
-            if self.held_buttons[btn] <= 0:
-                expired.append(btn)
-        for btn in expired:
-            del self.held_buttons[btn]
-            
-        for btn in raw_intent:
-            self.held_buttons[btn] = self.sticky_frames
-            
-        sticky_intent = list(self.held_buttons.keys())
-
-        # 3. Calculate masks
-        ng_intended_mask = _logical_buttons_to_mask(self.key_bits, sticky_intent, button_alias=self.button_alias)
-        ng_key_bin = _mask_to_bin16(ng_intended_mask)
-
-        mapped_logical = _apply_gating(
-            sticky_intent,
-            inside_window=bool(game_state.get("inside_window", False)),
-            allow_actions_in_window=self.allow_actions_in_window,
-            in_battle=self._get_in_battle(game_state),
-            forbid_actions_in_battle=self.forbid_actions_in_battle,
+        seed = self._seed_for(p)
+        # Ask model for full horizon [1, T, 25]
+        action_seq, raw = self.batch_mgr.infer(
+            seq,
+            emit_raw=self._emit_ng_raw,
+            seed=seed,
+            return_sequence=True,
         )
-        mapped_mask = _logical_buttons_to_mask(self.key_bits, mapped_logical, button_alias=self.button_alias)
-        mapped_key_bin = _mask_to_bin16(mapped_mask)
+
+        # action_seq comes back as [1, T, 25] on CPU (from batch mgr)
+        seq_2d = action_seq.squeeze(0)  # [T, 25]
+        if seq_2d.ndim != 2 or seq_2d.shape[-1] < N_BUTTONS:
+            return _no_op({"reason": "bad_action_seq_shape", "shape": str(tuple(action_seq.shape))})
+
+        T_plan = int(seq_2d.shape[0])
+
+        plan_keys: List[str] = []
+        plan_ng_keys: List[str] = []
+
+        for t in range(T_plan):
+            action_1d = seq_2d[t]
+
+            raw_intent = _intent_from_action_vec(action_1d, self.schema)
+
+            # update sticky (per-step)
+            expired = []
+            for btn in self.held_buttons:
+                self.held_buttons[btn] -= 1
+                if self.held_buttons[btn] <= 0:
+                    expired.append(btn)
+            for btn in expired:
+                del self.held_buttons[btn]
+
+            for btn in raw_intent:
+                self.held_buttons[btn] = self.sticky_frames
+
+            sticky_intent = list(self.held_buttons.keys())
+
+            ng_intended_mask = _logical_buttons_to_mask(self.key_bits, sticky_intent, button_alias=self.button_alias)
+            ng_key_bin = _mask_to_bin16(ng_intended_mask)
+
+            mapped_logical = _apply_gating(
+                sticky_intent,
+                inside_window=bool(game_state.get("inside_window", False)),
+                allow_actions_in_window=self.allow_actions_in_window,
+                in_battle=self._get_in_battle(game_state),
+                forbid_actions_in_battle=self.forbid_actions_in_battle,
+            )
+            mapped_mask = _logical_buttons_to_mask(self.key_bits, mapped_logical, button_alias=self.button_alias)
+            mapped_key_bin = _mask_to_bin16(mapped_mask)
+
+            plan_keys.append(mapped_key_bin)
+            plan_ng_keys.append(ng_key_bin)
+
+        # For UI/debug, expose the *first* action like before
+        first_key = plan_keys[0] if plan_keys else _mask_to_bin16(0)
+        first_ng_key = plan_ng_keys[0] if plan_ng_keys else ""
 
         debug = {
-            "intent": { "raw": raw_intent, "sticky": sticky_intent, "mapped": mapped_logical },
+            "intent": {
+                "raw": [],          # sequence-level; keep simple to avoid huge payloads
+                "sticky": [],
+                "mapped": [],
+            },
+            "plan_len": T_plan,
         }
-        if raw is not None: debug["ng_raw"] = raw
+        if raw is not None:
+            debug["ng_raw"] = raw
 
         result = {
-            "button_command": {"type": "key_press", "key": mapped_key_bin},
-            "ng_key_bin": ng_key_bin,
+            "button_command": {"type": "key_press", "key": first_key},  # current tick
+            "ng_key_bin": first_ng_key,                                 # current tick (ng intent)
+            "action_plan_keys": plan_keys,                              # full horizon (mapped)
+            "action_plan_ng_keys": plan_ng_keys,                        # full horizon (ng intent)  <-- ADD THIS
             "debug": debug,
         }
-        
+
+
         self.last_decision = result
         return result
+                

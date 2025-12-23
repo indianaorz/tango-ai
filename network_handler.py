@@ -11,6 +11,8 @@ import os
 from typing import Optional
 import socket
 
+import time as _time
+
 
 def _c(text, code):             # _c("txt", 32) -> green txt
     return f"\033[{code}m{text}\033[0m" if sys.stdout.isatty() else text
@@ -31,6 +33,15 @@ class ConnectionHandler:
         self.instance_config_data = instance_config
         self.strategy            = active_strategy
         self.inference_interval  = 1.0 / inference_fps if inference_fps > 0 else 0.0
+
+        self.action_fps = float(os.getenv("NG_ACTION_FPS", "60"))
+        self._action_dt = 1.0 / self.action_fps if self.action_fps > 0 else 0.0
+
+        self._action_plan = deque()             # deque[str] of 16-bit key bins
+        self._action_last_key = "0" * 16        # what we keep sending when plan empty
+        self._action_lock = asyncio.Lock()
+        self._action_task: Optional[asyncio.Task] = None
+
 
         # Optional (training/analytics)
         self.experience_buffer   = experience_buffer
@@ -417,6 +428,18 @@ class ConnectionHandler:
                         # we don't block the asyncio event loop for other handlers.
                         # --------------------------------------------------------------
                         act_info = await asyncio.to_thread(self.strategy.decide_action, self.port, comp_state)
+
+                        # If strategy produced a plan, replace the playback queue.
+                        plan = act_info.get("action_plan_keys")
+                        if isinstance(plan, list) and plan:
+                            async with self._action_lock:
+                                self._action_plan.clear()
+                                self._action_plan.extend(str(k) for k in plan)
+                                # optional: also set last_key to the final key of the plan so “hold last” matches intent
+                                self._action_last_key = str(plan[-1])
+
+                        # NOTE: Do NOT send act_info["button_command"] here anymore.
+                        # The playback loop will send keys at 60Hz.
                         
                         if not await self._send_command_internal(act_info["button_command"]):
                             break  # send failed – drop out
@@ -495,7 +518,42 @@ class ConnectionHandler:
             self._inference_done_event.set() # Ensure waiters wake up to exit
             print(f"Port {self.port} ({self.name}): processor loop ended.")
 
-    
+    async def _action_playback_loop(self):
+        """
+        Sends key presses at a fixed rate (e.g. 60Hz), independently of inference speed.
+        Holds last key if plan runs out.
+        """
+        if self._action_dt <= 0:
+            return
+
+        next_t = _time.perf_counter()
+        try:
+            while self._is_running:
+                now = _time.perf_counter()
+                if now < next_t:
+                    await asyncio.sleep(next_t - now)
+                    continue
+
+                # schedule next tick (drift-resistant)
+                next_t += self._action_dt
+                if (now - next_t) > (self._action_dt * 5):
+                    # if we fell behind badly, resync
+                    next_t = now + self._action_dt
+
+                async with self._action_lock:
+                    if self._action_plan:
+                        key_bin = self._action_plan.popleft()
+                        self._action_last_key = key_bin
+                    else:
+                        key_bin = self._action_last_key
+
+                # fire-and-forget-ish: if send fails, handler will stop
+                ok = await self._send_command_internal({"type": "key_press", "key": key_bin})
+                if not ok:
+                    break
+        except asyncio.CancelledError:
+            pass
+
     async def start_handling(self, max_retries: int = 0,  # 0 = infinite
                              retry_base_delay: float = 0.5,
                              retry_max_delay:  float = 5.0):
@@ -556,6 +614,8 @@ class ConnectionHandler:
         # background task for inbound messages
         self.message_processor_task = asyncio.create_task(
             self._message_processor_loop())
+        self._action_task = asyncio.create_task(self._action_playback_loop())
+
 
         # ── main send‑request loop ───────────────────────────────────
         try:
@@ -592,6 +652,13 @@ class ConnectionHandler:
                     await self.message_processor_task
                 except asyncio.CancelledError:
                     pass
+            if self._action_task and not self._action_task.done():
+                self._action_task.cancel()
+                try:
+                    await self._action_task
+                except asyncio.CancelledError:
+                    pass
+
 
             for timer_key in ('player_chip_timer_task', 'enemy_chip_timer_task'):
                 task = self.instance_game_data_cache.get(timer_key)

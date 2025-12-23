@@ -489,12 +489,12 @@ class NgNitroGenPolicy(nn.Module):
             else:
                 out = self.ng.get_action(data)
             
-            actions = out["action_tensor"]  # expected [B,T,4+button_dim]
-            expected_dim = 4 + self.button_dim
-            if actions.ndim != 3 or actions.shape[-1] != expected_dim:
+            actions = out["action_tensor"]  # expected [B,T,button_dim+4] in tokenizer-space
+            expected_dim = self.button_dim + 4
+            if actions.ndim != 3 or int(actions.shape[-1]) != int(expected_dim):
                 raise NgPolicyError(
                     f"Model output dim mismatch: got {tuple(actions.shape)}, "
-                    f"expected last dim={expected_dim} (4 axes + {self.button_dim} buttons)"
+                    f"expected last dim={expected_dim} (buttons {self.button_dim} + j_left(2) + j_right(2))"
                 )
 
 

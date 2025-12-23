@@ -32,15 +32,19 @@ class PortDebugSnapshot:
     inside_window: bool = False
     action_type: str = ""
 
-    # "mapped" = what we actually send to the game
+    # "mapped" = what we actually send to the game (current tick)
     mapped_key_bin: str = ""
     mapped_key_int: int = 0
     mapped_pressed_buttons: List[str] = None
 
-    # "ng" = raw model intent (if provided)
+    # "ng" = raw model intent (if provided) (current tick)
     ng_key_bin: str = ""
     ng_key_int: int = 0
     ng_pressed_buttons: List[str] = None
+
+    # FUTURE BUFFER (predicted/queued next actions)
+    # Each step is { "ng_pressed_buttons": [...], "mapped_pressed_buttons": [...] } (either side may be missing)
+    next_actions: Optional[List[Dict[str, Any]]] = None
 
     jpg_bytes: Optional[bytes] = None
     img_w: int = 0
@@ -51,6 +55,7 @@ class PortDebugSnapshot:
     infer_hz: float = 0.0
     infer_window_s: float = 0.0
     last_update_age_s: float = 0.0
+
 
 
 class DebugState:
@@ -103,6 +108,103 @@ class DebugState:
         # Per-port history
         self._max_history_per_port = int(max_history_per_port)
         self._hist: Dict[int, Deque[HistoryEntry]] = {}
+
+    from collections import deque
+    from typing import Sequence
+
+    def _extract_future_buffer(self, decision: Dict[str, Any]) -> Optional[Any]:
+        if not decision:
+            return None
+
+        def _as_steps(x: Any) -> Optional[List[Any]]:
+            # Accept list/tuple/deque; reject str/bytes
+            if isinstance(x, (list, tuple, deque)):
+                return list(x)
+            # Some code wraps it: {"actions":[...]} or {"steps":[...]}
+            if isinstance(x, dict):
+                for k in ("next_actions", "future_actions", "actions", "steps", "items"):
+                    v = x.get(k)
+                    if isinstance(v, (list, tuple, deque)):
+                        return list(v)
+            return None
+
+        dbg = decision.get("debug") or {}
+        buf = decision.get("buffer") or {}
+        plan = decision.get("plan") or {}
+        model = decision.get("model") or {}
+
+        candidates = [
+            decision.get("next_actions"),
+            decision.get("future_actions"),
+            decision.get("future_buffer"),
+            decision.get("next_actions_buffer"),
+            decision.get("action_buffer"),
+            decision.get("future"),
+            dbg.get("next_actions"),
+            dbg.get("future_actions"),
+            dbg.get("future_buffer"),
+            dbg.get("next_actions_buffer"),
+            buf.get("next_actions"),
+            buf.get("future_actions"),
+            buf.get("future_buffer"),
+            plan.get("actions"),
+            plan.get("next_actions"),
+            plan.get("future_actions"),
+            model.get("next_actions"),
+            model.get("future_actions"),
+            model.get("future_buffer"),
+        ]
+
+        # Prefer non-empty
+        for c in candidates:
+            steps = _as_steps(c)
+            if steps is not None and len(steps) > 0:
+                return steps
+
+        # Allow empty-but-present
+        for c in candidates:
+            steps = _as_steps(c)
+            if steps is not None:
+                return steps
+
+        return None
+
+
+    def _future_step_to_buttons(self, step: Any) -> Dict[str, Any]:
+        """
+        Normalize one future step into:
+          {"ng_pressed_buttons":[...], "mapped_pressed_buttons":[...]}
+        """
+        out: Dict[str, Any] = {"ng_pressed_buttons": [], "mapped_pressed_buttons": []}
+
+        if step is None:
+            return out
+
+        # Case: already dict with pressed buttons lists
+        if isinstance(step, dict):
+            if isinstance(step.get("ng_pressed_buttons"), list):
+                out["ng_pressed_buttons"] = [str(x) for x in step.get("ng_pressed_buttons") if x is not None]
+            if isinstance(step.get("mapped_pressed_buttons"), list):
+                out["mapped_pressed_buttons"] = [str(x) for x in step.get("mapped_pressed_buttons") if x is not None]
+
+            # Case: keys provided
+            if not out["ng_pressed_buttons"] and ("ng_key" in step or "ng_key_bin" in step):
+                raw = step.get("ng_key", step.get("ng_key_bin"))
+                _, _, pressed = self._coerce_key_to_mask_and_buttons(raw)
+                out["ng_pressed_buttons"] = pressed
+
+            if not out["mapped_pressed_buttons"] and ("mapped_key" in step or "key" in step or "mapped_key_bin" in step):
+                raw = step.get("mapped_key", step.get("mapped_key_bin", step.get("key")))
+                _, _, pressed = self._coerce_key_to_mask_and_buttons(raw)
+                out["mapped_pressed_buttons"] = pressed
+
+            return out
+
+        # Case: scalar (int / bitstring / "up+z") -> treat as mapped by default
+        _, _, pressed = self._coerce_key_to_mask_and_buttons(step)
+        out["mapped_pressed_buttons"] = pressed
+        return out
+
 
     # ----------------------------
     # Normalization / parsing
@@ -347,6 +449,7 @@ class DebugState:
         decision: Dict[str, Any],
         pil_img: Optional[Image.Image],
     ) -> None:
+
         ts = time.time()
         p = int(port)
         inside_window = bool(game_state.get("inside_window", False))
@@ -365,6 +468,51 @@ class DebugState:
             ng_key_bin, ng_key_int, ng_pressed = self._coerce_key_to_mask_and_buttons(ng_key_raw)
         else:
             ng_key_bin, ng_key_int, ng_pressed = "", 0, []
+
+        # --- FUTURE BUFFER (predicted next actions) ---
+        # Your strategy returns the horizon as:
+        #   decision["action_plan_keys"]      -> mapped 16-bit bin strings (full horizon)
+        #   decision["action_plan_ng_keys"]   -> ng 16-bit bin strings (full horizon)  (optional, add it)
+        #
+        # The UI wants NEXT actions, so we drop index 0 (current tick).
+        next_actions: Optional[List[Dict[str, Any]]] = None
+
+        plan_keys = (decision or {}).get("action_plan_keys")
+        plan_ng_keys = (decision or {}).get("action_plan_ng_keys")
+
+        if isinstance(plan_keys, list) and plan_keys:
+            # bounded + skip current
+            MAX_T = 64
+            ks = plan_keys[1:1 + MAX_T]
+
+            if isinstance(plan_ng_keys, list) and len(plan_ng_keys) == len(plan_keys):
+                ngs = plan_ng_keys[1:1 + MAX_T]
+                next_actions = []
+                for mk, nk in zip(ks, ngs):
+                    # normalize using your existing coercion
+                    _, _, mapped_pressed = self._coerce_key_to_mask_and_buttons(mk)
+                    _, _, ng_pressed = self._coerce_key_to_mask_and_buttons(nk)
+                    next_actions.append({
+                        "mapped_pressed_buttons": mapped_pressed,
+                        "ng_pressed_buttons": ng_pressed,
+                    })
+            else:
+                # mapped-only plan
+                next_actions = []
+                for mk in ks:
+                    _, _, mapped_pressed = self._coerce_key_to_mask_and_buttons(mk)
+                    next_actions.append({
+                        "mapped_pressed_buttons": mapped_pressed,
+                        "ng_pressed_buttons": [],
+                    })
+        else:
+            # Fallback to your generic extractor if plan_keys isn't present
+            future_raw = self._extract_future_buffer(decision or {})
+            if isinstance(future_raw, list):
+                MAX_T = 64
+                next_actions = [self._future_step_to_buttons(s) for s in future_raw[:MAX_T]]
+
+
 
         jpg_bytes: Optional[bytes] = None
         img_w = 0
@@ -395,6 +543,7 @@ class DebugState:
                 ng_key_bin=ng_key_bin,
                 ng_key_int=ng_key_int,
                 ng_pressed_buttons=ng_pressed,
+                next_actions=next_actions,  # <-- add this
                 jpg_bytes=jpg_bytes,
                 img_w=img_w,
                 img_h=img_h,
@@ -403,6 +552,7 @@ class DebugState:
                 infer_window_s=win,
                 last_update_age_s=0.0,
             )
+
             self._by_port[p] = snap
 
             dq = self._hist.get(p)
@@ -464,6 +614,7 @@ class DebugState:
                     "mapped_pressed_buttons": s.mapped_pressed_buttons or [],
                     "img_w": s.img_w,
                     "img_h": s.img_h,
+                    "next_actions": s.next_actions or [],
                     "has_image": bool(s.jpg_bytes),
                     "infer_count_total": s.infer_count_total,
                     "infer_hz": s.infer_hz,

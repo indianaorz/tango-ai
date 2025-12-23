@@ -45,6 +45,115 @@ function chipsEl(containerEl, list) {
 }
 
 // -----------------------------------------------------------------------------
+// Timeline grid (viewer-style) for Mapped vs NG.
+//
+// Conventions:
+// - "Mapped" (sent to game) => GT (green)
+// - "NG" (model intent)     => PR (magenta)
+// -----------------------------------------------------------------------------
+
+const TIMELINE_SLOTS = ["UP","DOWN","LEFT","RIGHT","A","B","L","R","SELECT","START"];
+const TIMELINE_T = 18;
+
+function niceSlotLabel(slot) {
+  if (slot === "SELECT") return "SELECT";
+  if (slot === "START") return "START";
+  return slot;
+}
+
+function slotsSetFromPressedButtons(pressedButtonsList) {
+  const xs = Array.isArray(pressedButtonsList) ? pressedButtonsList : [];
+  const set = new Set();
+  for (const raw of xs) {
+    const slot = btnNameToSlot(raw);
+    if (slot) set.add(slot);
+  }
+  return set;
+}
+
+/**
+ * Render a timeline grid into hostEl using entries (newest-first).
+ * Each entry should have:
+ *   - mapped_pressed_buttons: [...]
+ *   - ng_pressed_buttons: [...]
+ */
+function renderMappedVsNgTimeline(hostEl, entries, titleText) {
+  if (!hostEl) return;
+
+  const xs = Array.isArray(entries) ? entries : [];
+  const T = Math.min(TIMELINE_T, xs.length);
+
+  hostEl.innerHTML = "";
+
+  // Title row
+  const title = document.createElement("div");
+  title.className = "timeline-title";
+  title.textContent = titleText;
+  hostEl.appendChild(title);
+
+  if (T === 0) {
+    const sp = document.createElement("div");
+    sp.className = "small muted";
+    sp.textContent = "—";
+    hostEl.appendChild(sp);
+    return;
+  }
+
+  const grid = document.createElement("div");
+  grid.className = "timeline";
+  grid.style.gridTemplateColumns = `60px repeat(${T}, 1fr)`;
+
+  for (const slot of TIMELINE_SLOTS) {
+    const lbl = document.createElement("div");
+    lbl.className = "lane-label";
+    lbl.textContent = niceSlotLabel(slot);
+    grid.appendChild(lbl);
+
+    for (let t = 0; t < T; t++) {
+      const e = xs[t] || null;
+
+      const mappedSet = e ? slotsSetFromPressedButtons(e.mapped_pressed_buttons) : new Set();
+      const ngSet = e ? slotsSetFromPressedButtons(e.ng_pressed_buttons) : new Set();
+
+      const gt = mappedSet.has(slot);
+      const pr = ngSet.has(slot);
+
+      const c = document.createElement("div");
+      c.className = "cell";
+      if (gt && pr) c.classList.add("both");
+      else if (gt) c.classList.add("gt");
+      else if (pr) c.classList.add("pr");
+
+      grid.appendChild(c);
+    }
+  }
+
+  hostEl.appendChild(grid);
+
+  // Count line (helps debug quickly)
+  const count = document.createElement("div");
+  count.className = "small muted";
+  count.style.marginTop = "6px";
+  count.textContent = `steps shown: ${T} / ${xs.length}`;
+  hostEl.appendChild(count);
+}
+
+/**
+ * History is newest-first (your to_json does reversed(deque)).
+ */
+function renderHistoryTimeline(hostEl, history) {
+  renderMappedVsNgTimeline(hostEl, history, "History (last 18): Mapped vs NG");
+}
+
+/**
+ * Next actions buffer is already "future steps" (we encoded skipping t0 in DebugState),
+ * and we want earliest-next first. So render as-is (index 0 = next step).
+ */
+function renderNextBufferTimeline(hostEl, nextActions) {
+  renderMappedVsNgTimeline(hostEl, nextActions, "Next buffer: Mapped vs NG");
+}
+
+// -----------------------------------------------------------------------------
 // Controller mapping (scope-safe, no global IDs)
 // -----------------------------------------------------------------------------
 
@@ -56,41 +165,24 @@ function normBtnName(x) {
     .replaceAll(" ", "_");
 }
 
-/**
- * Map DebugState pressed button token -> controller slot.
- * Slots: UP/DOWN/LEFT/RIGHT, A/B, L/R, START/SELECT.
- *
- * Supports tokens like:
- *  - UP/DOWN/LEFT/RIGHT
- *  - DPAD_UP etc
- *  - EAST/SOUTH
- *  - Z/X
- *  - L/R, LEFT_SHOULDER/RIGHT_SHOULDER
- *  - START, BACK/SELECT
- */
 function btnNameToSlot(btnNameRaw) {
   const k = normBtnName(btnNameRaw);
   if (!k) return null;
 
-  // D-pad
   if (k === "DPAD_UP" || k === "UP") return "UP";
   if (k === "DPAD_DOWN" || k === "DOWN") return "DOWN";
   if (k === "DPAD_LEFT" || k === "LEFT") return "LEFT";
   if (k === "DPAD_RIGHT" || k === "RIGHT") return "RIGHT";
 
-  // Face buttons (match your viewer mapping EAST->A, SOUTH->B)
   if (k === "EAST" || k === "A" || k === "BTN_A" || k === "BUTTON_A") return "A";
   if (k === "SOUTH" || k === "B" || k === "BTN_B" || k === "BUTTON_B") return "B";
 
-  // Keyboard style
   if (k === "Z") return "A";
   if (k === "X") return "B";
 
-  // Shoulders
   if (k === "LEFT_SHOULDER" || k === "L" || k === "LB" || k === "L1") return "L";
   if (k === "RIGHT_SHOULDER" || k === "R" || k === "RB" || k === "R1") return "R";
 
-  // Start/Select
   if (k === "START") return "START";
   if (k === "BACK" || k === "SELECT") return "SELECT";
 
@@ -98,7 +190,6 @@ function btnNameToSlot(btnNameRaw) {
 }
 
 function mountController(hostEl) {
-  // IMPORTANT: no IDs at all. Everything is scoped to this host.
   hostEl.innerHTML = `
     <div class="controller" data-controller="1">
       <div class="btn l" data-slot="L"></div>
@@ -132,10 +223,8 @@ function mountController(hostEl) {
 function setActiveVisual(el, active) {
   if (!el) return;
 
-  // Keep class for CSS (nice if it works)
   el.classList.toggle("active", !!active);
 
-  // Force visible highlight inline (no dependency on CSS specificity/order)
   if (!active) {
     el.style.background = "";
     el.style.boxShadow = "";
@@ -181,7 +270,7 @@ function setControllerPressed(ctrl, pressedButtonsList) {
     setActiveVisual(el, true);
   }
 
-  return slots; // for debug display
+  return slots;
 }
 
 // -----------------------------------------------------------------------------
@@ -250,6 +339,18 @@ function createPortCard(port) {
   meta.appendChild(imgLine);
   meta.appendChild(grid2);
 
+  // NEW: Next buffer timeline
+  const nextWrap = document.createElement("div");
+  nextWrap.className = "timeline-wrap";
+  nextWrap.innerHTML = `<div data-role="nextTimeline"></div>`;
+  meta.appendChild(nextWrap);
+
+  // Existing: History timeline
+  const histWrap = document.createElement("div");
+  histWrap.className = "timeline-wrap";
+  histWrap.innerHTML = `<div data-role="histTimeline"></div>`;
+  meta.appendChild(histWrap);
+
   const imgwrap = document.createElement("div");
   imgwrap.className = "imgwrap";
 
@@ -291,6 +392,9 @@ function createPortCard(port) {
 
     ngSlotsEl: card.querySelector('[data-role="ngSlots"]'),
     mappedSlotsEl: card.querySelector('[data-role="mappedSlots"]'),
+
+    nextTimelineEl: card.querySelector('[data-role="nextTimeline"]'),
+    histTimelineEl: card.querySelector('[data-role="histTimeline"]'),
 
     ngController: null,
     mappedController: null,
@@ -380,9 +484,14 @@ function updateFromPayload(payload) {
     const ngSlots = setControllerPressed(refs.ngController, ngPressed) || [];
     const mappedSlots = setControllerPressed(refs.mappedController, mappedPressed) || [];
 
-    // On-screen proof that mapping ran
     refs.ngSlotsEl.textContent = `slots: ${ngSlots.length ? ngSlots.join(", ") : "—"}`;
     refs.mappedSlotsEl.textContent = `slots: ${mappedSlots.length ? mappedSlots.join(", ") : "—"}`;
+
+    // NEW: next actions buffer (already "future only" if you applied the DebugState change)
+    renderNextBufferTimeline(refs.nextTimelineEl, s.next_actions || []);
+
+    // Existing: history
+    renderHistoryTimeline(refs.histTimelineEl, s.history || []);
 
     refs.ngHintEl.style.display = (ngBin === "—") ? "block" : "none";
   }
@@ -397,7 +506,6 @@ async function tick() {
     document.getElementById("status").textContent = "OK";
   } catch (e) {
     document.getElementById("status").textContent = `Error fetching state`;
-    // If you open DevTools you’ll see the real error
     console.error(e);
   }
 }

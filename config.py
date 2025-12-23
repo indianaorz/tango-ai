@@ -50,7 +50,7 @@ def generate_instances(n_pairs: int, base_port: int = BASE_PORT) -> List[Dict]:
 
         # Default: learner uses DRL; opponent uses curriculum
         if i % 2 == 0:
-            opp_strategy = STRAT_CHARGE   # Game1 Opponent
+            opp_strategy = STRAT_WANDER   # Game1 Opponent
         elif i % 2 == 1:
             opp_strategy = STRAT_WANDER   # Game2 Opponent
         else:

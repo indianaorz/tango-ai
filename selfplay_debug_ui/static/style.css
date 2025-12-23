@@ -290,3 +290,67 @@ img {
   background: #ccc;
   border: 1px solid #aaa;
 }
+
+
+/* -----------------------------------------------------------------------------
+   Future buffer grid (viewer-style)
+----------------------------------------------------------------------------- */
+
+.timeline-wrap {
+  margin-top: 10px;
+}
+
+.timeline-title {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 8px 0 6px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.timeline {
+  display: grid;
+  gap: 2px;
+  align-items: center;
+  user-select: none;
+}
+
+.lane-label {
+  font-size: 10px;
+  color: #aab6c3;
+  text-align: right;
+  padding-right: 6px;
+}
+
+.cell {
+  width: 10px;
+  height: 10px;
+  background: #182233;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 2px;
+}
+
+.cell.mid {
+  border-left: 2px solid rgba(255,255,255,0.18);
+}
+
+.cell.major {
+  border-left: 2px solid rgba(255,255,255,0.35);
+}
+
+.cell.mapped {
+  background: #00ff00;
+  box-shadow: 0 0 6px rgba(0, 255, 0, 0.25);
+  border-color: rgba(0, 255, 0, 0.35);
+}
+
+.cell.ng {
+  background: #ff00ff;
+  box-shadow: 0 0 6px rgba(255, 0, 255, 0.25);
+  border-color: rgba(255, 0, 255, 0.35);
+}
+
+.cell.both {
+  background: linear-gradient(135deg, #00ff00 0%, #00ff00 48%, #ff00ff 52%, #ff00ff 100%);
+  border-color: rgba(255,255,255,0.25);
+}
