@@ -90,32 +90,34 @@ class CachedTangoDataset(Dataset):
             
             self.cache_idx = file_idx
         
-        # 3. Retrieve Data
-        frame_uint8 = self.cache_data["frames"][local_idx] 
-        
-        # [0, 255] -> [0.0, 1.0]
-        frames_tensor = frame_uint8.float().div_(255.0)
+        # --- build action window ---
+        actions_all = self.cache_data["actions"]          # [N, 25]
+        frames_all  = self.cache_data["frames"]           # [N, 3, H, W]
+        n = int(frames_all.shape[0])
 
-        # --- NEW: SigLIP Normalization (Mean=0.5, Std=0.5) ---
-        # Shifts data from [0, 1] -> [-1, 1]
-        frames_tensor = (frames_tensor - 0.5) / 0.5
-        # -----------------------------------------------------
+        act_ids = _window_indices(local_idx, ACTION_HORIZON, n)   # length 18
+        act_win = actions_all[act_ids].float()                    # [18, 25]
 
-        action_vec = self.cache_data["actions"][local_idx]
-        
-        # Split action vector
-        j_left = action_vec[0:2]   # [2]
-        j_right = action_vec[2:4]  # [2]
-        buttons = action_vec[4:]   # [21]
+        j_left  = act_win[:, 0:2]     # [18, 2]
+        j_right = act_win[:, 2:4]     # [18, 2]
+        buttons = act_win[:, 4:]      # [18, 21]
 
+        # --- vision horizon: last frame only (or could do 1 anyway) ---
+        vis_idx = act_ids[-1]
+        frame_uint8 = frames_all[vis_idx]                          # [3,H,W]
+        frame = frame_uint8.float().div_(255.0)                    # [3,H,W] in [0,1]
+        frame = (frame - 0.5) / 0.5                                # [-1,1]
+
+        # tokenizer expects [B,T,...] for action streams and frames; we keep B=1 inside per-sample dict
         return {
-            "frames": frames_tensor,          # [3, H, W]
-            "j_left": j_left.unsqueeze(0),    # [1, 2]
-            "j_right": j_right.unsqueeze(0),  # [1, 2]
-            "buttons": buttons.unsqueeze(0),  # [1, 21]
-            "dropped_frames": torch.zeros(1, dtype=torch.bool),
-            "game": "bn6"
+            "frames": frame,                         # [3,H,W] (we’ll add [1,1,...] later)
+            "j_left": j_left,                        # [18,2]
+            "j_right": j_right,                      # [18,2]
+            "buttons": buttons,                      # [18,21]
+            "dropped_frames": torch.zeros(1, dtype=torch.bool),  # for vision horizon=1
+            "game": "bn6",
         }
+
 
 # -----------------------------------------------------------------------------
 # Collation Utilities
@@ -167,6 +169,19 @@ def _collate_values(key: str, vals: list):
     
     return vals
 
+def _window_indices(idx: int, T: int, n: int) -> list[int]:
+    idx = max(0, min(idx, n - 1))
+    start = idx - (T - 1)
+    out = []
+    for t in range(T):
+        j = start + t
+        if j < 0: j = 0
+        elif j >= n: j = n - 1
+        out.append(j)
+    return out
+
+ACTION_HORIZON = 18
+ACTION_HORIZON = 18
 # -----------------------------------------------------------------------------
 # Main Training Loop
 # -----------------------------------------------------------------------------
@@ -178,7 +193,7 @@ def main():
     
     # --- Model Config (Fixed Dimensions) ---
     MAX_SEQ_LEN = 1024
-    ACTION_HORIZON = 1
+    ACTION_HORIZON = 18
 
     HIDDEN = 1024
     HEAD_DIM = 128
@@ -291,14 +306,26 @@ def main():
 
             try:
                 for i in range(curr_bs):
+                    # frames: dataset gives [3,H,W] -> make [1,1,3,H,W]
+                    frames_btchw = batch["frames"][i].unsqueeze(0).unsqueeze(0)
+
+                    # actions: dataset gives [18,2]/[18,21] -> make [1,18,...]
+                    j_left  = batch["j_left"][i].unsqueeze(0)
+                    j_right = batch["j_right"][i].unsqueeze(0)
+                    buttons = batch["buttons"][i].unsqueeze(0)
+
+                    # dropped_frames for vision horizon=1: dataset gives [1] bool -> make [1,1]
+                    dropped = batch["dropped_frames"][i].unsqueeze(0)
+
                     single_sample = {
-                        "frames": batch["frames"][i].unsqueeze(0), 
-                        "j_left": batch["j_left"][i].unsqueeze(0),
-                        "j_right": batch["j_right"][i].unsqueeze(0),
-                        "buttons": batch["buttons"][i].unsqueeze(0),
-                        "dropped_frames": batch["dropped_frames"][i].unsqueeze(0),
-                        "game": batch["game"][i]
+                        "frames": frames_btchw,
+                        "j_left": j_left,
+                        "j_right": j_right,
+                        "buttons": buttons,
+                        "dropped_frames": dropped,
+                        "game": batch["game"][i],
                     }
+
                     encoded = tokenizer.encode(single_sample)
                     encoded_samples.append(encoded)
             except ValueError as e:

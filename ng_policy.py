@@ -301,22 +301,43 @@ class NgNitroGenPolicy(nn.Module):
         if self.tokenizer is None:
             raise NgPolicyError("Tokenizer is not initialized.")
         
-        B, T, C, H, W = frames.shape
+        B, T_in, C, H, W = frames.shape
         encoded_list: list[dict[str, Any]] = []
-        
+
         frames_src = frames
         if self._tokenize_on_cpu and frames_src.is_cuda:
             frames_src = frames_src.detach().cpu()
         frames_src = frames_src.to(dtype=torch.float32, copy=False)
 
+        # Actions must match tokenizer.action_horizon; vision context often must be much smaller.
+        T_act = int(getattr(self.tokenizer, "action_horizon", T_in))
+        # Safe default: only last frame of vision context to avoid VL overflow
+        T_vis = int(getattr(self.tokenizer, "vision_horizon", 1))
+        if T_vis <= 0:
+            T_vis = 1
+
         for i in range(B):
-            j_left  = torch.zeros((1, 1, 2), dtype=torch.float32)
-            j_right = torch.zeros((1, 1, 2), dtype=torch.float32)
-            buttons = torch.zeros((1, 1, 21), dtype=torch.float32)
-            dropped = torch.zeros((1, 1), dtype=torch.bool)
-            
+            # --- actions stream (B=1, T_act, ...) ---
+            j_left  = torch.zeros((1, T_act, 2), dtype=torch.float32)
+            j_right = torch.zeros((1, T_act, 2), dtype=torch.float32)
+            buttons = torch.zeros((1, T_act, 21), dtype=torch.float32)
+
+            # dropped_frames should match frames time length (vision), not action horizon
+            dropped = torch.zeros((1, T_vis), dtype=torch.bool)
+
+            # --- vision stream: take only the last T_vis frames from the provided window ---
+            # frames_src[i] is [T_in, C, H, W]
+            if T_in >= T_vis:
+                vis = frames_src[i, (T_in - T_vis):]          # [T_vis, C, H, W]
+            else:
+                # pad by repeating first frame if we somehow got fewer than T_vis
+                pad = frames_src[i, :1].expand(T_vis - T_in, C, H, W)
+                vis = torch.cat([pad, frames_src[i]], dim=0)  # [T_vis, C, H, W]
+
+            frames_btchw = vis.unsqueeze(0)  # [1, T_vis, C, H, W]
+
             sample = {
-                "frames": frames_src[i], 
+                "frames": frames_btchw,
                 "j_left": j_left,
                 "j_right": j_right,
                 "buttons": buttons,
@@ -325,6 +346,7 @@ class NgNitroGenPolicy(nn.Module):
             }
             enc = self.tokenizer.encode(sample)
             encoded_list.append(enc)
+
             
         return self._collate_encoded(encoded_list, device=self.ng.device)
 

@@ -1,133 +1,187 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Inspecting Cache: {{ filename }}</title>
+    <title>Inspector: {{ filename }}</title>
     <style>
         body { background: #111; color: #fff; font-family: 'Consolas', monospace; display: flex; flex-direction: column; align-items: center; margin: 0; padding: 20px; }
-        h2 { margin-bottom: 10px; color: #ccc; }
+        h2 { margin-bottom: 5px; color: #ccc; }
         a { color: #888; text-decoration: none; align-self: flex-start; margin-bottom: 20px; font-size: 14px; }
-        .container { display: flex; gap: 20px; align-items: flex-start; justify-content: center; width: 100%; max-width: 1200px; }
+        a:hover { color: #fff; text-decoration: underline; }
+        
+        .main-stage { display: flex; gap: 40px; margin-top: 20px; align-items: flex-start; }
         
         /* IMAGE DISPLAY */
-        .viewer-box { display: flex; flex-direction: column; align-items: center; gap: 10px; }
-        img#tensor-view { width: 512px; height: 512px; border: 2px solid #444; image-rendering: pixelated; background: #000; }
+        .viewport { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+        img.frame-view { width: 512px; height: 512px; image-rendering: pixelated; border: 2px solid #444; background: #000; box-shadow: 0 0 20px rgba(0,0,0,0.5); }
         
+        /* CONTROLLERS */
+        .controls-area { display: flex; flex-direction: column; gap: 20px; }
+        .controller-box { text-align: center; }
+        .controller-label { color: #888; font-size: 12px; margin-bottom: 5px; letter-spacing: 1px; text-transform: uppercase; }
+        
+        /* REUSED CONTROLLER CSS */
+        .controller { background: #e0e0e0; width: 240px; height: 140px; border-radius: 15px 15px 30px 30px; position: relative; border: 2px solid #999; margin: 0 auto; transform: scale(0.9); }
+        .btn { position: absolute; background: #555; border: 1px solid #333; transition: background 0.05s, transform 0.05s; }
+        
+        /* Active States */
+        .btn.active { background: #00ff00 !important; box-shadow: 0 0 10px #00ff00; }
+        .btn.pred-active { background: #ff00ff !important; box-shadow: 0 0 10px #ff00ff; border-color: #cc00cc; } /* Model Color */
+
+        /* Button Layout (Compact) */
+        .dpad { position: absolute; top: 45px; left: 20px; width: 70px; height: 70px; }
+        .btn.up { top: 0; left: 23px; width: 24px; height: 24px; }
+        .btn.down { bottom: 0; left: 23px; width: 24px; height: 24px; }
+        .btn.left { top: 23px; left: 0; width: 24px; height: 24px; }
+        .btn.right { top: 23px; right: 0; width: 24px; height: 24px; }
+        
+        .btn.a { top: 55px; right: 15px; width: 28px; height: 28px; border-radius: 50%; background: #a00; color:rgba(255,255,255,0.5); font-size:10px; display:flex; justify-content:center; align-items:center; }
+        .btn.b { top: 70px; right: 50px; width: 28px; height: 28px; border-radius: 50%; background: #a00; color:rgba(255,255,255,0.5); font-size:10px; display:flex; justify-content:center; align-items:center; }
+        
+        .btn.l { top: -8px; left: 10px; width: 60px; height: 15px; border-radius: 5px 5px 0 0; background: #ccc; z-index: -1; }
+        .btn.r { top: -8px; right: 10px; width: 60px; height: 15px; border-radius: 5px 5px 0 0; background: #ccc; z-index: -1; }
+        .btn.start { bottom: 15px; left: 100px; width: 25px; height: 8px; transform: rotate(-25deg); background: #999; }
+        .btn.select { bottom: 15px; left: 70px; width: 25px; height: 8px; transform: rotate(-25deg); background: #999; }
+
         /* SLIDER */
-        input[type=range] { width: 512px; margin: 10px 0; }
-        
-        .sidebar { width: 320px; }
+        .scrubber { width: 512px; display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+        input[type=range] { flex-grow: 1; accent-color: #4db8ff; cursor: pointer; }
+        .idx-display { font-size: 14px; width: 80px; text-align: right; font-family: monospace; color: #4db8ff; }
 
-        /* CONTROLLER (Reuse) */
-        .controller { background: #e0e0e0; width: 300px; height: 180px; border-radius: 20px 20px 40px 40px; position: relative; border: 2px solid #999; margin: 0 auto; box-shadow: inset 0 -5px 10px rgba(0,0,0,0.2), 0 5px 15px rgba(0,0,0,0.5); }
-        .btn { position: absolute; background: #555; border: 1px solid #333; transition: background 0.05s; }
-        .btn.active { background: #00ff00 !important; box-shadow: 0 0 10px #00ff00; border-color: #00cc00; }
-        .dpad { position: absolute; top: 60px; left: 30px; width: 90px; height: 90px; }
-        .dpad .btn { background: #333; }
-        .btn.up { top: 0; left: 30px; width: 30px; height: 30px; border-radius: 3px 3px 0 0; }
-        .btn.down { bottom: 0; left: 30px; width: 30px; height: 30px; border-radius: 0 0 3px 3px; }
-        .btn.left { top: 30px; left: 0; width: 30px; height: 30px; border-radius: 3px 0 0 3px; }
-        .btn.right { top: 30px; right: 0; width: 30px; height: 30px; border-radius: 0 3px 3px 0; }
-        .dpad-center { position: absolute; top: 30px; left: 30px; width: 30px; height: 30px; background: #333; }
-        .btn.a { top: 70px; right: 20px; width: 35px; height: 35px; border-radius: 50%; background: #a00; border: 2px solid #600; display: flex; justify-content: center; align-items: center; color: rgba(255,255,255,0.5); font-weight: bold;}
-        .btn.b { top: 90px; right: 65px; width: 35px; height: 35px; border-radius: 50%; background: #a00; border: 2px solid #600; display: flex; justify-content: center; align-items: center; color: rgba(255,255,255,0.5); font-weight: bold;}
-        .btn.a.active, .btn.b.active { background: #ff3333 !important; box-shadow: 0 0 15px #ff0000; }
-        .btn.start { bottom: 20px; left: 120px; width: 30px; height: 10px; border-radius: 10px; transform: rotate(-25deg); background: #999; }
-        .btn.select { bottom: 20px; left: 80px; width: 30px; height: 10px; border-radius: 10px; transform: rotate(-25deg); background: #999; }
-        .btn.l { top: -10px; left: 10px; width: 80px; height: 20px; border-radius: 10px 10px 0 0; background: #ccc; z-index: -1; }
-        .btn.r { top: -10px; right: 10px; width: 80px; height: 20px; border-radius: 10px 10px 0 0; background: #ccc; z-index: -1; }
-
-        .loading-ov { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(0,0,0,0.8); padding:10px; border-radius:5px; display:none; }
+        /* Prob Bars */
+        .bar-container { width: 240px; margin-top: 5px; }
+        .bar-row { display: flex; justify-content: space-between; font-size: 10px; color: #aaa; margin-bottom: 2px; }
+        .bar-bg { width: 100%; height: 4px; background: #333; border-radius: 2px; overflow: hidden; }
+        .bar-fill { height: 100%; background: #ff00ff; width: 0%; transition: width 0.1s; }
     </style>
 </head>
 <body>
     <a href="/">&larr; Back to List</a>
-    <h2>📦 {{ filename }}</h2>
-
-    <div class="container">
-        <div class="viewer-box">
-            <div style="position:relative">
-                <img id="tensor-view" src="" />
-                <div id="loading" class="loading-ov">Loading...</div>
+    <h2>{{ filename }}</h2>
+    
+    <div class="main-stage">
+        <div class="viewport">
+            <img id="frame-img" class="frame-view" src="">
+            <div class="scrubber">
+                <button onclick="step(-1)">&lt;</button>
+                <input type="range" id="slider" min="0" max="0" value="0" oninput="seek(this.value)">
+                <button onclick="step(1)">&gt;</button>
+                <div class="idx-display" id="idx-disp">0 / 0</div>
             </div>
-            
-            <input type="range" id="slider" min="0" max="0" value="0" style="width: 512px">
-            <div>Frame: <span id="frame-idx">0</span> / <span id="frame-total">0</span></div>
         </div>
 
-        <div class="sidebar">
-            <div class="controller">
-                <div class="btn l" id="btn-L"></div><div class="btn r" id="btn-R"></div>
-                <div class="dpad">
-                    <div class="dpad-center"></div>
-                    <div class="btn up" id="btn-UP"></div><div class="btn down" id="btn-DOWN"></div>
-                    <div class="btn left" id="btn-LEFT"></div><div class="btn right" id="btn-RIGHT"></div>
+        <div class="controls-area">
+            <div class="controller-box">
+                <div class="controller-label">Ground Truth (Human)</div>
+                <div class="controller" id="ctrl-truth">
+                    <div class="btn l" id="gt-LEFT_SHOULDER"></div><div class="btn r" id="gt-RIGHT_SHOULDER"></div>
+                    <div class="dpad">
+                        <div class="btn up" id="gt-DPAD_UP"></div><div class="btn down" id="gt-DPAD_DOWN"></div>
+                        <div class="btn left" id="gt-DPAD_LEFT"></div><div class="btn right" id="gt-DPAD_RIGHT"></div>
+                    </div>
+                    <div class="btn b" id="gt-EAST">B</div><div class="btn a" id="gt-SOUTH">A</div>
+                    <div class="btn select" id="gt-BACK"></div><div class="btn start" id="gt-START"></div>
                 </div>
-                <div class="btn b" id="btn-B">B</div><div class="btn a" id="btn-A">A</div>
-                <div class="btn select" id="btn-SELECT"></div><div class="btn start" id="btn-START"></div>
+                <div style="height:20px; font-size:10px; color:#666; margin-top:5px;">Axis: <span id="gt-axis">0.0, 0.0</span></div>
             </div>
-            
-            <div style="margin-top:20px; padding:10px; border:1px solid #444; background:#222; font-size:12px; color:#aaa;">
-                <strong>Debug Info:</strong><br>
-                Raw Left: <span id="ax-l">[0.0, 0.0]</span><br>
-                Raw Right: <span id="ax-r">[0.0, 0.0]</span>
+
+            <div class="controller-box">
+                <div class="controller-label" style="color:#ff00ff">Model Prediction</div>
+                <div class="controller" id="ctrl-pred">
+                    <div class="btn l" id="pr-LEFT_SHOULDER"></div><div class="btn r" id="pr-RIGHT_SHOULDER"></div>
+                    <div class="dpad">
+                        <div class="btn up" id="pr-DPAD_UP"></div><div class="btn down" id="pr-DPAD_DOWN"></div>
+                        <div class="btn left" id="pr-DPAD_LEFT"></div><div class="btn right" id="pr-DPAD_RIGHT"></div>
+                    </div>
+                    <div class="btn b" id="pr-EAST">B</div><div class="btn a" id="pr-SOUTH">A</div>
+                    <div class="btn select" id="pr-BACK"></div><div class="btn start" id="pr-START"></div>
+                </div>
+                
+                <div class="bar-container" id="conf-bars">
+                    </div>
             </div>
         </div>
     </div>
 
     <script>
         const filename = "{{ filename }}";
-        const slider = document.getElementById('slider');
-        const img = document.getElementById('tensor-view');
-        const frameLbl = document.getElementById('frame-idx');
-        const loading = document.getElementById('loading');
-
-        const KEYS = {'DPAD_UP':'btn-UP', 'DPAD_DOWN':'btn-DOWN', 'DPAD_LEFT':'btn-LEFT', 'DPAD_RIGHT':'btn-RIGHT',
-                      'EAST':'btn-A', 'SOUTH':'btn-B', 'LEFT_SHOULDER':'btn-L', 'RIGHT_SHOULDER':'btn-R', 'START':'btn-START', 'BACK':'btn-SELECT'};
-
-        // 1. Get Metadata
-        fetch(`/api/cache_meta/${filename}`)
-            .then(r => r.json())
-            .then(data => {
-                if(data.error) { alert(data.error); return; }
-                slider.max = data.count - 1;
-                document.getElementById('frame-total').innerText = data.count - 1;
-                loadFrame(0);
-            });
-
-        // 2. Slider Interaction
-        slider.addEventListener('input', (e) => {
-            frameLbl.innerText = e.target.value;
+        let totalFrames = 0;
+        
+        // Load Meta
+        fetch(`/api/cache_meta/${filename}`).then(r=>r.json()).then(d => {
+            totalFrames = d.count;
+            document.getElementById('slider').max = totalFrames - 1;
+            document.getElementById('idx-disp').innerText = `0 / ${totalFrames}`;
+            loadFrame(0);
         });
 
-        slider.addEventListener('change', (e) => {
-            loadFrame(e.target.value);
-        });
-
-        function loadFrame(idx) {
-            loading.style.display = "block";
-            fetch(`/api/cache_frame/${filename}/${idx}`)
-                .then(r => r.json())
-                .then(d => {
-                    loading.style.display = "none";
-                    if(d.error) return;
-
-                    // Update Image
-                    img.src = d.image;
-
-                    // Update Controller
-                    updateController(d.action);
-                });
+        function seek(val) {
+            document.getElementById('idx-disp').innerText = `${val} / ${totalFrames}`;
+            loadFrame(val);
         }
 
-        function updateController(act) {
-            document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
-            for(let k in KEYS) {
-                const v = act[k];
-                if((Array.isArray(v) ? v[0] : v) > 0.5) document.getElementById(KEYS[k]).classList.add('active');
+        function step(dir) {
+            let el = document.getElementById('slider');
+            let val = parseInt(el.value) + dir;
+            if(val >= 0 && val < totalFrames) {
+                el.value = val;
+                seek(val);
             }
+        }
+
+        async function loadFrame(idx) {
+            const res = await fetch(`/api/cache_frame/${filename}/${idx}`);
+            const data = await res.json();
             
-            document.getElementById('ax-l').innerText = `[${act['AXIS_LEFTX'][0].toFixed(2)}, ${act['AXIS_LEFTY'][0].toFixed(2)}]`;
-            document.getElementById('ax-r').innerText = `[${act['AXIS_RIGHTX'][0].toFixed(2)}, ${act['AXIS_RIGHTY'][0].toFixed(2)}]`;
+            if(data.error) return;
+
+            // 1. Image
+            document.getElementById('frame-img').src = data.image;
+
+            // 2. Ground Truth
+            updateController('gt', data.ground_truth, 'active');
+            document.getElementById('gt-axis').innerText = 
+                `${data.ground_truth.AXIS_LEFTX.toFixed(2)}, ${data.ground_truth.AXIS_LEFTY.toFixed(2)}`;
+
+            // 3. Prediction
+            if(data.prediction) {
+                updateController('pr', data.prediction, 'pred-active');
+                updateBars(data.prediction);
+            }
+        }
+
+        function updateController(prefix, actions, activeClass) {
+            const btns = ['DPAD_UP','DPAD_DOWN','DPAD_LEFT','DPAD_RIGHT','SOUTH','EAST','START','BACK','LEFT_SHOULDER','RIGHT_SHOULDER'];
+            
+            btns.forEach(k => {
+                const el = document.getElementById(`${prefix}-${k}`);
+                if(!el) return;
+                
+                el.classList.remove(activeClass);
+                // Threshold 0.4 match game logic
+                if(actions[k] > 0.4) el.classList.add(activeClass);
+            });
+        }
+
+        function updateBars(actions) {
+            const keys = ['SOUTH', 'EAST', 'DPAD_DOWN', 'DPAD_UP', 'DPAD_LEFT', 'DPAD_RIGHT'];
+            const container = document.getElementById('conf-bars');
+            container.innerHTML = '';
+            
+            keys.forEach(k => {
+                const val = actions[k] || 0;
+                const pct = Math.max(0, Math.min(100, val * 100));
+                // Highlight strong preds
+                const color = val > 0.4 ? '#ff00ff' : '#555';
+                
+                const html = `
+                    <div class="bar-row">
+                        <span>${k.replace('DPAD_', '')}</span>
+                        <span>${val.toFixed(2)}</span>
+                    </div>
+                    <div class="bar-bg"><div class="bar-fill" style="width:${pct}%; background:${color}"></div></div>
+                `;
+                container.innerHTML += html;
+            });
         }
     </script>
 </body>
