@@ -1,108 +1,101 @@
+# convert_dataset.py
+from __future__ import annotations
+
 import json
 import argparse
 from collections import OrderedDict
+from typing import Dict, Tuple
 
-# --- CONFIGURATION ---
-GBA_BITS = {
-    0: 'A', 1: 'B', 2: 'SELECT', 3: 'START',
-    4: 'RIGHT', 5: 'LEFT', 6: 'UP', 7: 'DOWN',
-    8: 'R', 9: 'L'
-}
-
-GBA_TO_NITROGEN = {
-    'A': 'EAST', 'B': 'SOUTH', 'L': 'LEFT_SHOULDER', 'R': 'RIGHT_SHOULDER',
-    'START': 'START', 'SELECT': 'BACK',
-    'UP': 'DPAD_UP', 'DOWN': 'DPAD_DOWN', 'LEFT': 'DPAD_LEFT', 'RIGHT': 'DPAD_RIGHT'
-}
+from action_schema import (
+    GBA_BITS,
+    GBA_TO_NITROGEN,
+    NITROGEN_TEMPLATE,
+)
 
 # Fields that represent the "Player" and "Enemy" relative to the capture
-# These must be swapped if we detect the camera was actually on Player 2
 SWAP_PAIRS = [
-    # --- World State (These track Left vs Right side) ---
     ("player_health", "enemy_health"),
     ("player_pos", "enemy_pos"),
     ("player_charge", "enemy_charge"),
     ("player_chip", "enemy_chip"),
-    
-    # [FIX] Game Emotion (Full Synchro/Anger on grid) tracks Left/Right side.
-    # So we MUST swap this.
-    # ("player_game_emotion", "enemy_game_emotion"), 
-
-    # --- Local State (These track the "Camera/Console") ---
-    # DO NOT SWAP THESE:
-    # - player_emotion (Window Portrait)
-    # - player_hand
-    # - selected_chip_indices
-    # - selected_menu_index / cross_index
-    # - chip_select_count / visible_count
 ]
 
-NITROGEN_TEMPLATE = OrderedDict([
-    ("WEST", 0.0), ("SOUTH", 0.0), ("BACK", 0.0),
-    ("DPAD_DOWN", 0.0), ("DPAD_LEFT", 0.0), ("DPAD_RIGHT", 0.0), ("DPAD_UP", 0.0),
-    ("GUIDE", 0.0), ("AXIS_LEFTX", [0.0]), ("AXIS_LEFTY", [0.0]),
-    ("LEFT_SHOULDER", 0.0), ("LEFT_TRIGGER", [0.0]),
-    ("AXIS_RIGHTX", [0.0]), ("AXIS_RIGHTY", [0.0]),
-    ("LEFT_THUMB", 0.0), ("RIGHT_THUMB", 0.0),
-    ("RIGHT_SHOULDER", 0.0), ("RIGHT_TRIGGER", [0.0]),
-    ("START", 0.0), ("EAST", 0.0), ("NORTH", 0.0),
-])
-
-def parse_input_bitmask(bitmask_int: int):
+def parse_input_bitmask(bitmask_int: int) -> OrderedDict:
+    """
+    Produces a Nitrogen-shaped action row:
+      - axes are present (list-wrapped), left at 0.0
+      - only GBA buttons are ever set to 1.0
+      - all other Nitrogen buttons remain 0.0
+    """
     action = NITROGEN_TEMPLATE.copy()
-    if not isinstance(bitmask_int, int): bitmask_int = 0
+
+    if not isinstance(bitmask_int, int):
+        bitmask_int = 0
+
     for bit, gba_btn in GBA_BITS.items():
         if (bitmask_int >> bit) & 1:
             nitro_key = GBA_TO_NITROGEN.get(gba_btn)
-            if nitro_key: action[nitro_key] = 1.0
+            if nitro_key is not None:
+                action[nitro_key] = 1.0
+
     return action
 
 def extract_state_v1(obj: dict, swap: bool) -> dict:
     state_wrapper = obj.get("state", {})
     st = state_wrapper.get("V1", state_wrapper) if isinstance(state_wrapper, dict) else {}
-    if not st: return {}
+    if not st:
+        return {}
 
     if swap:
         st = st.copy()
         for k1, k2 in SWAP_PAIRS:
-            v1 = st.get(k1)
-            v2 = st.get(k2)
-            st[k1] = v2
-            st[k2] = v1
+            st[k1], st[k2] = st.get(k2), st.get(k1)
+
     return st
+
+def _update_press_stats(stats: Dict[str, int], row: dict) -> None:
+    # Count presses for only keys that exist in the row template.
+    for k, v in row.items():
+        if k in NITROGEN_TEMPLATE and isinstance(v, (int, float)) and float(v) > 0.5:
+            stats[k] = stats.get(k, 0) + 1
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=str, required=True)
     parser.add_argument("--output", type=str, required=True)
     parser.add_argument("--swap-players", action="store_true", help="Swap P1/P2 telemetry data")
+    parser.add_argument("--print-stats", action="store_true", help="Print button press-rate sanity stats")
     args = parser.parse_args()
 
     count = 0
     prev_hp = {"p": None, "e": None}
+    press_stats: Dict[str, int] = {}
 
     with open(args.input, "r") as fin, open(args.output, "w") as fout:
         for line in fin:
             line = line.strip()
-            if not line: continue
+            if not line:
+                continue
             try:
                 data = json.loads(line)
-                
-                # 1. Inputs
+
+                # 1) Inputs
                 joyflags = data.get("input", 0)
-                if isinstance(joyflags, dict): joyflags = joyflags.get("local", 0)
+                if isinstance(joyflags, dict):
+                    joyflags = joyflags.get("local", 0)
+
                 final_row = parse_input_bitmask(int(joyflags or 0))
-                
-                # 2. Metadata
+
+                # 2) Metadata
                 final_row["frame_idx"] = data.get("frame", count)
                 final_row["tick"] = data.get("tick", count)
 
-                # 3. State Extraction & Swap
+                # 3) State Extraction & Swap
                 st = extract_state_v1(data, args.swap_players)
                 for k, v in st.items():
                     final_row[k] = v
 
-                # 4. Metrics
+                # 4) Metrics
                 p_hp = final_row.get("player_health")
                 e_hp = final_row.get("enemy_health")
                 curr_p = p_hp if isinstance(p_hp, (int, float)) else prev_hp["p"]
@@ -123,13 +116,35 @@ def main():
                 prev_hp["p"] = curr_p
                 prev_hp["e"] = curr_e
 
+                if args.print_stats:
+                    _update_press_stats(press_stats, final_row)
+
                 fout.write(json.dumps(final_row) + "\n")
                 count += 1
 
             except Exception:
-                pass
+                # Intentionally skip bad lines to keep conversion resilient.
+                continue
 
     print(f"Converted {count} frames.")
+
+    if args.print_stats and count > 0:
+        # Basic “is something stuck?” sanity
+        keys = [k for k in NITROGEN_TEMPLATE.keys() if isinstance(NITROGEN_TEMPLATE[k], (int, float))]
+        pairs = []
+        for k in keys:
+            c = press_stats.get(k, 0)
+            pairs.append((k, c / float(count)))
+        pairs.sort(key=lambda kv: kv[1], reverse=True)
+
+        print("\n=== Button press-rate (top 12) ===")
+        for k, r in pairs[:12]:
+            print(f"{k:16s} {r*100:6.2f}%")
+
+        # Heuristic warnings for obvious bitmask mismatch
+        for k, r in pairs:
+            if r > 0.95:
+                print(f"⚠️ WARNING: '{k}' is pressed {r*100:.1f}% of frames. Bitmask mapping may be wrong or stuck input.")
 
 if __name__ == "__main__":
     main()

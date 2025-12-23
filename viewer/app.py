@@ -1,3 +1,4 @@
+# viewer/app.py (python portion)
 import os
 import sys
 import json
@@ -9,7 +10,7 @@ from PIL import Image
 from flask import Flask, render_template, send_from_directory, jsonify
 from typing import Any, Optional
 
-# --- PATH HACK: Look 1 folder up for ng_policy ---
+# --- PATH HACK: Look 1 folder up for ng_policy + action_schema ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)  # ../
 sys.path.append(parent_dir)
@@ -24,6 +25,9 @@ except ImportError as e:
     NgNitroGenPolicy = None
     load_ng_checkpoint = None
 
+# --- IMPORT ACTION SCHEMA (single source of truth) ---
+from action_schema import BUTTON_TOKENS, GBA_UI_BUTTONS
+
 app = Flask(__name__)
 
 # --- CONFIG ---
@@ -32,53 +36,8 @@ CACHE_DIR = os.path.join(parent_dir, "data/dataset_cached")
 CHECKPOINT_PATH = os.path.join(parent_dir, "weights/ng.pt")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# -----------------------------------------------------------------------------
-# Canonical token order: the *only* button token order we use everywhere
-# -----------------------------------------------------------------------------
-try:
-    from nitrogen.shared import BUTTON_ACTION_TOKENS as BUTTON_TOKENS
-    BUTTON_TOKENS = list(BUTTON_TOKENS)
-except Exception:
-    print("⚠️ WARNING: Could not import nitrogen.shared.BUTTON_ACTION_TOKENS. ")
-    BUTTON_TOKENS = [
-        "BACK",
-        "DPAD_DOWN",
-        "DPAD_LEFT",
-        "DPAD_RIGHT",
-        "DPAD_UP",
-        "EAST",
-        "GUIDE",
-        "LEFT_SHOULDER",
-        "LEFT_THUMB",
-        "LEFT_TRIGGER",
-        "NORTH",
-        "RIGHT_BOTTOM",
-        "RIGHT_LEFT",
-        "RIGHT_RIGHT",
-        "RIGHT_SHOULDER",
-        "RIGHT_THUMB",
-        "RIGHT_TRIGGER",
-        "RIGHT_UP",
-        "SOUTH",
-        "START",
-        "WEST",
-    ]
-
-# -----------------------------------------------------------------------------
 # UI buttons: ONLY the GBA-relevant set we want to display
-# -----------------------------------------------------------------------------
-UI_BUTTONS = [
-    "DPAD_UP",
-    "DPAD_DOWN",
-    "DPAD_LEFT",
-    "DPAD_RIGHT",
-    "EAST",           # GBA A
-    "SOUTH",          # GBA B
-    "LEFT_SHOULDER",  # GBA L
-    "RIGHT_SHOULDER", # GBA R
-    "BACK",           # GBA SELECT
-    "START",
-]
+UI_BUTTONS = list(GBA_UI_BUTTONS)
 
 ACTION_OFFSET = int(os.getenv("ACTION_OFFSET", "0"))  # keep in sync with training
 
@@ -92,6 +51,7 @@ class ModelEngine:
         self.vision_horizon = 1
         self.action_offset = int(os.getenv("ACTION_OFFSET", "0"))
 
+        # Canonical order (must match training+precache)
         self.button_tokens = BUTTON_TOKENS[:]
 
         if NgNitroGenPolicy and load_ng_checkpoint and os.path.exists(CHECKPOINT_PATH):
@@ -123,15 +83,6 @@ class ModelEngine:
                 self.loaded = False
 
     def infer_seq(self, frames_tensor: torch.Tensor) -> Optional[list[list[float]]]:
-        """
-        frames_tensor:
-          - [V,3,H,W] or [3,H,W]
-          - values in [0,1] (recommended) OR [-1,1]
-        Returns:
-          - list length = action_horizon, each item is 25 floats:
-              [AXIS_LEFTX, AXIS_LEFTY, AXIS_RIGHTX, AXIS_RIGHTY, ...buttons...]
-            where buttons are in BUTTON_TOKENS order
-        """
         if not self.loaded:
             return None
 
@@ -143,15 +94,13 @@ class ModelEngine:
             raise ValueError(f"Expected [V,3,H,W], got {tuple(x.shape)}")
 
         x = x.to(dtype=torch.float32)
-
-        # Policy expects [B,V,3,H,W]
-        x = x.unsqueeze(0).to(DEVICE, non_blocking=True)
+        x = x.unsqueeze(0).to(DEVICE, non_blocking=True)  # [B,V,3,H,W]
 
         with torch.inference_mode():
             action_seq = self.policy(
                 x,
                 take_step=0,
-                return_continuous=True,  # returns raw continuous/logit-like values
+                return_continuous=True,
                 return_sequence=True,
             )
 
@@ -159,10 +108,6 @@ class ModelEngine:
 
 
 def _get_frame_window_uint8(frames_uint8: torch.Tensor, idx: int, V: int) -> torch.Tensor:
-    """
-    frames_uint8: [N, 3, H, W] uint8
-    Returns:      [V, 3, H, W] uint8 window ending at idx (inclusive), clamped.
-    """
     n = int(frames_uint8.shape[0])
     if n <= 0:
         raise ValueError("Empty frames tensor")
@@ -182,10 +127,6 @@ def _get_frame_window_uint8(frames_uint8: torch.Tensor, idx: int, V: int) -> tor
 
 
 def _vec25_to_gt_dict(v25: list[float]) -> dict[str, float]:
-    """
-    Ground-truth vectors are already in [0,1] for buttons (digitalized in precache).
-    Return flat dict for UI.
-    """
     d: dict[str, float] = {
         "AXIS_LEFTX": float(v25[0]),
         "AXIS_LEFTY": float(v25[1]),
@@ -199,7 +140,6 @@ def _vec25_to_gt_dict(v25: list[float]) -> dict[str, float]:
 
 
 def _sigmoid(x: float) -> float:
-    # stable sigmoid using math
     if x >= 0:
         z = math.exp(-x)
         return 1.0 / (1.0 + z)
@@ -209,13 +149,6 @@ def _sigmoid(x: float) -> float:
 
 
 def _vec25_to_pred_display(v25: list[float]) -> dict[str, Any]:
-    """
-    Model outputs are continuous/logit-ish when return_continuous=True.
-    We provide:
-      - axes: raw
-      - buttons_raw: raw logits
-      - buttons_prob: sigmoid(logit) in [0,1] for UI bars only
-    """
     out: dict[str, Any] = {
         "axes": {
             "AXIS_LEFTX": float(v25[0]),

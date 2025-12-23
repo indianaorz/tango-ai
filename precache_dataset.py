@@ -1,4 +1,6 @@
 # precache_dataset.py
+from __future__ import annotations
+
 import os
 import json
 import torch
@@ -8,45 +10,22 @@ from pathlib import Path
 from tqdm import tqdm
 from decord import VideoReader, cpu
 
+from action_schema import BUTTON_TOKENS, ACTION_DIM
+
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
 SOURCE_DIR = "data/dataset"
 TARGET_DIR = "data/dataset_cached"
 
-RESOLUTION = (256, 256)   # Target Model Input Size (W, H) usage below keeps consistency
-NATIVE_RES = (160, 240)   # GBA Native Size (H, W)
-
+RESOLUTION = (256, 256)   # (W,H)
+NATIVE_RES = (160, 240)   # (H,W) GBA native
 CHUNK_SIZE = 64
-
-# -----------------------------------------------------------------------------
-# IMPORTANT: Button order must match Nitrogen's token order used at inference time
-# -----------------------------------------------------------------------------
-try:
-    # This is the canonical order used by Nitrogen inference (TOKEN_SET = BUTTON_ACTION_TOKENS)
-    from nitrogen.shared import BUTTON_ACTION_TOKENS as BUTTON_TOKENS
-except Exception:
-    # Fallback: keeps script usable standalone, but you should prefer the import above.
-    # If you hit this fallback, you're at risk of order mismatches.
-    BUTTON_TOKENS = [
-        'BACK', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'DPAD_UP', 'EAST', 'GUIDE',
-        'LEFT_SHOULDER', 'LEFT_THUMB', 'LEFT_TRIGGER', 'NORTH', 'RIGHT_SHOULDER',
-        'RIGHT_THUMB', 'RIGHT_TRIGGER', 'SOUTH', 'START', 'WEST',
-        'RIGHT_BOTTOM', 'RIGHT_LEFT', 'RIGHT_RIGHT', 'RIGHT_UP'
-    ]
-    print("⚠️ WARNING: Could not import nitrogen.shared.BUTTON_ACTION_TOKENS. "
-          "Using fallback BUTTON_TOKENS list; verify ordering matches your model.")
 
 # -----------------------------------------------------------------------------
 # Helpers: robust scalar extraction + normalization
 # -----------------------------------------------------------------------------
 def _scalar(v, default: float = 0.0) -> float:
-    """
-    Pull a scalar float from values that might be:
-      - float/int
-      - list/tuple with one element (common in JSONL)
-      - numpy scalar/array
-    """
     if v is None:
         return float(default)
     if isinstance(v, (list, tuple)):
@@ -63,17 +42,9 @@ def _scalar(v, default: float = 0.0) -> float:
         return float(default)
 
 def _norm_axis(v: float) -> float:
-    """
-    Normalize axis values to [-1, 1].
-
-    Supports:
-      - already-normalized floats in [-1,1]
-      - Nitrogen debug/inference style int range [-32767, 32767]
-    """
     fv = float(v)
-    if abs(fv) > 1.5:  # heuristic: treat as int-range joystick
+    if abs(fv) > 1.5:
         fv = fv / 32767.0
-    # clamp for safety
     if fv > 1.0:
         fv = 1.0
     elif fv < -1.0:
@@ -81,17 +52,9 @@ def _norm_axis(v: float) -> float:
     return fv
 
 def _norm_trigger(v: float) -> float:
-    """
-    Normalize triggers to [0, 1].
-
-    Supports:
-      - already-normalized floats in [0,1]
-      - Nitrogen inference style 0..255
-    """
     fv = float(v)
-    if fv > 1.5:  # heuristic: treat as 0..255
+    if fv > 1.5:
         fv = fv / 255.0
-    # clamp
     if fv < 0.0:
         fv = 0.0
     elif fv > 1.0:
@@ -105,20 +68,13 @@ def _btn01(v: float) -> float:
 # Video frame normalization for GBA
 # -----------------------------------------------------------------------------
 def process_batch_gba(frames: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
-    """
-    1) Resizes video frames to native GBA (160x240) using nearest neighbor.
-    2) Centers the native image on a black canvas of target_h x target_w.
-    """
     B, C, H, W = frames.shape
     native_h, native_w = NATIVE_RES
 
-    # 1) Force Resize to Native GBA Resolution
     frames_native = F.interpolate(frames.float(), size=(native_h, native_w), mode="nearest")
 
-    # 2) Create Black Canvas
     canvas = torch.zeros((B, C, target_h, target_w), dtype=frames.dtype)
 
-    # 3) Paste Native Image in Center
     y_off = (target_h - native_h) // 2
     x_off = (target_w - native_w) // 2
 
@@ -127,6 +83,13 @@ def process_batch_gba(frames: torch.Tensor, target_h: int, target_w: int) -> tor
 
     canvas[:, :, y_off:y_off + paste_h, x_off:x_off + paste_w] = frames_native[:, :, :paste_h, :paste_w]
     return canvas
+
+def _validate_vec_len(vec: list[float]) -> None:
+    if len(vec) != ACTION_DIM:
+        raise ValueError(
+            f"Action vector length mismatch: got {len(vec)}, expected {ACTION_DIM} "
+            f"(4 axes + {len(BUTTON_TOKENS)} buttons). Check BUTTON_TOKENS order/source."
+        )
 
 # -----------------------------------------------------------------------------
 # Main
@@ -140,6 +103,7 @@ def main():
     print(f"📦 Found {len(replays)} replays")
     print(f"🚀 Processing: Input(Any) -> Native(240x160) -> Padded({RESOLUTION})")
     print(f"🎛️ Button token order (len={len(BUTTON_TOKENS)}): {BUTTON_TOKENS}")
+    print(f"🧱 Expected action dim: {ACTION_DIM}")
 
     total_frames = 0
 
@@ -159,7 +123,6 @@ def main():
                         continue
                     act = json.loads(line)
 
-                    # Axes first (match your existing layout: 4 floats)
                     ax_lx = _norm_axis(_scalar(act.get("AXIS_LEFTX", 0.0)))
                     ax_ly = _norm_axis(_scalar(act.get("AXIS_LEFTY", 0.0)))
                     ax_rx = _norm_axis(_scalar(act.get("AXIS_RIGHTX", 0.0)))
@@ -167,7 +130,6 @@ def main():
 
                     vec = [ax_lx, ax_ly, ax_rx, ax_ry]
 
-                    # Buttons next, in canonical Nitrogen order
                     for btn in BUTTON_TOKENS:
                         raw = _scalar(act.get(btn, 0.0))
                         if "TRIGGER" in btn:
@@ -175,6 +137,7 @@ def main():
                         else:
                             vec.append(_btn01(raw))
 
+                    _validate_vec_len(vec)
                     actions_list.append(vec)
 
             if not actions_list:
@@ -187,15 +150,14 @@ def main():
             real_len = len(vr)
             final_len = min(len(actions_list), real_len)
 
-            # frames tensor layout: [T, 3, H, W]
             frames_tensor = torch.empty((final_len, 3, RESOLUTION[1], RESOLUTION[0]), dtype=torch.uint8)
 
             indices = list(range(final_len))
             for i in range(0, final_len, CHUNK_SIZE):
                 batch_indices = indices[i:i + CHUNK_SIZE]
-                batch_frames = vr.get_batch(batch_indices).asnumpy()  # [B, H, W, 3]
+                batch_frames = vr.get_batch(batch_indices).asnumpy()  # [B,H,W,3]
 
-                batch_torch = torch.from_numpy(batch_frames).permute(0, 3, 1, 2)  # [B, 3, H, W]
+                batch_torch = torch.from_numpy(batch_frames).permute(0, 3, 1, 2)  # [B,3,H,W]
                 batch_padded = process_batch_gba(batch_torch, RESOLUTION[1], RESOLUTION[0])
 
                 frames_tensor[i:i + len(batch_indices)] = batch_padded.to(torch.uint8)

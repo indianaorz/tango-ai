@@ -821,6 +821,7 @@ def main() -> None:
             if not encoded_samples:
                 continue
 
+
             model_input = _collate_encoded(encoded_samples, device=device)
 
             if not did_probe:
