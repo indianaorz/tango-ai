@@ -367,41 +367,51 @@ class NgNitroGenPolicy(nn.Module):
     def _encode_with_tokenizer(self, frames: torch.Tensor) -> dict[str, Any]:
         if self.tokenizer is None:
             raise NgPolicyError("Tokenizer is not initialized.")
-        
-        B, T_in, C, H, W = frames.shape
-        encoded_list: list[dict[str, Any]] = []
+
+        if frames.ndim != 5:
+            raise NgPolicyError(f"frames must be [B,V,3,H,W], got {tuple(frames.shape)}")
+
+        B, V_in, C, H, W = frames.shape
+        if C != 3:
+            raise NgPolicyError(f"Expected RGB (C=3), got C={C}")
 
         frames_src = frames
         if self._tokenize_on_cpu and frames_src.is_cuda:
             frames_src = frames_src.detach().cpu()
         frames_src = frames_src.to(dtype=torch.float32, copy=False)
 
-        # Actions must match tokenizer.action_horizon; vision context often must be much smaller.
-        T_act = int(getattr(self.tokenizer, "action_horizon", T_in))
-        # Safe default: only last frame of vision context to avoid VL overflow
+        # Horizons from tokenizer
+        T_act = int(getattr(self.tokenizer, "action_horizon", 18))
         T_vis = int(getattr(self.tokenizer, "vision_horizon", 1))
         if T_vis <= 0:
             T_vis = 1
 
+        encoded_list: list[dict[str, Any]] = []
+
         for i in range(B):
-            # --- actions stream (B=1, T_act, ...) ---
+            vis = frames_src[i]  # [V_in,3,H,W]
+
+            # Select exactly last T_vis frames (pad by repeating first if short)
+            if V_in >= T_vis:
+                vis = vis[(V_in - T_vis):]
+            else:
+                pad = vis[:1].expand(T_vis - V_in, C, H, W)
+                vis = torch.cat([pad, vis], dim=0)
+
+            # Normalize to [-1,1] if it looks like [0,1]
+            if vis.numel() > 0:
+                mn = float(vis.min().item())
+                mx = float(vis.max().item())
+                if mn >= -1e-4 and mx <= 1.0 + 1e-4:
+                    vis = vis.mul(2.0).sub(1.0)
+
+            frames_btchw = vis.unsqueeze(0)  # [1, T_vis, 3, H, W]
+
+            # Dummy action placeholders (tokenizer requires correct shapes)
             j_left  = torch.zeros((1, T_act, 2), dtype=torch.float32)
             j_right = torch.zeros((1, T_act, 2), dtype=torch.float32)
             buttons = torch.zeros((1, T_act, 21), dtype=torch.float32)
-
-            # dropped_frames should match frames time length (vision), not action horizon
             dropped = torch.zeros((1, T_vis), dtype=torch.bool)
-
-            # --- vision stream: take only the last T_vis frames from the provided window ---
-            # frames_src[i] is [T_in, C, H, W]
-            if T_in >= T_vis:
-                vis = frames_src[i, (T_in - T_vis):]          # [T_vis, C, H, W]
-            else:
-                # pad by repeating first frame if we somehow got fewer than T_vis
-                pad = frames_src[i, :1].expand(T_vis - T_in, C, H, W)
-                vis = torch.cat([pad, frames_src[i]], dim=0)  # [T_vis, C, H, W]
-
-            frames_btchw = vis.unsqueeze(0)  # [1, T_vis, C, H, W]
 
             sample = {
                 "frames": frames_btchw,
@@ -411,11 +421,13 @@ class NgNitroGenPolicy(nn.Module):
                 "dropped_frames": dropped,
                 "game": "bn6",
             }
+
             enc = self.tokenizer.encode(sample)
             encoded_list.append(enc)
 
-            
         return self._collate_encoded(encoded_list, device=self.ng.device)
+
+
 
     @torch.inference_mode()
     def forward(
@@ -427,6 +439,7 @@ class NgNitroGenPolicy(nn.Module):
         return_continuous: bool = False,
         return_raw: bool = False,
         raw_max_items: int = 16,
+        return_sequence: bool = False,
     ) -> Any:
         
         try:
@@ -451,17 +464,18 @@ class NgNitroGenPolicy(nn.Module):
             else:
                 out = self.ng.get_action(data)
             
-            actions = out["action_tensor"]
-            action_vec = actions[:, take_step, :] 
+            actions = out["action_tensor"]  # [B,T,25]
 
-            primary: Any
-            if return_continuous or self.discrete is None:
-                primary = action_vec
+            # NEW: optionally return the full horizon
+            if return_sequence:
+                primary = actions if (return_continuous or self.discrete is None) else self.discrete(actions)
             else:
-                primary = self.discrete(action_vec)
+                action_vec = actions[:, take_step, :]  # [B,25]
+                primary = action_vec if (return_continuous or self.discrete is None) else self.discrete(action_vec)
 
             if not return_raw:
                 return primary
+
 
             raw_summary: dict[str, Any] = {
                 "take_step": int(take_step),

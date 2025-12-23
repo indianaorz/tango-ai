@@ -28,8 +28,8 @@ app = Flask(__name__)
 # Since app.py is in /viewer, we look up one level for data
 DATASET_DIR = os.path.join(parent_dir, "data/dataset")
 CACHE_DIR = os.path.join(parent_dir, "data/dataset_cached")
-# CHECKPOINT_PATH = os.path.join(parent_dir, "checkpoints/step_10000.pt")#os.path.join(parent_dir, "weights/ng.pt")
-CHECKPOINT_PATH = os.getenv("NG_CKPT_PATH", os.path.join(parent_dir, "weights", "ng.pt"))
+CHECKPOINT_PATH = os.path.join(parent_dir, "checkpoints/step_5000.pt")#os.path.join(parent_dir, "weights/ng.pt")
+# CHECKPOINT_PATH = os.getenv("NG_CKPT_PATH", os.path.join(parent_dir, "weights", "ng.pt"))
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 BUTTON_TOKENS = [
@@ -39,73 +39,120 @@ BUTTON_TOKENS = [
     'RIGHT_BOTTOM', 'RIGHT_LEFT', 'RIGHT_RIGHT', 'RIGHT_UP' 
 ]
 
-# --- MODEL SINGLETON ---
+# --- CONFIG ---
+ACTION_OFFSET = int(os.getenv("ACTION_OFFSET", "0"))  # keep in sync with training
+TAKE_STEP = int(os.getenv("NG_TAKE_STEP", "0"))       # 0 = action at t+offset (what you want for control)
 class ModelEngine:
     def __init__(self):
         self.policy = None
         self.loaded = False
 
         self.action_horizon = 18
-        if self.loaded and getattr(self.policy, "tokenizer", None) is not None:
-            ah = getattr(self.policy.tokenizer, "action_horizon", None)
-            if isinstance(ah, int) and ah > 0:
-                self.action_horizon = ah
+        self.vision_horizon = 1
+        self.action_offset = int(os.getenv("ACTION_OFFSET", "0"))
+
+        # Preferred: take button names from tokenizer if possible
+        self.button_tokens = BUTTON_TOKENS[:]  # fallback
+
         if NgNitroGenPolicy and os.path.exists(CHECKPOINT_PATH):
             try:
                 print(f"🧠 Loading model from {CHECKPOINT_PATH}...")
                 loaded = load_ng_checkpoint(CHECKPOINT_PATH, device=torch.device(DEVICE))
                 self.policy = NgNitroGenPolicy(loaded).to(DEVICE).eval()
                 self.loaded = True
-                print("✅ Model loaded successfully.")
+
+                # Introspect tokenizer horizons / button order if present
+                tok = getattr(self.policy, "tokenizer", None)
+                if tok is not None:
+                    ah = getattr(tok, "action_horizon", None)
+                    vh = getattr(tok, "vision_horizon", None)
+                    if isinstance(ah, int) and ah > 0:
+                        self.action_horizon = ah
+                    if isinstance(vh, int) and vh > 0:
+                        self.vision_horizon = vh
+
+                    # If tokenizer exposes button names/order, prefer that
+                    for attr in ("button_tokens", "buttons", "button_names"):
+                        bt = getattr(tok, attr, None)
+                        if isinstance(bt, (list, tuple)) and len(bt) == 21:
+                            self.button_tokens = list(bt)
+                            break
+
+                print(
+                    "✅ Model loaded.\n"
+                    f"  action_horizon={self.action_horizon}\n"
+                    f"  vision_horizon={self.vision_horizon}\n"
+                    f"  action_offset={self.action_offset}\n"
+                    f"  button_tokens_source={'tokenizer' if self.button_tokens != BUTTON_TOKENS else 'fallback'}"
+                )
+
             except Exception as e:
                 print(f"❌ Failed to load model: {e}")
+                self.loaded = False
 
-    def infer(self, frames_tensor: torch.Tensor):
+    def infer_seq(self, frames_tensor: torch.Tensor):
         """
         frames_tensor:
-          - [3,H,W] or [T,3,H,W] in [0,1] float
+          - [V,3,H,W] or [3,H,W]
+          - values in [0,1] (recommended) OR [-1,1] (also supported)
         Returns:
-          - action vector (25 floats) for the last step in the provided window
+          - list length = action_horizon, each item is 25 floats
         """
         if not self.loaded:
             return None
+
         try:
             x = frames_tensor
             if x.ndim == 3:
-                x = x.unsqueeze(0)  # [1,3,H,W] -> treat as T=1
+                x = x.unsqueeze(0)  # [1,3,H,W] -> V=1
 
             if x.ndim != 4 or x.shape[1] != 3:
-                raise ValueError(f"Expected [T,3,H,W], got {tuple(x.shape)}")
+                raise ValueError(f"Expected [V,3,H,W], got {tuple(x.shape)}")
 
-            x = x.float().to(DEVICE, non_blocking=True)
-            x = x.unsqueeze(0)  # [1,T,3,H,W] (batch=1)
+            x = x.to(dtype=torch.float32)
 
-            take_step = int(x.shape[1] - 1)  # action for last frame in window
+            # Policy expects [B,V,3,H,W]
+            x = x.unsqueeze(0).to(DEVICE, non_blocking=True)
 
             with torch.inference_mode():
-                action_vec = self.policy(x, take_step=take_step, return_continuous=True)
+                action_seq = self.policy(
+                    x,
+                    take_step=0,              # irrelevant when return_sequence=True
+                    return_continuous=True,
+                    return_sequence=True,
+                )
 
-            return action_vec.squeeze(0).detach().cpu().tolist()
+            # [1, T_act, 25]
+            return action_seq.squeeze(0).detach().cpu().tolist()
+
         except Exception as e:
-            print(f"Inference Error: {e}")
+            print(f"Inference Error (seq): {e}")
             return None
 
+    def infer(self, frames_tensor: torch.Tensor):
+        """
+        Convenience: return the "current" action aligned with training,
+        i.e. step 0 of the predicted plan.
+        """
+        seq = self.infer_seq(frames_tensor)
+        if not seq:
+            return None
+        return seq[0]
 
-
-def _get_frame_window_uint8(frames_uint8: torch.Tensor, idx: int, T: int) -> torch.Tensor:
+def _get_frame_window_uint8(frames_uint8: torch.Tensor, idx: int, V: int) -> torch.Tensor:
     """
     frames_uint8: [N, 3, H, W] uint8
-    Returns:      [T, 3, H, W] uint8 window ending at idx (inclusive), padded by clamping.
+    Returns:      [V, 3, H, W] uint8 window ending at idx (inclusive), clamped.
     """
     n = int(frames_uint8.shape[0])
     if n <= 0:
         raise ValueError("Empty frames tensor")
 
     idx = max(0, min(idx, n - 1))
-    start = idx - (T - 1)
+    start = idx - (V - 1)
 
     out = []
-    for t in range(T):
+    for t in range(V):
         src_i = start + t
         if src_i < 0:
             src_i = 0
@@ -113,6 +160,7 @@ def _get_frame_window_uint8(frames_uint8: torch.Tensor, idx: int, T: int) -> tor
             src_i = n - 1
         out.append(frames_uint8[src_i])
     return torch.stack(out, dim=0)
+
 
 
 
@@ -172,60 +220,86 @@ def cache_meta(filename):
         return jsonify({"count": data["frames"].shape[0]})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
+    
 @app.route('/api/cache_frame/<path:filename>/<int:idx>')
 def cache_frame(filename, idx):
     path = os.path.join(CACHE_DIR, filename)
+    if not os.path.exists(path):
+        return jsonify({"error": "File not found"}), 404
+
     try:
-        # Load File
-        try: data = torch.load(path, map_location='cpu', weights_only=True, mmap=True)
-        except TypeError: data = torch.load(path, map_location='cpu', weights_only=True)
+        try:
+            data = torch.load(path, map_location='cpu', weights_only=True, mmap=True)
+        except TypeError:
+            data = torch.load(path, map_location='cpu', weights_only=True)
 
-        # Single frame for display
+        # --- Display frame (PNG) ---
         frame_uint8 = data["frames"][idx]                 # [3,H,W] uint8
-        frame_float = frame_uint8.float() / 255.0         # [3,H,W] in [0,1]
+        frame_float01 = frame_uint8.float().div(255.0)    # [0,1]
 
-        # Sequence window for model (base model/tokenizer expects T == action_horizon)
-        T = getattr(engine, "action_horizon", 18)
-        seq_uint8 = _get_frame_window_uint8(data["frames"], idx, T)     # [T,3,H,W] uint8
-        seq_float = seq_uint8.float() / 255.0                           # [T,3,H,W] in [0,1]
-
-        
-        # Prepare PNG
-        img_np = (frame_float * 255).byte().permute(1, 2, 0).numpy()
+        img_np = (frame_float01 * 255).byte().permute(1, 2, 0).numpy()
         pil_img = Image.fromarray(img_np)
         buf = io.BytesIO()
         pil_img.save(buf, format='PNG')
         b64_img = base64.b64encode(buf.getvalue()).decode('utf-8')
 
-        # 2. Get Ground Truth Action
-        act_vec = data["actions"][idx].tolist()
-        
+        # --- Resolve mapping (prefer tokenizer’s button order if engine has it) ---
+        button_tokens = getattr(engine, "button_tokens", BUTTON_TOKENS)
+
         def vec_to_dict(v):
-            d = { "AXIS_LEFTX": v[0], "AXIS_LEFTY": v[1], "AXIS_RIGHTX": v[2], "AXIS_RIGHTY": v[3] }
-            for i, name in enumerate(BUTTON_TOKENS):
+            d = {"AXIS_LEFTX": v[0], "AXIS_LEFTY": v[1], "AXIS_RIGHTX": v[2], "AXIS_RIGHTY": v[3]}
+            for i, name in enumerate(button_tokens):
                 d[name] = v[4 + i]
             return d
 
-        truth_dict = vec_to_dict(act_vec)
+        def clamp_i(i: int) -> int:
+            n = int(data["actions"].shape[0])
+            return max(0, min(i, n - 1))
 
-        # 3. Run Inference (Optional)
+        ACTION_OFFSET = int(os.getenv("ACTION_OFFSET", "0"))
+
+        # --- Model input frames: V = vision_horizon, ending at idx ---
+        V = int(getattr(engine, "vision_horizon", 1))
+        seq_uint8 = _get_frame_window_uint8(data["frames"], idx, V)  # [V,3,H,W]
+        seq_float = seq_uint8.float().div(255.0)                     # [0,1]
+
+        # --- Ground truth: plan starting at idx + offset ---
+        T = int(getattr(engine, "action_horizon", 18))
+
+        gt0 = data["actions"][clamp_i(idx + ACTION_OFFSET)].tolist()
+        truth_dict = vec_to_dict(gt0)
+
+        gt_seq = []
+        for s in range(T):
+            v = data["actions"][clamp_i(idx + ACTION_OFFSET + s)].tolist()
+            gt_seq.append(vec_to_dict(v))
+
+        # --- Prediction: full plan; step 0 aligns with GT0 ---
+        pred_seq = None
         pred_dict = None
         if engine.loaded:
-            pred_vec = engine.infer(seq_float)  # pass [T,3,H,W]
-            if pred_vec:
-                pred_dict = vec_to_dict(pred_vec)
+            pred_vecs = engine.infer_seq(seq_float)  # list length T
+            if pred_vecs:
+                pred_seq = [vec_to_dict(v) for v in pred_vecs]
+                pred_dict = pred_seq[0]
 
         return jsonify({
             "image": "data:image/png;base64," + b64_img,
             "ground_truth": truth_dict,
+            "ground_truth_seq": gt_seq,
             "prediction": pred_dict,
-            "idx": idx
+            "prediction_seq": pred_seq,
+            "idx": idx,
+            "horizon": T,
+            "vision_horizon": V,
+            "action_offset": ACTION_OFFSET,
+            "button_tokens": button_tokens,
         })
 
     except Exception as e:
         print(e)
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == '__main__':
     print("🚀 Viewer running at http://127.0.0.1:5011")

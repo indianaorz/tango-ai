@@ -29,8 +29,11 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset, get_worker_info
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+from typing import Any, Dict, List, Optional
 
 from nitrogen.mm_tokenizers import NitrogenTokenizer
+from nitrogen.shared import BUTTON_ACTION_TOKENS as NG_BUTTON_TOKENS
+
 
 
 # -----------------------------------------------------------------------------
@@ -42,14 +45,14 @@ CONFIG: Dict[str, Any] = {
     "batch_size": int(os.getenv("BATCH_SIZE", "16")),
     "lr": float(os.getenv("LR", "1e-4")),
     "epochs": int(os.getenv("EPOCHS", "10")),
-    "save_every": int(os.getenv("SAVE_EVERY", "5000")),
+    "save_every": int(os.getenv("SAVE_EVERY", "1000")),
     "dataset_dir": os.getenv("DATASET_DIR", "data/dataset_cached"),
     "log_dir": os.getenv("LOG_DIR", "logs/tango_cached"),
     "checkpoints_dir": os.getenv("CKPT_DIR", "checkpoints"),
     "resume_path": os.getenv("RESUME_PATH", ""),  # optional
     "num_workers": int(os.getenv("NUM_WORKERS", "0")),
     "pin_memory": bool(int(os.getenv("PIN_MEMORY", "1"))),
-    "tune_vision_tower": bool(int(os.getenv("TUNE_VISION_TOWER", "0"))),  # False => freeze params by name
+    "tune_vision_tower": bool(int(os.getenv("TUNE_VISION_TOWER", "1"))),  # False => freeze params by name
     "max_keep_ckpts": int(os.getenv("MAX_KEEP_CKPTS", "3")),
     "seed": int(os.getenv("SEED", "0")),  # 0 => no fixed seed
 }
@@ -143,6 +146,39 @@ def _window_indices_end(idx: int, T: int, n: int) -> List[int]:
             j = n - 1
         out.append(j)
     return out
+
+def _compute_batch_activity_stats(
+    batch: Dict[str, Any],
+    *,
+    press_threshold: float,
+) -> Dict[str, float]:
+    """
+    DPAD/buttons-only stats.
+
+    active_frac:
+      - fraction of samples where ANY button is pressed at the first predicted step.
+
+    action_change:
+      - mean abs delta across time for buttons only (detects degenerate/clamped horizons).
+    """
+    with torch.no_grad():
+        b = batch["buttons"].float()  # [B,T,21]
+
+        btn0 = b[:, 0, :]  # [B,21]
+        active_frac = float((btn0 > press_threshold).any(dim=-1).float().mean().item())
+
+        if b.shape[1] > 1:
+            action_change = float((b[:, 1:, :] - b[:, :-1, :]).abs().mean().item())
+        else:
+            action_change = 0.0
+
+    return {"active_frac": active_frac, "action_change": action_change}
+
+def _update_ema(ema: Optional[float], x: float, alpha: float) -> float:
+    if ema is None:
+        return float(x)
+    return float((1.0 - alpha) * float(ema) + alpha * float(x))
+
 
 
 def _future_indices_start(idx: int, T: int, n: int) -> List[int]:
@@ -303,22 +339,20 @@ class CachedTangoDataset(Dataset):
     """
     Cached *.pt files:
       frames:  uint8 [N,3,H,W]
-      actions: float [N,25]
+      actions: float [N,25]  (4 axes + 21 buttons)
 
     Returns (per sample):
       frames:  float32 [-1,1] [V,3,H,W]   where V = vision_horizon
       j_left:  float32 [T,2]              where T = action_horizon (future plan)
       j_right: float32 [T,2]
-      buttons: float32 [T,21]
+      buttons: float32 [T,21]             (REORDERED to tokenizer order if mapping provided)
       dropped_frames: bool  [V]
       game: str
       __meta: dict (optional, used for logging only)
 
-    Balanced sampling:
-      - choose an anchor frame index t from active/idle pools
-      - build:
-          vision indices:  [t-(V-1) .. t]
-          action indices:  [t+ACTION_OFFSET .. t+ACTION_OFFSET+(T-1)]
+    Balanced sampling (DPAD/buttons-only):
+      - choose an anchor index from active/idle pools
+      - active = any button pressed at that frame (after reorder if available)
     """
 
     def __init__(
@@ -331,10 +365,14 @@ class CachedTangoDataset(Dataset):
         balance_sampling: bool,
         active_ratio: float,
         press_threshold: float,
-        axis_threshold: float,
+        axis_threshold: float,  # kept for config compatibility, not used for DPAD-only logic
         base_seed: int,
         include_meta: bool = True,
+        cached_button_tokens: Optional[List[str]] = None,
+        tokenizer_button_tokens: Optional[List[str]] = None,
+        debug_print_file_stats: bool = False,
     ):
+        # --- Core params ---
         self.root = Path(root_dir)
         self.files = sorted(self.root.glob("*.pt"))
         if not self.files:
@@ -352,13 +390,25 @@ class CachedTangoDataset(Dataset):
         self.balance_sampling = bool(balance_sampling)
         self.active_ratio = float(active_ratio)
         self.press_threshold = float(press_threshold)
-        self.axis_threshold = float(axis_threshold)
+        self.axis_threshold = float(axis_threshold)  # not used for DPAD-only active logic
 
         self.base_seed = int(base_seed) if base_seed > 0 else 0
         self._rng: Optional[np.random.Generator] = None
 
         self.include_meta = bool(include_meta)
+        self._debug_print_file_stats = bool(debug_print_file_stats)
 
+        # --- Button reorder mapping (cached -> tokenizer) ---
+        self.cached_button_tokens = list(cached_button_tokens) if cached_button_tokens is not None else None
+        self.tokenizer_button_tokens = list(tokenizer_button_tokens) if tokenizer_button_tokens is not None else None
+
+        if self.cached_button_tokens is not None and self.tokenizer_button_tokens is not None:
+            reindex = _build_button_reindex(self.cached_button_tokens, self.tokenizer_button_tokens)
+            self._btn_reindex: Optional[torch.Tensor] = torch.tensor(reindex, dtype=torch.long)
+        else:
+            self._btn_reindex = None
+
+        # --- Dataset indexing ---
         self.cumulative_sizes: List[int] = []
         self.file_lengths: List[int] = []
         total_frames = 0
@@ -379,7 +429,7 @@ class CachedTangoDataset(Dataset):
 
         print(f"✅ Indexed {len(self.files)} files, {total_frames:,} total frames.")
 
-        # per-file cache
+        # --- Per-file cache ---
         self.cache_idx: int = -1
         self.cache_data: Optional[Dict[str, Any]] = None
         self._active_idx: Optional[torch.Tensor] = None
@@ -401,6 +451,10 @@ class CachedTangoDataset(Dataset):
         self._rng = np.random.default_rng(seed)
 
     def _load_file(self, file_idx: int) -> None:
+        """
+        Loads one cached .pt file into memory-mapped CPU tensors, and (optionally)
+        computes active/idle anchor pools for balanced sampling.
+        """
         try:
             self.cache_data = torch.load(self.files[file_idx], weights_only=True, map_location="cpu", mmap=True)
         except TypeError:
@@ -411,19 +465,34 @@ class CachedTangoDataset(Dataset):
         self._idle_idx = None
         self._cache_active_frac = None
 
-        if not self.balance_sampling:
-            return
-
         assert self.cache_data is not None
         acts = self.cache_data["actions"].float()  # [N,25]
+
         if acts.ndim != 2 or acts.shape[1] < 25:
             raise RuntimeError(f"actions tensor expected [N,25], got {tuple(acts.shape)}")
 
-        buttons = acts[:, 4:] > self.press_threshold  # [N,21]
-        left_x = acts[:, 0]
-        left_y = acts[:, 1]
-        any_axis = (left_x.abs() > self.axis_threshold) | (left_y.abs() > self.axis_threshold)
-        active = buttons.any(dim=1) | any_axis
+        # Optional sanity print: catches axis weirdness immediately
+        if self._debug_print_file_stats:
+            st = _action_dim_stats(acts)
+            print(
+                f"[file_stats] {self.files[file_idx].name} "
+                f"ax_abs_max={st.get('ax_abs_max', -1.0):.3f} "
+                f"ax_abs_mean={st.get('ax_abs_mean', -1.0):.3f} "
+                f"btn_mean={st.get('btn_mean', -1.0):.3f} "
+                f"btn_range=[{st.get('btn_min', -1.0):.3f},{st.get('btn_max', -1.0):.3f}]"
+            )
+
+        if not self.balance_sampling:
+            return
+
+        # DPAD-only / buttons-only "active"
+        buttons_src = acts[:, 4:]  # [N,21] in cached order
+        if self._btn_reindex is not None:
+            buttons = buttons_src[:, self._btn_reindex]  # [N,21] in tokenizer order
+        else:
+            buttons = buttons_src
+
+        active = (buttons > self.press_threshold).any(dim=1)
 
         self._active_idx = torch.where(active)[0]
         self._idle_idx = torch.where(~active)[0]
@@ -456,9 +525,8 @@ class CachedTangoDataset(Dataset):
         j = int(self._rng.integers(0, int(pool.numel())))
         anchor = int(pool[j].item())
 
-        # Clamp anchor so that we can still take an action-horizon window starting at anchor+offset
-        # (we'll clamp indices anyway, but this reduces "always clamped to last frame" at file ends)
-        max_anchor = max(0, n - 1 - max(0, self.action_offset) )
+        # Prefer anchors that don't always clamp the action horizon at the file end
+        max_anchor = max(0, n - 1 - max(0, self.action_offset))
         anchor = max(0, min(anchor, max_anchor))
         return anchor
 
@@ -495,17 +563,25 @@ class CachedTangoDataset(Dataset):
         ids_act = _future_indices_start(start_act, T, n)
 
         act_win = actions_all[ids_act].float()  # [T,25]
-        j_left = act_win[:, 0:2]
-        j_right = act_win[:, 2:4]
-        buttons = act_win[:, 4:]
 
-        # Frames: [V,3,H,W] -> normalize to [-1,1]
+        # Axes: kept for tokenizer shape fidelity (likely ~0 for GBA)
+        j_left = act_win[:, 0:2]     # [T,2]
+        j_right = act_win[:, 2:4]    # [T,2]
+
+        # Buttons: reorder into tokenizer order if mapping provided
+        buttons_src = act_win[:, 4:]  # [T,21] cached order
+        if self._btn_reindex is not None:
+            buttons = buttons_src[:, self._btn_reindex]  # [T,21] tokenizer order
+        else:
+            buttons = buttons_src
+
+        # Frames: normalize to [-1,1]
         frames_u8 = frames_all[ids_vis]  # [V,3,H,W] uint8
         frames = frames_u8.float().div(255.0).mul(2.0).sub(1.0)
 
         out: Dict[str, Any] = {
-            "frames": frames,  # [V,3,H,W]
-            "j_left": j_left,  # [T,2]
+            "frames": frames,
+            "j_left": j_left,
             "j_right": j_right,
             "buttons": buttons,
             "dropped_frames": torch.zeros(V, dtype=torch.bool),
@@ -522,10 +598,10 @@ class CachedTangoDataset(Dataset):
                 "ids_act": ids_act,
                 "action_offset": int(self.action_offset),
                 "file_active_frac": float(self._cache_active_frac or 0.0),
+                "has_btn_reindex": bool(self._btn_reindex is not None),
             }
 
         return out
-
 
 # -----------------------------------------------------------------------------
 # Collation: tokenize per-sample, then collate encoded dict.
@@ -598,6 +674,59 @@ def _log_tokenizer(tokenizer: Any) -> Tuple[int, int]:
     return ah, vh
 
 
+
+def _infer_tokenizer_button_tokens(tokenizer: Any) -> Optional[List[str]]:
+    """
+    Try common attribute names; return None if we can't find a 21-list of strings.
+    """
+    for attr in ("button_tokens", "buttons", "button_names", "buttons_order"):
+        bt = getattr(tokenizer, attr, None)
+        if isinstance(bt, (list, tuple)) and len(bt) == 21 and all(isinstance(x, str) for x in bt):
+            return list(bt)
+    return None
+
+
+def _build_button_reindex(src_tokens: List[str], dst_tokens: List[str]) -> List[int]:
+    """
+    Returns indices so that:
+      buttons_dst[:, j] = buttons_src[:, reindex[j]]
+
+    src_tokens = cached order
+    dst_tokens = tokenizer/model expected order
+    """
+    src_map = {name: i for i, name in enumerate(src_tokens)}
+    missing = [name for name in dst_tokens if name not in src_map]
+    if missing:
+        raise RuntimeError(
+            "Tokenizer button order contains names not in cached BUTTON_TOKENS.\n"
+            f"missing={missing}\n"
+            f"src_tokens={src_tokens}\n"
+            f"dst_tokens={dst_tokens}"
+        )
+    return [src_map[name] for name in dst_tokens]
+
+
+def _action_dim_stats(actions_all: torch.Tensor) -> Dict[str, float]:
+    """
+    Quick sanity stats to catch:
+      - axes not near zero (unexpected for GBA DPAD-only)
+      - button values not in {0,1}
+    actions_all: [N,25]
+    """
+    a = actions_all.detach().float()
+    if a.ndim != 2 or a.shape[1] < 25:
+        return {"N": float(a.shape[0]) if a.ndim >= 1 else 0.0}
+
+    return {
+        "N": float(a.shape[0]),
+        "ax_abs_mean": float(a[:, 0:4].abs().mean().item()),
+        "ax_abs_max": float(a[:, 0:4].abs().max().item()),
+        "btn_mean": float(a[:, 4:].mean().item()),
+        "btn_max": float(a[:, 4:].max().item()),
+        "btn_min": float(a[:, 4:].min().item()),
+    }
+
+
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
@@ -647,6 +776,25 @@ def main() -> None:
 
     writer = SummaryWriter(CONFIG["log_dir"])
 
+    # Your cached order (from precache_dataset.py)
+    CACHED_BUTTON_TOKENS = [
+        'BACK', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'DPAD_UP', 'EAST', 'GUIDE',
+        'LEFT_SHOULDER', 'LEFT_THUMB', 'LEFT_TRIGGER', 'NORTH', 'RIGHT_SHOULDER',
+        'RIGHT_THUMB', 'RIGHT_TRIGGER', 'SOUTH', 'START', 'WEST',
+        'RIGHT_BOTTOM', 'RIGHT_LEFT', 'RIGHT_RIGHT', 'RIGHT_UP'
+    ]
+
+    # NitroGen canonical expected order (used by play.py via TOKEN_SET)
+    tok_bt = list(NG_BUTTON_TOKENS)
+
+    if len(tok_bt) != 21 or not all(isinstance(x, str) for x in tok_bt):
+        raise RuntimeError(f"Unexpected NG_BUTTON_TOKENS shape/type: len={len(tok_bt)} type0={type(tok_bt[0]) if tok_bt else None}")
+
+    print("✅ Using NitroGen BUTTON_ACTION_TOKENS as the canonical button order.")
+    print("   (This matches scripts/play.py TOKEN_SET and the button_vector -> env action mapping.)")
+    print("   Token order:", tok_bt)
+
+
     dataset = CachedTangoDataset(
         CONFIG["dataset_dir"],
         action_horizon=action_horizon,
@@ -658,7 +806,14 @@ def main() -> None:
         axis_threshold=AXIS_THRESHOLD,
         base_seed=CONFIG["seed"],
         include_meta=True,
+        cached_button_tokens=CACHED_BUTTON_TOKENS,  # how your cached .pt stores buttons
+        tokenizer_button_tokens=tok_bt,             # NitroGen expected order (BUTTON_ACTION_TOKENS)
+        debug_print_file_stats=False,
     )
+
+    print("✅ Cached -> NitroGen reindex:", _build_button_reindex(CACHED_BUTTON_TOKENS, tok_bt))
+
+
 
     loader = DataLoader(
         dataset,
@@ -701,30 +856,13 @@ def main() -> None:
 
             # Activity fraction (based on first action step in the future plan)
             with torch.no_grad():
-                btn0 = batch["buttons"][:, 0, :]  # [B,21]
-                jl0 = batch["j_left"][:, 0, :]    # [B,2]
-                any_btn = (btn0 > PRESS_THRESHOLD).any(dim=-1)
-                any_axis = (jl0.abs() > AXIS_THRESHOLD).any(dim=-1)
-                active_frac = float((any_btn | any_axis).float().mean().item())
+                stats = _compute_batch_activity_stats(batch, press_threshold=PRESS_THRESHOLD)
+                active_frac = stats["active_frac"]
+                action_change = stats["action_change"]
 
-                # "Is the horizon actually varying?" (mean abs delta between consecutive action steps)
-                # This catches accidental repeats / clamping-to-end / degenerate windows.
-                # Use buttons + left stick only (cheap and informative).
-                b = batch["buttons"].float()       # [B,T,21]
-                jl = batch["j_left"].float()       # [B,T,2]
-                seq = torch.cat([jl, b], dim=-1)   # [B,T,23]
-                if seq.shape[1] > 1:
-                    d = (seq[:, 1:, :] - seq[:, :-1, :]).abs().mean()
-                    action_change = float(d.item())
-                else:
-                    action_change = 0.0
+                ema_active = _update_ema(ema_active, active_frac, ema_alpha)
+                ema_action_change = _update_ema(ema_action_change, action_change, ema_alpha)
 
-                if ema_active is None:
-                    ema_active = active_frac
-                    ema_action_change = action_change
-                else:
-                    ema_active = (1.0 - ema_alpha) * float(ema_active) + ema_alpha * active_frac
-                    ema_action_change = (1.0 - ema_alpha) * float(ema_action_change) + ema_alpha * action_change
 
             encoded_samples: List[Dict[str, Any]] = []
 
@@ -762,6 +900,30 @@ def main() -> None:
                 continue
 
             model_input = _collate_encoded(encoded_samples, device=device)
+
+            if not did_probe:
+                print("=== MODEL_INPUT KEYS / SHAPES ===")
+                for k in sorted(model_input.keys()):
+                    v = model_input[k]
+                    if torch.is_tensor(v):
+                        print(f"{k:24s} {tuple(v.shape)} {v.dtype} {v.device}")
+                    else:
+                        print(f"{k:24s} {type(v)}")
+                print("===============================")
+
+                a = model_input.get("actions", None)
+                if torch.is_tensor(a):
+                    print("actions[0,0,:10] =", a[0,0,:10].detach().float().cpu().tolist())
+                    print("actions[0,1,:10] =", a[0,1,:10].detach().float().cpu().tolist())
+
+                    # ---- ADD THIS BLOCK RIGHT HERE ----
+                    btn = a[0, :, 4:]  # [18,21] buttons portion of action vector
+                    print("btn any-pressed per step:",
+                        (btn > 0.5).any(dim=-1).int().cpu().tolist())
+                    print("btn mean:", float(btn.mean().item()),
+                        "max:", float(btn.max().item()))
+
+            
 
             if "actions" in model_input and not torch.is_tensor(model_input["actions"]):
                 raise RuntimeError(f"model_input['actions'] is not a tensor, got {type(model_input['actions'])}")

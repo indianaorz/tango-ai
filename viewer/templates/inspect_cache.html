@@ -1,63 +1,327 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <title>Inspector: {{ filename }}</title>
     <style>
-        body { background: #111; color: #fff; font-family: 'Consolas', monospace; display: flex; flex-direction: column; align-items: center; margin: 0; padding: 20px; }
-        h2 { margin-bottom: 5px; color: #ccc; }
-        a { color: #888; text-decoration: none; align-self: flex-start; margin-bottom: 20px; font-size: 14px; }
-        a:hover { color: #fff; text-decoration: underline; }
-        
-        .main-stage { display: flex; gap: 40px; margin-top: 20px; align-items: flex-start; }
-        
+        body {
+            background: #111;
+            color: #fff;
+            font-family: 'Consolas', monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+        }
+
+        h2 {
+            margin-bottom: 5px;
+            color: #ccc;
+        }
+
+        a {
+            color: #888;
+            text-decoration: none;
+            align-self: flex-start;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        a:hover {
+            color: #fff;
+            text-decoration: underline;
+        }
+
+        .main-stage {
+            display: flex;
+            gap: 40px;
+            margin-top: 20px;
+            align-items: flex-start;
+        }
+
         /* IMAGE DISPLAY */
-        .viewport { display: flex; flex-direction: column; align-items: center; gap: 10px; }
-        img.frame-view { width: 512px; height: 512px; image-rendering: pixelated; border: 2px solid #444; background: #000; box-shadow: 0 0 20px rgba(0,0,0,0.5); }
-        
+        .viewport {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+        }
+
+        img.frame-view {
+            width: 512px;
+            height: 512px;
+            image-rendering: pixelated;
+            border: 2px solid #444;
+            background: #000;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+        }
+
         /* CONTROLLERS */
-        .controls-area { display: flex; flex-direction: column; gap: 20px; }
-        .controller-box { text-align: center; }
-        .controller-label { color: #888; font-size: 12px; margin-bottom: 5px; letter-spacing: 1px; text-transform: uppercase; }
-        
+        .controls-area {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .controller-box {
+            text-align: center;
+        }
+
+        .controller-label {
+            color: #888;
+            font-size: 12px;
+            margin-bottom: 5px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
         /* REUSED CONTROLLER CSS */
-        .controller { background: #e0e0e0; width: 240px; height: 140px; border-radius: 15px 15px 30px 30px; position: relative; border: 2px solid #999; margin: 0 auto; transform: scale(0.9); }
-        .btn { position: absolute; background: #555; border: 1px solid #333; transition: background 0.05s, transform 0.05s; }
-        
+        .controller {
+            background: #e0e0e0;
+            width: 240px;
+            height: 140px;
+            border-radius: 15px 15px 30px 30px;
+            position: relative;
+            border: 2px solid #999;
+            margin: 0 auto;
+            transform: scale(0.9);
+        }
+
+        .btn {
+            position: absolute;
+            background: #555;
+            border: 1px solid #333;
+            transition: background 0.05s, transform 0.05s;
+        }
+
         /* Active States */
-        .btn.active { background: #00ff00 !important; box-shadow: 0 0 10px #00ff00; }
-        .btn.pred-active { background: #ff00ff !important; box-shadow: 0 0 10px #ff00ff; border-color: #cc00cc; } /* Model Color */
+        .btn.active {
+            background: #00ff00 !important;
+            box-shadow: 0 0 10px #00ff00;
+        }
+
+        .btn.pred-active {
+            background: #ff00ff !important;
+            box-shadow: 0 0 10px #ff00ff;
+            border-color: #cc00cc;
+        }
+
+        /* Model Color */
 
         /* Button Layout (Compact) */
-        .dpad { position: absolute; top: 45px; left: 20px; width: 70px; height: 70px; }
-        .btn.up { top: 0; left: 23px; width: 24px; height: 24px; }
-        .btn.down { bottom: 0; left: 23px; width: 24px; height: 24px; }
-        .btn.left { top: 23px; left: 0; width: 24px; height: 24px; }
-        .btn.right { top: 23px; right: 0; width: 24px; height: 24px; }
-        
-        .btn.a { top: 55px; right: 15px; width: 28px; height: 28px; border-radius: 50%; background: #a00; color:rgba(255,255,255,0.5); font-size:10px; display:flex; justify-content:center; align-items:center; }
-        .btn.b { top: 70px; right: 50px; width: 28px; height: 28px; border-radius: 50%; background: #a00; color:rgba(255,255,255,0.5); font-size:10px; display:flex; justify-content:center; align-items:center; }
-        
-        .btn.l { top: -8px; left: 10px; width: 60px; height: 15px; border-radius: 5px 5px 0 0; background: #ccc; z-index: -1; }
-        .btn.r { top: -8px; right: 10px; width: 60px; height: 15px; border-radius: 5px 5px 0 0; background: #ccc; z-index: -1; }
-        .btn.start { bottom: 15px; left: 100px; width: 25px; height: 8px; transform: rotate(-25deg); background: #999; }
-        .btn.select { bottom: 15px; left: 70px; width: 25px; height: 8px; transform: rotate(-25deg); background: #999; }
+        .dpad {
+            position: absolute;
+            top: 45px;
+            left: 20px;
+            width: 70px;
+            height: 70px;
+        }
+
+        .btn.up {
+            top: 0;
+            left: 23px;
+            width: 24px;
+            height: 24px;
+        }
+
+        .btn.down {
+            bottom: 0;
+            left: 23px;
+            width: 24px;
+            height: 24px;
+        }
+
+        .btn.left {
+            top: 23px;
+            left: 0;
+            width: 24px;
+            height: 24px;
+        }
+
+        .btn.right {
+            top: 23px;
+            right: 0;
+            width: 24px;
+            height: 24px;
+        }
+
+        .btn.a {
+            top: 55px;
+            right: 15px;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: #a00;
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 10px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .btn.b {
+            top: 70px;
+            right: 50px;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: #a00;
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 10px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .btn.l {
+            top: -8px;
+            left: 10px;
+            width: 60px;
+            height: 15px;
+            border-radius: 5px 5px 0 0;
+            background: #ccc;
+            z-index: -1;
+        }
+
+        .btn.r {
+            top: -8px;
+            right: 10px;
+            width: 60px;
+            height: 15px;
+            border-radius: 5px 5px 0 0;
+            background: #ccc;
+            z-index: -1;
+        }
+
+        .btn.start {
+            bottom: 15px;
+            left: 100px;
+            width: 25px;
+            height: 8px;
+            transform: rotate(-25deg);
+            background: #999;
+        }
+
+        .btn.select {
+            bottom: 15px;
+            left: 70px;
+            width: 25px;
+            height: 8px;
+            transform: rotate(-25deg);
+            background: #999;
+        }
 
         /* SLIDER */
-        .scrubber { width: 512px; display: flex; gap: 10px; align-items: center; margin-top: 10px; }
-        input[type=range] { flex-grow: 1; accent-color: #4db8ff; cursor: pointer; }
-        .idx-display { font-size: 14px; width: 80px; text-align: right; font-family: monospace; color: #4db8ff; }
+        .scrubber {
+            width: 512px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-top: 10px;
+        }
+
+        input[type=range] {
+            flex-grow: 1;
+            accent-color: #4db8ff;
+            cursor: pointer;
+        }
+
+        .idx-display {
+            font-size: 14px;
+            width: 80px;
+            text-align: right;
+            font-family: monospace;
+            color: #4db8ff;
+        }
 
         /* Prob Bars */
-        .bar-container { width: 240px; margin-top: 5px; }
-        .bar-row { display: flex; justify-content: space-between; font-size: 10px; color: #aaa; margin-bottom: 2px; }
-        .bar-bg { width: 100%; height: 4px; background: #333; border-radius: 2px; overflow: hidden; }
-        .bar-fill { height: 100%; background: #ff00ff; width: 0%; transition: width 0.1s; }
+        .bar-container {
+            width: 240px;
+            margin-top: 5px;
+        }
+
+        .bar-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 10px;
+            color: #aaa;
+            margin-bottom: 2px;
+        }
+
+        .bar-bg {
+            width: 100%;
+            height: 4px;
+            background: #333;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .bar-fill {
+            height: 100%;
+            background: #ff00ff;
+            width: 0%;
+            transition: width 0.1s;
+        }
+
+        .timeline-wrap {
+            width: 240px;
+        }
+
+        .timeline-title {
+            font-size: 10px;
+            color: #888;
+            margin: 8px 0 4px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .timeline {
+            display: grid;
+            grid-template-columns: 60px repeat(18, 1fr);
+            gap: 2px;
+            align-items: center;
+            user-select: none;
+        }
+
+        .lane-label {
+            font-size: 10px;
+            color: #aaa;
+            text-align: right;
+            padding-right: 6px;
+        }
+
+        .cell {
+            width: 10px;
+            height: 10px;
+            background: #222;
+            border: 1px solid #333;
+            border-radius: 2px;
+        }
+
+        .cell.gt {
+            background: #00ff00;
+            box-shadow: 0 0 6px rgba(0, 255, 0, 0.35);
+            border-color: #00cc00;
+        }
+
+        .cell.pr {
+            background: #ff00ff;
+            box-shadow: 0 0 6px rgba(255, 0, 255, 0.35);
+            border-color: #cc00cc;
+        }
+
+        .cell.both {
+            background: linear-gradient(135deg, #00ff00 0%, #00ff00 48%, #ff00ff 52%, #ff00ff 100%);
+            border-color: #888;
+        }
     </style>
 </head>
+
 <body>
     <a href="/">&larr; Back to List</a>
     <h2>{{ filename }}</h2>
-    
+
     <div class="main-stage">
         <div class="viewport">
             <img id="frame-img" class="frame-view" src="">
@@ -73,31 +337,47 @@
             <div class="controller-box">
                 <div class="controller-label">Ground Truth (Human)</div>
                 <div class="controller" id="ctrl-truth">
-                    <div class="btn l" id="gt-LEFT_SHOULDER"></div><div class="btn r" id="gt-RIGHT_SHOULDER"></div>
+                    <div class="btn l" id="gt-LEFT_SHOULDER"></div>
+                    <div class="btn r" id="gt-RIGHT_SHOULDER"></div>
                     <div class="dpad">
-                        <div class="btn up" id="gt-DPAD_UP"></div><div class="btn down" id="gt-DPAD_DOWN"></div>
-                        <div class="btn left" id="gt-DPAD_LEFT"></div><div class="btn right" id="gt-DPAD_RIGHT"></div>
+                        <div class="btn up" id="gt-DPAD_UP"></div>
+                        <div class="btn down" id="gt-DPAD_DOWN"></div>
+                        <div class="btn left" id="gt-DPAD_LEFT"></div>
+                        <div class="btn right" id="gt-DPAD_RIGHT"></div>
                     </div>
-                    <div class="btn b" id="gt-EAST">B</div><div class="btn a" id="gt-SOUTH">A</div>
-                    <div class="btn select" id="gt-BACK"></div><div class="btn start" id="gt-START"></div>
+                    <div class="btn b" id="gt-EAST">B</div>
+                    <div class="btn a" id="gt-SOUTH">A</div>
+                    <div class="btn select" id="gt-BACK"></div>
+                    <div class="btn start" id="gt-START"></div>
                 </div>
-                <div style="height:20px; font-size:10px; color:#666; margin-top:5px;">Axis: <span id="gt-axis">0.0, 0.0</span></div>
+                <div style="height:20px; font-size:10px; color:#666; margin-top:5px;">Axis: <span id="gt-axis">0.0,
+                        0.0</span></div>
             </div>
 
             <div class="controller-box">
                 <div class="controller-label" style="color:#ff00ff">Model Prediction</div>
                 <div class="controller" id="ctrl-pred">
-                    <div class="btn l" id="pr-LEFT_SHOULDER"></div><div class="btn r" id="pr-RIGHT_SHOULDER"></div>
+                    <div class="btn l" id="pr-LEFT_SHOULDER"></div>
+                    <div class="btn r" id="pr-RIGHT_SHOULDER"></div>
                     <div class="dpad">
-                        <div class="btn up" id="pr-DPAD_UP"></div><div class="btn down" id="pr-DPAD_DOWN"></div>
-                        <div class="btn left" id="pr-DPAD_LEFT"></div><div class="btn right" id="pr-DPAD_RIGHT"></div>
+                        <div class="btn up" id="pr-DPAD_UP"></div>
+                        <div class="btn down" id="pr-DPAD_DOWN"></div>
+                        <div class="btn left" id="pr-DPAD_LEFT"></div>
+                        <div class="btn right" id="pr-DPAD_RIGHT"></div>
                     </div>
-                    <div class="btn b" id="pr-EAST">B</div><div class="btn a" id="pr-SOUTH">A</div>
-                    <div class="btn select" id="pr-BACK"></div><div class="btn start" id="pr-START"></div>
+                    <div class="btn b" id="pr-EAST">B</div>
+                    <div class="btn a" id="pr-SOUTH">A</div>
+                    <div class="btn select" id="pr-BACK"></div>
+                    <div class="btn start" id="pr-START"></div>
                 </div>
-                
+
                 <div class="bar-container" id="conf-bars">
-                    </div>
+                </div>
+                <div class="timeline-wrap">
+                    <div class="timeline-title">Next 18 (GT vs Plan)</div>
+                    <div id="timeline"></div>
+                </div>
+
             </div>
         </div>
     </div>
@@ -105,9 +385,9 @@
     <script>
         const filename = "{{ filename }}";
         let totalFrames = 0;
-        
+
         // Load Meta
-        fetch(`/api/cache_meta/${filename}`).then(r=>r.json()).then(d => {
+        fetch(`/api/cache_meta/${filename}`).then(r => r.json()).then(d => {
             totalFrames = d.count;
             document.getElementById('slider').max = totalFrames - 1;
             document.getElementById('idx-disp').innerText = `0 / ${totalFrames}`;
@@ -122,7 +402,7 @@
         function step(dir) {
             let el = document.getElementById('slider');
             let val = parseInt(el.value) + dir;
-            if(val >= 0 && val < totalFrames) {
+            if (val >= 0 && val < totalFrames) {
                 el.value = val;
                 seek(val);
             }
@@ -131,34 +411,34 @@
         async function loadFrame(idx) {
             const res = await fetch(`/api/cache_frame/${filename}/${idx}`);
             const data = await res.json();
-            
-            if(data.error) return;
+
+            if (data.error) return;
 
             // 1. Image
             document.getElementById('frame-img').src = data.image;
 
             // 2. Ground Truth
             updateController('gt', data.ground_truth, 'active');
-            document.getElementById('gt-axis').innerText = 
+            document.getElementById('gt-axis').innerText =
                 `${data.ground_truth.AXIS_LEFTX.toFixed(2)}, ${data.ground_truth.AXIS_LEFTY.toFixed(2)}`;
 
             // 3. Prediction
-            if(data.prediction) {
+            if (data.prediction) {
                 updateController('pr', data.prediction, 'pred-active');
                 updateBars(data.prediction);
             }
         }
 
         function updateController(prefix, actions, activeClass) {
-            const btns = ['DPAD_UP','DPAD_DOWN','DPAD_LEFT','DPAD_RIGHT','SOUTH','EAST','START','BACK','LEFT_SHOULDER','RIGHT_SHOULDER'];
-            
+            const btns = ['DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'SOUTH', 'EAST', 'START', 'BACK', 'LEFT_SHOULDER', 'RIGHT_SHOULDER'];
+
             btns.forEach(k => {
                 const el = document.getElementById(`${prefix}-${k}`);
-                if(!el) return;
-                
+                if (!el) return;
+
                 el.classList.remove(activeClass);
                 // Threshold 0.4 match game logic
-                if(actions[k] > 0.4) el.classList.add(activeClass);
+                if (actions[k] > 0.4) el.classList.add(activeClass);
             });
         }
 
@@ -166,13 +446,13 @@
             const keys = ['SOUTH', 'EAST', 'DPAD_DOWN', 'DPAD_UP', 'DPAD_LEFT', 'DPAD_RIGHT'];
             const container = document.getElementById('conf-bars');
             container.innerHTML = '';
-            
+
             keys.forEach(k => {
                 const val = actions[k] || 0;
                 const pct = Math.max(0, Math.min(100, val * 100));
                 // Highlight strong preds
                 const color = val > 0.4 ? '#ff00ff' : '#555';
-                
+
                 const html = `
                     <div class="bar-row">
                         <span>${k.replace('DPAD_', '')}</span>
@@ -183,6 +463,69 @@
                 container.innerHTML += html;
             });
         }
+        const TIMELINE_KEYS = ['SOUTH', 'EAST', 'DPAD_DOWN', 'DPAD_UP', 'DPAD_LEFT', 'DPAD_RIGHT', 'LEFT_SHOULDER', 'RIGHT_SHOULDER', 'BACK', 'START'];
+
+        function valOf(a, k) {
+            const v = a?.[k];
+            return (typeof v === 'number') ? v : 0;
+        }
+
+        function renderTimeline(gtSeq, prSeq, horizon) {
+            const T = horizon || 18;
+            const el = document.getElementById('timeline');
+            if (!el) return;
+
+            el.innerHTML = '';
+
+            const grid = document.createElement('div');
+            grid.className = 'timeline';
+            grid.style.gridTemplateColumns = `60px repeat(${T}, 1fr)`;
+
+            for (const key of TIMELINE_KEYS) {
+                // label
+                const lbl = document.createElement('div');
+                lbl.className = 'lane-label';
+                lbl.textContent = key.replace('DPAD_', '');
+                grid.appendChild(lbl);
+
+                for (let t = 0; t < T; t++) {
+                    const gt = gtSeq?.[t] ? (valOf(gtSeq[t], key) > 0.4) : false;
+                    const pr = prSeq?.[t] ? (valOf(prSeq[t], key) > 0.4) : false;
+
+                    const c = document.createElement('div');
+                    c.className = 'cell';
+                    if (gt && pr) c.classList.add('both');
+                    else if (gt) c.classList.add('gt');
+                    else if (pr) c.classList.add('pr');
+
+                    grid.appendChild(c);
+                }
+            }
+
+            el.appendChild(grid);
+        }
+
+        async function loadFrame(idx) {
+            const res = await fetch(`/api/cache_frame/${filename}/${idx}`);
+            const data = await res.json();
+            if (data.error) return;
+
+            document.getElementById('frame-img').src = data.image;
+
+            updateController('gt', data.ground_truth, 'active');
+            document.getElementById('gt-axis').innerText =
+                `${data.ground_truth.AXIS_LEFTX.toFixed(2)}, ${data.ground_truth.AXIS_LEFTY.toFixed(2)}`;
+
+            if (data.prediction) {
+                updateController('pr', data.prediction, 'pred-active');
+                updateBars(data.prediction);
+            }
+
+            // NEW: timeline
+            renderTimeline(data.ground_truth_seq, data.prediction_seq, data.horizon);
+        }
+
     </script>
 </body>
+
 </html>
