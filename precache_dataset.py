@@ -1,14 +1,16 @@
+# precache_dataset.py
 from __future__ import annotations
 
 import json
-import torch
-import numpy as np
-import torch.nn.functional as F
 from pathlib import Path
-from tqdm import tqdm
-from decord import VideoReader, cpu
 
-from action_schema import BUTTON_TOKENS, CACHE_ACTION_DIM
+import numpy as np
+import torch
+import torch.nn.functional as F
+from decord import VideoReader, cpu
+from tqdm import tqdm
+
+from action_schema import BUTTON_TOKENS, ACTION_DIM
 
 
 # -----------------------------------------------------------------------------
@@ -85,9 +87,9 @@ def process_batch_gba(frames: torch.Tensor, target_h: int, target_w: int) -> tor
 
 
 def _validate_vec_len(vec: list[float]) -> None:
-    if len(vec) != CACHE_ACTION_DIM:
+    if len(vec) != ACTION_DIM:
         raise ValueError(
-            f"Action vector length mismatch: got {len(vec)}, expected {CACHE_ACTION_DIM} "
+            f"Action vector length mismatch: got {len(vec)}, expected {ACTION_DIM} "
             f"(4 axes + {len(BUTTON_TOKENS)} buttons). Check BUTTON_TOKENS order/source."
         )
 
@@ -104,7 +106,7 @@ def main() -> None:
     print(f"📦 Found {len(replays)} replays")
     print(f"🚀 Processing: Input(Any) -> Native(240x160) -> Padded({RESOLUTION})")
     print(f"🎛️ Button token order (len={len(BUTTON_TOKENS)}): {BUTTON_TOKENS}")
-    print(f"🧱 Expected cache action dim: {CACHE_ACTION_DIM}")
+    print(f"🧱 Expected cache action dim: {ACTION_DIM}")
 
     total_frames = 0
 
@@ -116,7 +118,7 @@ def main() -> None:
             continue
 
         try:
-            # --- Step A: Load Actions (cache-space: [axes(4), buttons(21)]) ---
+            # --- Step A: Load Actions (cache-space: [axes(4), buttons(len=21)]) ---
             actions_list: list[list[float]] = []
             with open(act_path, "r") as f:
                 for line in f:
@@ -132,9 +134,7 @@ def main() -> None:
 
                     vec = [ax_lx, ax_ly, ax_rx, ax_ry]
 
-                    # IMPORTANT:
-                    # For BN6/GBA, all "buttons" are digital. This includes names containing "TRIGGER".
-                    # Keep them strictly 0/1 so sampling + tokenizer packing stays sane.
+                    # BN6/GBA is digital for our purposes: keep ALL buttons strictly 0/1.
                     for btn in BUTTON_TOKENS:
                         vec.append(_btn01(_scalar(act.get(btn, 0.0))))
 

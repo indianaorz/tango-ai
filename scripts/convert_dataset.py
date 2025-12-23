@@ -1,16 +1,16 @@
-# convert_dataset.py
+# scripts/convert_dataset.py
 from __future__ import annotations
 
-import json
 import argparse
-from typing import Dict
+import json
 from collections import OrderedDict
+from typing import Dict
 
 from action_schema import (
     GBA_BITS,
     GBA_TO_NITROGEN,
     BUTTON_TOKENS,
-    build_jsonl_template,
+    build_nitrogen_template,
 )
 
 # Fields that represent the "Player" and "Enemy" relative to the capture
@@ -29,7 +29,7 @@ def parse_input_bitmask(bitmask_int: int) -> OrderedDict:
       - only GBA buttons are ever set to 1.0
       - all other Nitrogen buttons remain 0.0
     """
-    action = build_jsonl_template()
+    action = build_nitrogen_template()
 
     if not isinstance(bitmask_int, int):
         bitmask_int = 0
@@ -109,6 +109,7 @@ def main() -> None:
                 # 4) Metrics
                 p_hp = final_row.get("player_health")
                 e_hp = final_row.get("enemy_health")
+
                 curr_p = p_hp if isinstance(p_hp, (int, float)) else prev_hp["p"]
                 curr_e = e_hp if isinstance(e_hp, (int, float)) else prev_hp["e"]
 
