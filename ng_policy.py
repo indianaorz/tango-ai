@@ -85,6 +85,73 @@ class ObjConfig:
     def get(self, key, default=None):
         return getattr(self, key, default)
 
+
+def load_ng_checkpoint_strict(ckpt_path: str, device: torch.device) -> NgLoaded:
+    if not ckpt_path:
+        raise NgPolicyError("ckpt_path is empty.")
+    if device is None:
+        raise NgPolicyError("device is None.")
+
+    print(f"Loading checkpoint: {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    if not isinstance(ckpt, dict):
+        raise NgPolicyError(f"Checkpoint is not a dict. Got: {type(ckpt)}")
+
+    raw_config = ckpt.get("ckpt_config", None)
+    if not isinstance(raw_config, dict):
+        raise NgPolicyError("Checkpoint missing ckpt_config dict; cannot load faithfully.")
+
+    # Validate config using Nitrogen's own schemas (no mutation).
+    cfg_mod = _first_non_none(
+        _try_import("nitrogen.cfg"),
+        _try_import("nitrogen.config"),
+        _try_import("config"),
+    )
+    CkptConfig = _get_attr(cfg_mod, "CkptConfig")
+    if CkptConfig is None:
+        raise NgPolicyError("Could not import nitrogen CkptConfig; cannot validate checkpoint config.")
+
+    ckpt_config = CkptConfig.model_validate(raw_config)
+    model_cfg = getattr(ckpt_config, "model_cfg", None)
+    if model_cfg is None:
+        raise NgPolicyError("Validated ckpt_config has no model_cfg.")
+
+    # Tokenizer cfg (validated if available)
+    tokenizer_cfg = raw_config.get("tokenizer_cfg", None)
+    tok_mod = _try_import("nitrogen.mm_tokenizers")
+    NitrogenTokenizerConfig = _get_attr(tok_mod, "NitrogenTokenizerConfig")
+    if tokenizer_cfg is not None and NitrogenTokenizerConfig is not None:
+        tokenizer_cfg = NitrogenTokenizerConfig.model_validate(tokenizer_cfg)
+
+    mod = _try_import("nitrogen.flow_matching_transformer.nitrogen")
+    NitroGen = _get_attr(mod, "NitroGen")
+    if NitroGen is None:
+        raise NgPolicyError("Could not import NitroGen.")
+
+    try:
+        model = NitroGen(config=model_cfg)
+    except TypeError:
+        model = NitroGen(config=model_cfg, game_mapping=None)
+
+    # Load weights strictly, but allowlisting only known-safe misses if needed.
+    state = ckpt.get("model", None)
+    if state is None:
+        raise NgPolicyError("Checkpoint missing 'model' state_dict key.")
+
+    missing, unexpected = model.load_state_dict(state, strict=False)
+
+    # Fail fast if something important is missing/unexpected.
+    if unexpected:
+        raise NgPolicyError(f"Unexpected keys in state_dict (first 20): {unexpected[:20]}")
+    # You can optionally allowlist some known harmless misses, but default should be strict.
+    if missing:
+        raise NgPolicyError(f"Missing keys in state_dict (first 20): {missing[:20]}")
+
+    model.to(device)
+    # Caller decides train/eval.
+    return NgLoaded(model=model, ckpt_config=ckpt_config, tokenizer_cfg=tokenizer_cfg, device=device)
+
+
 def load_ng_checkpoint(ckpt_path: str, device: torch.device) -> NgLoaded:
     if not ckpt_path: raise NgPolicyError("ckpt_path is empty.")
     if device is None: raise NgPolicyError("device is None.")

@@ -9,10 +9,10 @@ app = Flask(__name__)
 
 # --- CONFIG ---
 LOG_DIR = "logs/tango_cached"
-HOST = "0.0.0.0"  # Allows local network access
-PORT = 6007
+HOST = "0.0.0.0" 
+PORT = 6007 
 
-# HTML Template with Plotly.js for interactive graphs
+# HTML Template with Zero-Phase Smoothing
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -22,23 +22,34 @@ HTML_TEMPLATE = """
     <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
     <style>
         body { background: #111; color: #eee; font-family: sans-serif; margin: 0; padding: 20px; }
-        .container { max-width: 1000px; margin: 0 auto; }
-        .controls { background: #222; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
-        input { background: #333; border: 1px solid #444; color: #fff; padding: 8px; border-radius: 4px; }
-        label { font-size: 14px; color: #aaa; }
-        .stat-box { display: flex; gap: 20px; margin-bottom: 10px; }
-        .stat { background: #222; padding: 10px 20px; border-radius: 8px; flex: 1; text-align: center; }
-        .stat h3 { margin: 0 0 5px 0; font-size: 14px; color: #888; }
-        .stat div { font-size: 24px; font-weight: bold; color: #4db8ff; }
-        #chart { width: 100%; height: 60vh; background: #000; border-radius: 8px; border: 1px solid #333; }
-        .status { font-size: 12px; color: #666; margin-top: 10px; text-align: right; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        
+        /* Dashboard Header */
+        .stat-box { display: flex; gap: 20px; margin-bottom: 20px; }
+        .stat { background: #222; padding: 15px; border-radius: 8px; flex: 1; text-align: center; border: 1px solid #333; }
+        .stat h3 { margin: 0 0 5px 0; font-size: 14px; color: #888; text-transform: uppercase; letter-spacing: 1px; }
+        .stat div { font-size: 32px; font-weight: bold; color: #4db8ff; }
+        
+        /* Controls */
+        .controls { background: #222; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 30px; align-items: center; flex-wrap: wrap; border: 1px solid #333; }
+        .control-group { display: flex; flex-direction: column; gap: 5px; }
+        input[type=number] { background: #333; border: 1px solid #555; color: #fff; padding: 8px; border-radius: 4px; width: 80px; }
+        input[type=range] { width: 150px; accent-color: #4db8ff; }
+        label { font-size: 12px; color: #aaa; font-weight: bold; }
+        
+        button { background:#4db8ff; color:#000; border:none; padding:10px 20px; border-radius:4px; cursor:pointer; font-weight:bold; transition: background 0.2s; }
+        button:hover { background: #3aa8eb; }
+
+        /* Chart */
+        #chart { width: 100%; height: 70vh; background: #000; border-radius: 8px; border: 1px solid #333; }
+        .status { font-size: 12px; color: #666; margin-top: 5px; text-align: right; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="stat-box">
             <div class="stat">
-                <h3>Current Step</h3>
+                <h3>Global Step</h3>
                 <div id="curr-step">---</div>
             </div>
             <div class="stat">
@@ -48,32 +59,140 @@ HTML_TEMPLATE = """
         </div>
 
         <div class="controls">
-            <div>
-                <label>Ignore First N Steps:</label>
-                <input type="number" id="skip" value="100" min="0" step="100">
+            <div class="control-group">
+                <label>Ignore First N Steps</label>
+                <input type="number" id="skip" value="100" min="0" step="100" onchange="fetchData()">
             </div>
-            <div>
-                <label>Auto-Refresh:</label>
+            
+            <div class="control-group">
+                <label>Smoothing (<span id="smooth-val">0.60</span>)</label>
+                <input type="range" id="smooth" min="0" max="0.99" step="0.01" value="0.60" oninput="updateSmoothing()">
+            </div>
+
+            <div class="control-group" style="flex-direction: row; align-items: center; gap: 10px;">
                 <input type="checkbox" id="refresh" checked>
+                <label for="refresh" style="margin:0; cursor:pointer;">Auto-Refresh (1s)</label>
             </div>
+
             <div style="flex-grow:1; text-align:right;">
-                <button onclick="fetchData()" style="background:#4db8ff; color:#000; border:none; padding:8px 16px; border-radius:4px; cursor:pointer;">Update Now</button>
+                <button onclick="fetchData()">Update Now</button>
             </div>
         </div>
 
         <div id="chart"></div>
-        <div class="status" id="status">Waiting for data...</div>
+        <div class="status" id="status">Initializing...</div>
     </div>
 
     <script>
-        let plotData = { x: [], y: [] };
+        let rawData = { steps: [], values: [] };
         
+        // --- NEW: Bidirectional Exponential Smoothing (Zero-Phase) ---
+        // This runs the filter Forward AND Backward to cancel out the lag.
+        function smooth(values, alpha) {
+            if (values.length === 0) return [];
+            if (alpha === 0) return values;
+
+            const n = values.length;
+            
+            // 1. Forward Pass
+            let forward = new Float32Array(n);
+            let curr = values[0];
+            forward[0] = curr;
+            
+            for (let i = 1; i < n; i++) {
+                curr = curr * alpha + (1 - alpha) * values[i];
+                forward[i] = curr;
+            }
+
+            // 2. Backward Pass (Fixes the startup lag)
+            let backward = new Float32Array(n);
+            curr = forward[n - 1];
+            backward[n - 1] = curr;
+            
+            for (let i = n - 2; i >= 0; i--) {
+                curr = curr * alpha + (1 - alpha) * forward[i];
+                backward[i] = curr;
+            }
+
+            // Float32Array isn't directly serializable by some plotters, convert to regular array
+            return Array.from(backward);
+        }
+
+        function updateSmoothing() {
+            const alpha = parseFloat(document.getElementById('smooth').value);
+            document.getElementById('smooth-val').innerText = alpha.toFixed(2);
+            renderChart();
+        }
+
+        function renderChart() {
+            if (rawData.steps.length === 0) return;
+
+            const alpha = parseFloat(document.getElementById('smooth').value);
+            const smoothedVals = smooth(rawData.values, alpha);
+
+            // --- SMART ZOOM LOGIC ---
+            // Calculate Min/Max of the SMOOTHED line only
+            let minVal = Infinity;
+            let maxVal = -Infinity;
+            for(let v of smoothedVals) {
+                if(v < minVal) minVal = v;
+                if(v > maxVal) maxVal = v;
+            }
+
+            // Add 5% padding top/bottom so lines don't touch edges
+            const range = maxVal - minVal;
+            const padding = (range === 0) ? 0.1 : range * 0.05; 
+            const yMin = Math.max(0, minVal - padding); // Don't go below 0
+            const yMax = maxVal + padding;
+            // ------------------------
+
+            // 1. Ghost Trace (Raw Data)
+            const traceRaw = {
+                x: rawData.steps,
+                y: rawData.values,
+                mode: 'lines',
+                name: 'Raw',
+                line: { color: 'rgba(0, 255, 204, 0.15)', width: 1 }, 
+                hoverinfo: 'none' 
+            };
+
+            // 2. Main Trace (Smoothed)
+            const traceSmooth = {
+                x: rawData.steps,
+                y: smoothedVals,
+                mode: 'lines',
+                name: 'Smoothed',
+                line: { color: '#00ffcc', width: 2.5 },
+                fill: 'tozeroy',
+                fillcolor: 'rgba(0, 255, 204, 0.05)'
+            };
+
+            const layout = {
+                title: 'Training Loss (Bidirectional Smoothing)',
+                paper_bgcolor: '#000',
+                plot_bgcolor: '#000',
+                font: { color: '#eee' },
+                xaxis: { title: 'Global Step', gridcolor: '#333', zerolinecolor: '#444' },
+                yaxis: { 
+                    title: 'Loss', 
+                    gridcolor: '#333', 
+                    zerolinecolor: '#444',
+                    range: [yMin, yMax], 
+                    fixedrange: false    
+                },
+                margin: { t: 40, l: 60, r: 20, b: 60 },
+                showlegend: false
+            };
+
+            Plotly.react('chart', [traceRaw, traceSmooth], layout);
+        }
+
         async function fetchData() {
             const skip = document.getElementById('skip').value;
             const status = document.getElementById('status');
             
             try {
-                status.innerText = "Fetching...";
+                // status.innerText = "Fetching new data...";
                 const res = await fetch(`/api/data?skip=${skip}`);
                 const data = await res.json();
                 
@@ -82,37 +201,20 @@ HTML_TEMPLATE = """
                     return;
                 }
 
-                // Update Stats
                 if (data.steps.length > 0) {
+                    rawData = data;
+                    
                     const lastStep = data.steps[data.steps.length - 1];
                     const lastLoss = data.values[data.values.length - 1];
+                    
                     document.getElementById('curr-step').innerText = lastStep.toLocaleString();
                     document.getElementById('curr-loss').innerText = lastLoss.toFixed(4);
+                    
+                    renderChart();
+                    status.innerText = `Last updated: ${new Date().toLocaleTimeString()} (${data.steps.length} points)`;
+                } else {
+                    status.innerText = "No data points found yet.";
                 }
-
-                // Plot
-                const trace = {
-                    x: data.steps,
-                    y: data.values,
-                    mode: 'lines',
-                    type: 'scatter',
-                    line: { color: '#00ffcc', width: 2 },
-                    fill: 'tozeroy',
-                    fillcolor: 'rgba(0, 255, 204, 0.1)'
-                };
-
-                const layout = {
-                    title: 'Training Loss',
-                    paper_bgcolor: '#000',
-                    plot_bgcolor: '#000',
-                    font: { color: '#eee' },
-                    xaxis: { title: 'Global Step', gridcolor: '#333' },
-                    yaxis: { title: 'Loss', gridcolor: '#333' },
-                    margin: { t: 40, l: 50, r: 20, b: 40 }
-                };
-
-                Plotly.newPlot('chart', [trace], layout);
-                status.innerText = `Last updated: ${new Date().toLocaleTimeString()} (${data.steps.length} points)`;
                 
             } catch (e) {
                 status.innerText = "Connection Failed";
@@ -123,14 +225,13 @@ HTML_TEMPLATE = """
         fetchData();
         setInterval(() => {
             if(document.getElementById('refresh').checked) fetchData();
-        }, 10000); // Auto-refresh every 10s
+        }, 1000); 
     </script>
 </body>
 </html>
 """
 
 def get_latest_log():
-    # Find latest event file
     files = glob.glob(os.path.join(LOG_DIR, "events.out.tfevents.*"))
     if not files: return None
     return max(files, key=os.path.getctime)
@@ -151,12 +252,11 @@ def get_data():
         ea = EventAccumulator(log_file)
         ea.Reload()
         
-        # Check available tags
         tags = ea.Tags()['scalars']
         loss_tag = next((t for t in tags if 'Loss' in t), None)
         
         if not loss_tag:
-            return jsonify({"error": "No 'Loss' scalar found yet. Training might be initializing."})
+            return jsonify({"error": "Waiting for Training to start..."})
 
         events = ea.Scalars(loss_tag)
         
@@ -174,7 +274,6 @@ def get_data():
         return jsonify({"error": str(e)})
 
 if __name__ == '__main__':
-    # Get local IP for convenience print
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)
     
