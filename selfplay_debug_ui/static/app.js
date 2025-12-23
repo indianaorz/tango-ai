@@ -72,16 +72,26 @@ function slotsSetFromPressedButtons(pressedButtonsList) {
 }
 
 /**
- * Render a timeline grid into hostEl using entries (newest-first).
+ * Render a timeline grid into hostEl using entries.
+ *
+ * IMPORTANT UI behavior:
+ *   Grid width is fixed to TIMELINE_T columns (max 18),
+ *   even if entries length changes frame-to-frame.
+ *
  * Each entry should have:
  *   - mapped_pressed_buttons: [...]
  *   - ng_pressed_buttons: [...]
+ *
+ * For history: newest-first.
+ * For next buffer: earliest-next first.
  */
 function renderMappedVsNgTimeline(hostEl, entries, titleText) {
   if (!hostEl) return;
 
   const xs = Array.isArray(entries) ? entries : [];
-  const T = Math.min(TIMELINE_T, xs.length);
+
+  // Fixed width: always 18 columns (prevents resizing/jitter).
+  const T = TIMELINE_T;
 
   hostEl.innerHTML = "";
 
@@ -90,14 +100,6 @@ function renderMappedVsNgTimeline(hostEl, entries, titleText) {
   title.className = "timeline-title";
   title.textContent = titleText;
   hostEl.appendChild(title);
-
-  if (T === 0) {
-    const sp = document.createElement("div");
-    sp.className = "small muted";
-    sp.textContent = "—";
-    hostEl.appendChild(sp);
-    return;
-  }
 
   const grid = document.createElement("div");
   grid.className = "timeline";
@@ -123,6 +125,7 @@ function renderMappedVsNgTimeline(hostEl, entries, titleText) {
       if (gt && pr) c.classList.add("both");
       else if (gt) c.classList.add("gt");
       else if (pr) c.classList.add("pr");
+      // else: empty cell (keeps grid stable)
 
       grid.appendChild(c);
     }
@@ -131,10 +134,11 @@ function renderMappedVsNgTimeline(hostEl, entries, titleText) {
   hostEl.appendChild(grid);
 
   // Count line (helps debug quickly)
+  const shown = Math.min(xs.length, T);
   const count = document.createElement("div");
   count.className = "small muted";
   count.style.marginTop = "6px";
-  count.textContent = `steps shown: ${T} / ${xs.length}`;
+  count.textContent = `steps filled: ${shown} / ${T} (src: ${xs.length})`;
   hostEl.appendChild(count);
 }
 
@@ -142,7 +146,7 @@ function renderMappedVsNgTimeline(hostEl, entries, titleText) {
  * History is newest-first (your to_json does reversed(deque)).
  */
 function renderHistoryTimeline(hostEl, history) {
-  renderMappedVsNgTimeline(hostEl, history, "History (last 18): Mapped vs NG");
+  renderMappedVsNgTimeline(hostEl, history, "History (fixed 18): Mapped vs NG");
 }
 
 /**
@@ -150,7 +154,7 @@ function renderHistoryTimeline(hostEl, history) {
  * and we want earliest-next first. So render as-is (index 0 = next step).
  */
 function renderNextBufferTimeline(hostEl, nextActions) {
-  renderMappedVsNgTimeline(hostEl, nextActions, "Next buffer: Mapped vs NG");
+  renderMappedVsNgTimeline(hostEl, nextActions, "Next buffer (fixed 18): Mapped vs NG");
 }
 
 // -----------------------------------------------------------------------------
@@ -343,7 +347,6 @@ function createPortCard(port) {
   histWrap.innerHTML = `<div data-role="histTimeline"></div>`;
   meta.appendChild(histWrap);
 
-
   const imgwrap = document.createElement("div");
   imgwrap.className = "imgwrap";
 
@@ -363,14 +366,13 @@ function createPortCard(port) {
     }, 2000);
   };
 
-    imgwrap.appendChild(img);
+  imgwrap.appendChild(img);
 
   // Next buffer timeline goes *below* the image
   const nextWrap = document.createElement("div");
   nextWrap.className = "timeline-wrap";
   nextWrap.innerHTML = `<div data-role="nextTimeline"></div>`;
   imgwrap.appendChild(nextWrap);
-
 
   card.appendChild(h2);
   card.appendChild(meta);
@@ -389,7 +391,6 @@ function createPortCard(port) {
     ngBtnsEl: card.querySelector('[data-role="ngBtns"]'),
     mappedBtnsEl: card.querySelector('[data-role="mappedBtns"]'),
     ngHintEl: card.querySelector('[data-role="ngHint"]'),
-
 
     nextTimelineEl: card.querySelector('[data-role="nextTimeline"]'),
     histTimelineEl: card.querySelector('[data-role="histTimeline"]'),
@@ -476,15 +477,13 @@ function updateFromPayload(payload) {
     const ngPressed = s.ng_pressed_buttons || [];
     const mappedPressed = s.mapped_pressed_buttons || [];
 
+    setControllerPressed(refs.ngController, ngPressed);
+    setControllerPressed(refs.mappedController, mappedPressed);
 
-    const ngSlots = setControllerPressed(refs.ngController, ngPressed) || [];
-    const mappedSlots = setControllerPressed(refs.mappedController, mappedPressed) || [];
-
-
-    // NEW: next actions buffer (already "future only" if you applied the DebugState change)
+    // Next actions buffer (fixed width grid)
     renderNextBufferTimeline(refs.nextTimelineEl, s.next_actions || []);
 
-    // Existing: history
+    // History (fixed width grid)
     renderHistoryTimeline(refs.histTimelineEl, s.history || []);
 
     refs.ngHintEl.style.display = (ngBin === "—") ? "block" : "none";

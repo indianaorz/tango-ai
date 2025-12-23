@@ -34,7 +34,7 @@ app = Flask(__name__)
 DATASET_DIR = os.path.join(parent_dir, "data/dataset")
 CACHE_DIR = os.path.join(parent_dir, "data/dataset_cached")
 # CHECKPOINT_PATH = os.path.join(parent_dir, "weights/ng.pt")
-CHECKPOINT_PATH = os.path.join(parent_dir, "checkpoints/step_5000.pt")
+CHECKPOINT_PATH = os.path.join(parent_dir, "checkpoints/step_15000.pt")
 # CHECKPOINT_PATH = os.path.join(parent_dir, "checkpoints_overfit/overfit_20230929001213-ummm-bn6-vs-DthKrdMnSP-round1-p1_idx3206_step1000.pt")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
