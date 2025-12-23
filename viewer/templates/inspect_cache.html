@@ -40,7 +40,6 @@
             align-items: flex-start;
         }
 
-        /* IMAGE DISPLAY */
         .viewport {
             display: flex;
             flex-direction: column;
@@ -57,7 +56,6 @@
             box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
         }
 
-        /* CONTROLLERS */
         .controls-area {
             display: flex;
             flex-direction: column;
@@ -76,7 +74,6 @@
             text-transform: uppercase;
         }
 
-        /* REUSED CONTROLLER CSS */
         .controller {
             background: #e0e0e0;
             width: 240px;
@@ -95,7 +92,6 @@
             transition: background 0.05s, transform 0.05s;
         }
 
-        /* Active States */
         .btn.active {
             background: #00ff00 !important;
             box-shadow: 0 0 10px #00ff00;
@@ -107,9 +103,6 @@
             border-color: #cc00cc;
         }
 
-        /* Model Color */
-
-        /* Button Layout (Compact) */
         .dpad {
             position: absolute;
             top: 45px;
@@ -146,6 +139,7 @@
             height: 24px;
         }
 
+        /* Render these as the GBA face buttons */
         .btn.a {
             top: 55px;
             right: 15px;
@@ -212,7 +206,6 @@
             background: #999;
         }
 
-        /* SLIDER */
         .scrubber {
             width: 512px;
             display: flex;
@@ -229,13 +222,12 @@
 
         .idx-display {
             font-size: 14px;
-            width: 80px;
+            width: 110px;
             text-align: right;
             font-family: monospace;
             color: #4db8ff;
         }
 
-        /* Prob Bars */
         .bar-container {
             width: 240px;
             margin-top: 5px;
@@ -345,13 +337,15 @@
                         <div class="btn left" id="gt-DPAD_LEFT"></div>
                         <div class="btn right" id="gt-DPAD_RIGHT"></div>
                     </div>
-                    <div class="btn b" id="gt-EAST">B</div>
-                    <div class="btn a" id="gt-SOUTH">A</div>
-                    <div class="btn select" id="gt-BACK"></div>
+                    <!-- GBA: A=EAST, B=SOUTH -->
+                    <div class="btn b" id="gt-EAST">A</div>
+                    <div class="btn a" id="gt-SOUTH">B</div>
+                    <div class="btn select" id="gt-BACK"></div>   <!-- SELECT -->
                     <div class="btn start" id="gt-START"></div>
                 </div>
-                <div style="height:20px; font-size:10px; color:#666; margin-top:5px;">Axis: <span id="gt-axis">0.0,
-                        0.0</span></div>
+                <div style="height:20px; font-size:10px; color:#666; margin-top:5px;">
+                    Axis: <span id="gt-axis">0.0, 0.0</span>
+                </div>
             </div>
 
             <div class="controller-box">
@@ -365,19 +359,18 @@
                         <div class="btn left" id="pr-DPAD_LEFT"></div>
                         <div class="btn right" id="pr-DPAD_RIGHT"></div>
                     </div>
-                    <div class="btn b" id="pr-EAST">B</div>
-                    <div class="btn a" id="pr-SOUTH">A</div>
-                    <div class="btn select" id="pr-BACK"></div>
+                    <div class="btn b" id="pr-EAST">A</div>
+                    <div class="btn a" id="pr-SOUTH">B</div>
+                    <div class="btn select" id="pr-BACK"></div>   <!-- SELECT -->
                     <div class="btn start" id="pr-START"></div>
                 </div>
 
-                <div class="bar-container" id="conf-bars">
-                </div>
+                <div class="bar-container" id="conf-bars"></div>
+
                 <div class="timeline-wrap">
                     <div class="timeline-title">Next 18 (GT vs Plan)</div>
                     <div id="timeline"></div>
                 </div>
-
             </div>
         </div>
     </div>
@@ -385,6 +378,16 @@
     <script>
         const filename = "{{ filename }}";
         let totalFrames = 0;
+
+        // Only GBA-relevant buttons
+        const UI_BTNS = ['DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'EAST', 'SOUTH', 'LEFT_SHOULDER', 'RIGHT_SHOULDER', 'BACK', 'START'];
+        const TIMELINE_KEYS = UI_BTNS;
+
+        // Press logic:
+        // - GT is 0/1 so threshold 0.5 is fine
+        // - Pred uses RAW logits: pressed if raw > 0.0 (logit > 0 => prob > 0.5)
+        const GT_THRES = 0.5;
+        const PR_LOGIT_THRES = 0.0;
 
         // Load Meta
         fetch(`/api/cache_meta/${filename}`).then(r => r.json()).then(d => {
@@ -396,7 +399,7 @@
 
         function seek(val) {
             document.getElementById('idx-disp').innerText = `${val} / ${totalFrames}`;
-            loadFrame(val);
+            loadFrame(parseInt(val));
         }
 
         function step(dir) {
@@ -408,54 +411,40 @@
             }
         }
 
-        async function loadFrame(idx) {
-            const res = await fetch(`/api/cache_frame/${filename}/${idx}`);
-            const data = await res.json();
-
-            if (data.error) return;
-
-            // 1. Image
-            document.getElementById('frame-img').src = data.image;
-
-            // 2. Ground Truth
-            updateController('gt', data.ground_truth, 'active');
-            document.getElementById('gt-axis').innerText =
-                `${data.ground_truth.AXIS_LEFTX.toFixed(2)}, ${data.ground_truth.AXIS_LEFTY.toFixed(2)}`;
-
-            // 3. Prediction
-            if (data.prediction) {
-                updateController('pr', data.prediction, 'pred-active');
-                updateBars(data.prediction);
-            }
-        }
-
-        function updateController(prefix, actions, activeClass) {
-            const btns = ['DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'SOUTH', 'EAST', 'START', 'BACK', 'LEFT_SHOULDER', 'RIGHT_SHOULDER'];
-
-            btns.forEach(k => {
+        function updateController(prefix, actionsFlat, activeClass, thres) {
+            UI_BTNS.forEach(k => {
                 const el = document.getElementById(`${prefix}-${k}`);
                 if (!el) return;
 
                 el.classList.remove(activeClass);
-                // Threshold 0.4 match game logic
-                if (actions[k] > 0.4) el.classList.add(activeClass);
+                const v = (typeof actionsFlat?.[k] === 'number') ? actionsFlat[k] : 0;
+                if (v > thres) el.classList.add(activeClass);
             });
         }
 
-        function updateBars(actions) {
-            const keys = ['SOUTH', 'EAST', 'DPAD_DOWN', 'DPAD_UP', 'DPAD_LEFT', 'DPAD_RIGHT'];
+        function niceLabel(k) {
+            if (k === 'BACK') return 'SELECT';
+            if (k === 'EAST') return 'A';
+            if (k === 'SOUTH') return 'B';
+            if (k.startsWith('DPAD_')) return k.replace('DPAD_', '');
+            if (k === 'LEFT_SHOULDER') return 'L';
+            if (k === 'RIGHT_SHOULDER') return 'R';
+            return k;
+        }
+
+        // Show probability bars (0..1) for the GBA buttons.
+        function updateBars(probFlat) {
             const container = document.getElementById('conf-bars');
             container.innerHTML = '';
 
-            keys.forEach(k => {
-                const val = actions[k] || 0;
+            UI_BTNS.forEach(k => {
+                const val = (typeof probFlat?.[k] === 'number') ? probFlat[k] : 0;
                 const pct = Math.max(0, Math.min(100, val * 100));
-                // Highlight strong preds
-                const color = val > 0.4 ? '#ff00ff' : '#555';
+                const color = val > 0.7 ? '#ff00ff' : '#555';
 
                 const html = `
                     <div class="bar-row">
-                        <span>${k.replace('DPAD_', '')}</span>
+                        <span>${niceLabel(k)}</span>
                         <span>${val.toFixed(2)}</span>
                     </div>
                     <div class="bar-bg"><div class="bar-fill" style="width:${pct}%; background:${color}"></div></div>
@@ -463,14 +452,13 @@
                 container.innerHTML += html;
             });
         }
-        const TIMELINE_KEYS = ['SOUTH', 'EAST', 'DPAD_DOWN', 'DPAD_UP', 'DPAD_LEFT', 'DPAD_RIGHT', 'LEFT_SHOULDER', 'RIGHT_SHOULDER', 'BACK', 'START'];
 
         function valOf(a, k) {
             const v = a?.[k];
             return (typeof v === 'number') ? v : 0;
         }
 
-        function renderTimeline(gtSeq, prSeq, horizon) {
+        function renderTimeline(gtSeq, prSeqRaw, horizon) {
             const T = horizon || 18;
             const el = document.getElementById('timeline');
             if (!el) return;
@@ -482,15 +470,14 @@
             grid.style.gridTemplateColumns = `60px repeat(${T}, 1fr)`;
 
             for (const key of TIMELINE_KEYS) {
-                // label
                 const lbl = document.createElement('div');
                 lbl.className = 'lane-label';
-                lbl.textContent = key.replace('DPAD_', '');
+                lbl.textContent = niceLabel(key);
                 grid.appendChild(lbl);
 
                 for (let t = 0; t < T; t++) {
-                    const gt = gtSeq?.[t] ? (valOf(gtSeq[t], key) > 0.4) : false;
-                    const pr = prSeq?.[t] ? (valOf(prSeq[t], key) > 0.4) : false;
+                    const gt = gtSeq?.[t] ? (valOf(gtSeq[t], key) > GT_THRES) : false;
+                    const pr = prSeqRaw?.[t] ? (valOf(prSeqRaw[t], key) > PR_LOGIT_THRES) : false;
 
                     const c = document.createElement('div');
                     c.className = 'cell';
@@ -510,21 +497,28 @@
             const data = await res.json();
             if (data.error) return;
 
+            // 1. Image
             document.getElementById('frame-img').src = data.image;
 
-            updateController('gt', data.ground_truth, 'active');
+            // 2. Ground Truth
+            updateController('gt', data.ground_truth, 'active', GT_THRES);
             document.getElementById('gt-axis').innerText =
-                `${data.ground_truth.AXIS_LEFTX.toFixed(2)}, ${data.ground_truth.AXIS_LEFTY.toFixed(2)}`;
+                `${(data.ground_truth.AXIS_LEFTX || 0).toFixed(2)}, ${(data.ground_truth.AXIS_LEFTY || 0).toFixed(2)}`;
 
+            // 3. Prediction:
+            // - controller/timeline uses RAW logits (buttons_raw) with threshold 0.0
+            // - bars use buttons_prob
             if (data.prediction) {
-                updateController('pr', data.prediction, 'pred-active');
-                updateBars(data.prediction);
+                updateController('pr', data.prediction.buttons_raw, 'pred-active', PR_LOGIT_THRES);
+                updateBars(data.prediction.buttons_prob);
+
+                const prSeqRaw = (data.prediction_seq || []).map(s => s?.buttons_raw || {});
+                renderTimeline(data.ground_truth_seq, prSeqRaw, data.horizon);
+            } else {
+                // No model loaded; still render GT timeline
+                renderTimeline(data.ground_truth_seq, [], data.horizon);
             }
-
-            // NEW: timeline
-            renderTimeline(data.ground_truth_seq, data.prediction_seq, data.horizon);
         }
-
     </script>
 </body>
 

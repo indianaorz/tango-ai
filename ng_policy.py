@@ -17,6 +17,16 @@ except Exception:
     NitrogenTokenizerConfig = None
 
 # -----------------------------------------------------------------------------
+# Canonical button order: use Nitrogen's token set directly (NO remapping)
+# -----------------------------------------------------------------------------
+try:
+    from nitrogen.shared import BUTTON_ACTION_TOKENS as BUTTON_TOKENS
+    BUTTON_TOKENS = list(BUTTON_TOKENS)
+except Exception:
+    BUTTON_TOKENS = None  # handled in policy init
+
+
+# -----------------------------------------------------------------------------
 # JSON Summary Helper
 # -----------------------------------------------------------------------------
 def _summarize_tensor(x: Any, *, max_items: int = 16) -> Any:
@@ -274,8 +284,19 @@ class NgNitroGenPolicy(nn.Module):
         super().__init__()
         self.ng = ng.model
         self.cfg = getattr(ng.ckpt_config, "model_cfg", None)
-        if self.cfg is None: self.cfg = ng.ckpt_config
+        if self.cfg is None:
+            self.cfg = ng.ckpt_config
         self.default_game_id = default_game_id
+
+        # Canonical button tokens (NO remapping in this policy, ever)
+        if BUTTON_TOKENS is None:
+            raise NgPolicyError(
+                "Could not import nitrogen.shared.BUTTON_ACTION_TOKENS; "
+                "policy requires canonical button order to avoid mismatches."
+            )
+        self.button_tokens = BUTTON_TOKENS
+        self.button_dim = len(self.button_tokens)
+
         
         self._use_tokenizer = os.getenv("NG_USE_TOKENIZER", "1").strip() not in ("0", "false", "False")
         self._tokenize_on_cpu = os.getenv("NG_TOKENIZE_ON_CPU", "1").strip() not in ("0", "false", "False")
@@ -410,8 +431,12 @@ class NgNitroGenPolicy(nn.Module):
             # Dummy action placeholders (tokenizer requires correct shapes)
             j_left  = torch.zeros((1, T_act, 2), dtype=torch.float32)
             j_right = torch.zeros((1, T_act, 2), dtype=torch.float32)
-            buttons = torch.zeros((1, T_act, 21), dtype=torch.float32)
+
+            # IMPORTANT: button width MUST match Nitrogen canonical token set.
+            buttons = torch.zeros((1, T_act, self.button_dim), dtype=torch.float32)
+
             dropped = torch.zeros((1, T_vis), dtype=torch.bool)
+
 
             sample = {
                 "frames": frames_btchw,
@@ -464,7 +489,14 @@ class NgNitroGenPolicy(nn.Module):
             else:
                 out = self.ng.get_action(data)
             
-            actions = out["action_tensor"]  # [B,T,25]
+            actions = out["action_tensor"]  # expected [B,T,4+button_dim]
+            expected_dim = 4 + self.button_dim
+            if actions.ndim != 3 or actions.shape[-1] != expected_dim:
+                raise NgPolicyError(
+                    f"Model output dim mismatch: got {tuple(actions.shape)}, "
+                    f"expected last dim={expected_dim} (4 axes + {self.button_dim} buttons)"
+                )
+
 
             # NEW: optionally return the full horizon
             if return_sequence:
