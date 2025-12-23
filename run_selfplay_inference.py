@@ -1,14 +1,15 @@
 # ── Begin: run_selfplay_inference.py ──
 #!/usr/bin/env python3
 from __future__ import annotations
-
 import asyncio
 import base64
 import os
 import signal
 import time
+import threading
 from io import BytesIO
 from typing import Any, Dict, List, Optional
+
 
 import torch
 from PIL import Image
@@ -47,6 +48,61 @@ def _decode_pil_from_b64(b64: Optional[str]) -> Optional[Image.Image]:
         return img
     except Exception:
         return None
+    
+class StartSpamStrategy:
+    """
+    Minimal bootstrap strategy:
+      - presses START every call (or every N calls) so menus advance
+      - never requires images
+    """
+    def __init__(self, *, key_bit_positions: Dict[str, int], every_n: int = 1):
+        self.key_bits = dict(key_bit_positions or {})
+        self.every_n = max(1, int(every_n))
+        self._ctr = 0
+
+    def reset_state(self, port: int):
+        self._ctr = 0
+
+    def decide_action(self, port: int, game_state: dict) -> dict:
+        self._ctr += 1
+        press = (self._ctr % self.every_n) == 0
+
+        # Your alias map maps START -> RETURN, and config.KEY_BIT_POSITIONS should contain RETURN.
+        bit = self.key_bits.get("RETURN", None)
+        mask = 0
+        if press and bit is not None:
+            mask |= (1 << int(bit))
+
+        key_bin16 = format(int(mask) & 0xFFFF, "016b")
+        return {
+            "button_command": {"type": "key_press", "key": key_bin16},
+            "ng_key_bin": "",
+            "debug": {"bootstrap": True, "press_start": bool(press)},
+        }
+
+
+class SwappableStrategy:
+    """
+    Thread-safe wrapper that delegates to an inner strategy that can be swapped at runtime.
+    """
+    def __init__(self, initial: Any):
+        self._lock = threading.Lock()
+        self._inner = initial
+
+    def swap(self, new_inner: Any) -> None:
+        with self._lock:
+            self._inner = new_inner
+
+    def reset_state(self, port: int):
+        with self._lock:
+            inner = self._inner
+        if hasattr(inner, "reset_state"):
+            inner.reset_state(port)
+
+    def decide_action(self, port: int, game_state: dict) -> dict:
+        with self._lock:
+            inner = self._inner
+        return inner.decide_action(port, game_state)
 
 
 class DebugStrategyWrapper:
@@ -232,27 +288,80 @@ async def _run() -> None:
 
     # 2) Create per-window handlers
     handlers: List[ConnectionHandler] = []
-    for inst_cfg in plan:
-        strat = _make_strategy(inst_cfg, util_funcs)
+    ng_loader_threads: List[threading.Thread] = []
 
-        # Wrap strategy with debug capture + console output
-        strat = DebugStrategyWrapper(
-            inner=strat,
+    for inst_cfg in plan:
+        # Build the "intended" strategy
+        intended = _make_strategy(inst_cfg, util_funcs)
+
+        # If this instance is the learner NG strategy, do NOT construct/warm it on the main thread.
+        # Instead: start with a bootstrap strategy, and warm NG in a background thread, then swap in.
+        strat_obj: Any = intended
+
+        is_ng_learner = (
+            (inst_cfg.get("strategy") or "").strip().lower() == config.STRAT_DRL
+            and bool(getattr(config, "USE_NG_POLICY", False))
+        )
+
+        if is_ng_learner:
+            bootstrap_every_n = int(os.environ.get("NG_BOOTSTRAP_START_EVERY_N", "1"))
+            bootstrap = StartSpamStrategy(
+                key_bit_positions=config.KEY_BIT_POSITIONS,
+                every_n=bootstrap_every_n,
+            )
+            sw = SwappableStrategy(initial=bootstrap)
+            strat_obj = sw
+
+            # Capture everything needed for background init
+            def _load_and_swap(swappable: SwappableStrategy, cfg: dict):
+                try:
+                    print("[NG] Background load + warmup starting...")
+                    ng_strat = NGAgentStrategy(
+                        ckpt_path=config.NG_CKPT_PATH,
+                        device=torch.device(config.NG_DEVICE),
+                        key_bit_positions=config.KEY_BIT_POSITIONS,
+                        discrete_actions=config.DISCRETE_ACTIONS,
+                        util_fns=util_funcs,
+                        frame_h=config.FRAME_HEIGHT,
+                        frame_w=config.FRAME_WIDTH,
+                        seq_len_frames=config.SEQ_LEN_FRAMES,
+                        use_images=True,
+                        allow_actions_in_window=True,
+                        forbid_actions_in_battle=[],
+                    )
+                    swappable.swap(ng_strat)
+                    print("[NG] Ready. Swapped in NG strategy.")
+                except Exception as e:
+                    # If NG fails to load, keep bootstrap strategy alive so the run doesn't silently stall.
+                    print(f"[NG] Failed to load NG strategy: {e!r}")
+
+            t = threading.Thread(
+                target=_load_and_swap,
+                args=(sw, inst_cfg),
+                daemon=True,
+            )
+            t.start()
+            ng_loader_threads.append(t)
+
+        # Wrap (possibly swappable) strategy with debug capture
+        strat_obj = DebugStrategyWrapper(
+            inner=strat_obj,
             debug_state=debug_state,
             print_hz=debug_print_hz,
         )
 
         h = ConnectionHandler(
             instance_config=inst_cfg,
-            active_strategy=strat,
+            active_strategy=strat_obj,
             inference_fps=config.INFERENCE_FPS,
-            experience_buffer=None,           # inference-only
-            shared_episode_data=None,         # inference-only
+            experience_buffer=None,
+            shared_episode_data=None,
             config_module=config,
             utils_module=utils,
             policy_eval_strategy=None,
         )
         handlers.append(h)
+
 
     # 3) Graceful shutdown on Ctrl+C
     stop_event = asyncio.Event()

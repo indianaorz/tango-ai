@@ -317,7 +317,6 @@ function createPortCard(port) {
     <div class="label">NG wants to press (raw)</div>
     <div class="kbd" data-role="ngBin">—</div>
     <div class="padwrap" data-role="ngPad"></div>
-    <div class="small muted" data-role="ngSlots" style="margin-top:6px;">slots: —</div>
     <div style="margin-top: 8px;" data-role="ngBtns"></div>
     <div class="small" style="margin-top:8px; display:none;" data-role="ngHint">(Waiting for decision.ng_key_bin)</div>
   `;
@@ -328,7 +327,6 @@ function createPortCard(port) {
     <div class="label">We interpret / send to game</div>
     <div class="kbd" data-role="mappedBin">—</div>
     <div class="padwrap" data-role="mappedPad"></div>
-    <div class="small muted" data-role="mappedSlots" style="margin-top:6px;">slots: —</div>
     <div style="margin-top: 8px;" data-role="mappedBtns"></div>
   `;
 
@@ -339,17 +337,12 @@ function createPortCard(port) {
   meta.appendChild(imgLine);
   meta.appendChild(grid2);
 
-  // NEW: Next buffer timeline
-  const nextWrap = document.createElement("div");
-  nextWrap.className = "timeline-wrap";
-  nextWrap.innerHTML = `<div data-role="nextTimeline"></div>`;
-  meta.appendChild(nextWrap);
-
-  // Existing: History timeline
+  // Keep history in meta (optional)
   const histWrap = document.createElement("div");
   histWrap.className = "timeline-wrap";
   histWrap.innerHTML = `<div data-role="histTimeline"></div>`;
   meta.appendChild(histWrap);
+
 
   const imgwrap = document.createElement("div");
   imgwrap.className = "imgwrap";
@@ -370,7 +363,14 @@ function createPortCard(port) {
     }, 2000);
   };
 
-  imgwrap.appendChild(img);
+    imgwrap.appendChild(img);
+
+  // Next buffer timeline goes *below* the image
+  const nextWrap = document.createElement("div");
+  nextWrap.className = "timeline-wrap";
+  nextWrap.innerHTML = `<div data-role="nextTimeline"></div>`;
+  imgwrap.appendChild(nextWrap);
+
 
   card.appendChild(h2);
   card.appendChild(meta);
@@ -390,8 +390,6 @@ function createPortCard(port) {
     mappedBtnsEl: card.querySelector('[data-role="mappedBtns"]'),
     ngHintEl: card.querySelector('[data-role="ngHint"]'),
 
-    ngSlotsEl: card.querySelector('[data-role="ngSlots"]'),
-    mappedSlotsEl: card.querySelector('[data-role="mappedSlots"]'),
 
     nextTimelineEl: card.querySelector('[data-role="nextTimeline"]'),
     histTimelineEl: card.querySelector('[data-role="histTimeline"]'),
@@ -478,14 +476,10 @@ function updateFromPayload(payload) {
     const ngPressed = s.ng_pressed_buttons || [];
     const mappedPressed = s.mapped_pressed_buttons || [];
 
-    chipsEl(refs.ngBtnsEl, ngPressed);
-    chipsEl(refs.mappedBtnsEl, mappedPressed);
 
     const ngSlots = setControllerPressed(refs.ngController, ngPressed) || [];
     const mappedSlots = setControllerPressed(refs.mappedController, mappedPressed) || [];
 
-    refs.ngSlotsEl.textContent = `slots: ${ngSlots.length ? ngSlots.join(", ") : "—"}`;
-    refs.mappedSlotsEl.textContent = `slots: ${mappedSlots.length ? mappedSlots.join(", ") : "—"}`;
 
     // NEW: next actions buffer (already "future only" if you applied the DebugState change)
     renderNextBufferTimeline(refs.nextTimelineEl, s.next_actions || []);

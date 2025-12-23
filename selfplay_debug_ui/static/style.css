@@ -354,3 +354,6 @@ img {
   background: linear-gradient(135deg, #00ff00 0%, #00ff00 48%, #ff00ff 52%, #ff00ff 100%);
   border-color: rgba(255,255,255,0.25);
 }
+.imgwrap .timeline-wrap {
+  margin-top: 10px;
+}

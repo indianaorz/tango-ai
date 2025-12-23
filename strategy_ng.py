@@ -257,8 +257,8 @@ class NgActionSchema:
     dpad_left: int = _btn_index("DPAD_LEFT")
     dpad_right: int = _btn_index("DPAD_RIGHT")
 
-    a_btn: str = os.getenv("NG_BTN_A", "SOUTH").strip().upper()
-    b_btn: str = os.getenv("NG_BTN_B", "EAST").strip().upper()
+    a_btn: str = os.getenv("NG_BTN_A", "EAST").strip().upper()
+    b_btn: str = os.getenv("NG_BTN_B", "SOUTH").strip().upper()
     start_btn: str = os.getenv("NG_BTN_START", "START").strip().upper()
 
     l_btn: int = _btn_index("LEFT_SHOULDER")

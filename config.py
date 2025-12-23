@@ -50,9 +50,9 @@ def generate_instances(n_pairs: int, base_port: int = BASE_PORT) -> List[Dict]:
 
         # Default: learner uses DRL; opponent uses curriculum
         if i % 2 == 0:
-            opp_strategy = STRAT_WANDER   # Game1 Opponent
+            opp_strategy = STRAT_DRL   # Game1 Opponent
         elif i % 2 == 1:
-            opp_strategy = STRAT_WANDER   # Game2 Opponent
+            opp_strategy = STRAT_DRL   # Game2 Opponent
         else:
             opp_strategy = STRAT_DRL      # remaining pairs: self-play
 
@@ -101,7 +101,7 @@ RANDOM_ACTION_KEYS_FOR_SKIP_STRATEGY = ["B", "DOWN", "UP", "LEFT", "RIGHT", "A"]
 # =============================================================================
 # Nitrogen (ng.pt) policy config
 # =============================================================================
-NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", os.path.join(PROJECT_ROOT, "checkpoints", "step_3000.pt"))
+NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", os.path.join(PROJECT_ROOT, "checkpoints", "step_5000.pt"))
 # NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", os.path.join(PROJECT_ROOT, "weights", "ng.pt"))
 USE_NG_POLICY = 1
 NG_DEVICE = os.getenv("NG_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
