@@ -376,152 +376,151 @@
             </div>
         </div>
     </div>
+<script>
+    const filename = "{{ filename }}";
+    let totalFrames = 0;
 
-    <script>
-        const filename = "{{ filename }}";
-        let totalFrames = 0;
+    // Only GBA-relevant buttons
+    const UI_BTNS = ['DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'EAST', 'SOUTH', 'LEFT_SHOULDER', 'RIGHT_SHOULDER', 'BACK', 'START'];
+    const TIMELINE_KEYS = UI_BTNS;
 
-        // Only GBA-relevant buttons
-        const UI_BTNS = ['DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'EAST', 'SOUTH', 'LEFT_SHOULDER', 'RIGHT_SHOULDER', 'BACK', 'START'];
-        const TIMELINE_KEYS = UI_BTNS;
+    // Thresholds:
+    // - GT is 0/1 so 0.5 is correct
+    // - Pred now uses probabilities (0..1) computed server-side
+    const GT_THRES = 0.5;
+    const PR_PROB_THRES = 0.5;
 
-        // Press logic:
-        // - GT is 0/1 so threshold 0.5 is fine
-        // - Pred uses RAW logits: pressed if raw > 0.0 (logit > 0 => prob > 0.5)
-        const GT_THRES = 0.5;
-        const PR_LOGIT_THRES = 0.0;
+    // Load Meta
+    fetch(`/api/cache_meta/${filename}`).then(r => r.json()).then(d => {
+        totalFrames = d.count;
+        document.getElementById('slider').max = totalFrames - 1;
+        document.getElementById('idx-disp').innerText = `0 / ${totalFrames}`;
+        loadFrame(0);
+    });
 
-        // Load Meta
-        fetch(`/api/cache_meta/${filename}`).then(r => r.json()).then(d => {
-            totalFrames = d.count;
-            document.getElementById('slider').max = totalFrames - 1;
-            document.getElementById('idx-disp').innerText = `0 / ${totalFrames}`;
-            loadFrame(0);
-        });
+    function seek(val) {
+        document.getElementById('idx-disp').innerText = `${val} / ${totalFrames}`;
+        loadFrame(parseInt(val));
+    }
 
-        function seek(val) {
-            document.getElementById('idx-disp').innerText = `${val} / ${totalFrames}`;
-            loadFrame(parseInt(val));
+    function step(dir) {
+        let el = document.getElementById('slider');
+        let val = parseInt(el.value) + dir;
+        if (val >= 0 && val < totalFrames) {
+            el.value = val;
+            seek(val);
         }
+    }
 
-        function step(dir) {
-            let el = document.getElementById('slider');
-            let val = parseInt(el.value) + dir;
-            if (val >= 0 && val < totalFrames) {
-                el.value = val;
-                seek(val);
-            }
-        }
-
-        function updateController(prefix, actionsFlat, activeClass, thres) {
-            UI_BTNS.forEach(k => {
-                const el = document.getElementById(`${prefix}-${k}`);
-                if (!el) return;
-
-                el.classList.remove(activeClass);
-                const v = (typeof actionsFlat?.[k] === 'number') ? actionsFlat[k] : 0;
-                if (v > thres) el.classList.add(activeClass);
-            });
-        }
-
-        function niceLabel(k) {
-            if (k === 'BACK') return 'SELECT';
-            if (k === 'EAST') return 'A';
-            if (k === 'SOUTH') return 'B';
-            if (k.startsWith('DPAD_')) return k.replace('DPAD_', '');
-            if (k === 'LEFT_SHOULDER') return 'L';
-            if (k === 'RIGHT_SHOULDER') return 'R';
-            return k;
-        }
-
-        // Show probability bars (0..1) for the GBA buttons.
-        function updateBars(probFlat) {
-            const container = document.getElementById('conf-bars');
-            container.innerHTML = '';
-
-            UI_BTNS.forEach(k => {
-                const val = (typeof probFlat?.[k] === 'number') ? probFlat[k] : 0;
-                const pct = Math.max(0, Math.min(100, val * 100));
-                const color = val > 0.7 ? '#ff00ff' : '#555';
-
-                const html = `
-                    <div class="bar-row">
-                        <span>${niceLabel(k)}</span>
-                        <span>${val.toFixed(2)}</span>
-                    </div>
-                    <div class="bar-bg"><div class="bar-fill" style="width:${pct}%; background:${color}"></div></div>
-                `;
-                container.innerHTML += html;
-            });
-        }
-
-        function valOf(a, k) {
-            const v = a?.[k];
-            return (typeof v === 'number') ? v : 0;
-        }
-
-        function renderTimeline(gtSeq, prSeqRaw, horizon) {
-            const T = horizon || 18;
-            const el = document.getElementById('timeline');
+    function updateController(prefix, buttonsFlat, activeClass, thres) {
+        UI_BTNS.forEach(k => {
+            const el = document.getElementById(`${prefix}-${k}`);
             if (!el) return;
 
-            el.innerHTML = '';
+            el.classList.remove(activeClass);
+            const v = (typeof buttonsFlat?.[k] === 'number') ? buttonsFlat[k] : 0;
+            if (v > thres) el.classList.add(activeClass);
+        });
+    }
 
-            const grid = document.createElement('div');
-            grid.className = 'timeline';
-            grid.style.gridTemplateColumns = `60px repeat(${T}, 1fr)`;
+    function niceLabel(k) {
+        if (k === 'BACK') return 'SELECT';
+        if (k === 'EAST') return 'A';
+        if (k === 'SOUTH') return 'B';
+        if (k.startsWith('DPAD_')) return k.replace('DPAD_', '');
+        if (k === 'LEFT_SHOULDER') return 'L';
+        if (k === 'RIGHT_SHOULDER') return 'R';
+        return k;
+    }
 
-            for (const key of TIMELINE_KEYS) {
-                const lbl = document.createElement('div');
-                lbl.className = 'lane-label';
-                lbl.textContent = niceLabel(key);
-                grid.appendChild(lbl);
+    // Show probability bars (0..1) for the GBA buttons.
+    function updateBars(probFlat) {
+        const container = document.getElementById('conf-bars');
+        container.innerHTML = '';
 
-                for (let t = 0; t < T; t++) {
-                    const gt = gtSeq?.[t] ? (valOf(gtSeq[t], key) > GT_THRES) : false;
-                    const pr = prSeqRaw?.[t] ? (valOf(prSeqRaw[t], key) > PR_LOGIT_THRES) : false;
+        UI_BTNS.forEach(k => {
+            const val = (typeof probFlat?.[k] === 'number') ? probFlat[k] : 0;
+            const pct = Math.max(0, Math.min(100, val * 100));
+            const color = val > 0.7 ? '#ff00ff' : '#555';
 
-                    const c = document.createElement('div');
-                    c.className = 'cell';
-                    if (gt && pr) c.classList.add('both');
-                    else if (gt) c.classList.add('gt');
-                    else if (pr) c.classList.add('pr');
+            const html = `
+                <div class="bar-row">
+                    <span>${niceLabel(k)}</span>
+                    <span>${val.toFixed(2)}</span>
+                </div>
+                <div class="bar-bg"><div class="bar-fill" style="width:${pct}%; background:${color}"></div></div>
+            `;
+            container.innerHTML += html;
+        });
+    }
 
-                    grid.appendChild(c);
-                }
+    function valOf(a, k) {
+        const v = a?.[k];
+        return (typeof v === 'number') ? v : 0;
+    }
+
+    function renderTimeline(gtSeq, prSeqProb, horizon) {
+        const T = horizon || 18;
+        const el = document.getElementById('timeline');
+        if (!el) return;
+
+        el.innerHTML = '';
+
+        const grid = document.createElement('div');
+        grid.className = 'timeline';
+        grid.style.gridTemplateColumns = `60px repeat(${T}, 1fr)`;
+
+        for (const key of TIMELINE_KEYS) {
+            const lbl = document.createElement('div');
+            lbl.className = 'lane-label';
+            lbl.textContent = niceLabel(key);
+            grid.appendChild(lbl);
+
+            for (let t = 0; t < T; t++) {
+                const gt = gtSeq?.[t] ? (valOf(gtSeq[t], key) > GT_THRES) : false;
+                const pr = prSeqProb?.[t] ? (valOf(prSeqProb[t], key) > PR_PROB_THRES) : false;
+
+                const c = document.createElement('div');
+                c.className = 'cell';
+                if (gt && pr) c.classList.add('both');
+                else if (gt) c.classList.add('gt');
+                else if (pr) c.classList.add('pr');
+
+                grid.appendChild(c);
             }
-
-            el.appendChild(grid);
         }
 
-        async function loadFrame(idx) {
-            const res = await fetch(`/api/cache_frame/${filename}/${idx}`);
-            const data = await res.json();
-            if (data.error) return;
+        el.appendChild(grid);
+    }
 
-            // 1. Image
-            document.getElementById('frame-img').src = data.image;
+    async function loadFrame(idx) {
+        const res = await fetch(`/api/cache_frame/${filename}/${idx}`);
+        const data = await res.json();
+        if (data.error) return;
 
-            // 2. Ground Truth
-            updateController('gt', data.ground_truth, 'active', GT_THRES);
-            document.getElementById('gt-axis').innerText =
-                `${(data.ground_truth.AXIS_LEFTX || 0).toFixed(2)}, ${(data.ground_truth.AXIS_LEFTY || 0).toFixed(2)}`;
+        // 1. Image
+        document.getElementById('frame-img').src = data.image;
 
-            // 3. Prediction:
-            // - controller/timeline uses RAW logits (buttons_raw) with threshold 0.0
-            // - bars use buttons_prob
-            if (data.prediction) {
-                updateController('pr', data.prediction.buttons_raw, 'pred-active', PR_LOGIT_THRES);
-                updateBars(data.prediction.buttons_prob);
+        // 2. Ground Truth (buttons live directly on ground_truth)
+        updateController('gt', data.ground_truth, 'active', GT_THRES);
+        document.getElementById('gt-axis').innerText =
+            `${(data.ground_truth.AXIS_LEFTX || 0).toFixed(2)}, ${(data.ground_truth.AXIS_LEFTY || 0).toFixed(2)}`;
 
-                const prSeqRaw = (data.prediction_seq || []).map(s => s?.buttons_raw || {});
-                renderTimeline(data.ground_truth_seq, prSeqRaw, data.horizon);
-            } else {
-                // No model loaded; still render GT timeline
-                renderTimeline(data.ground_truth_seq, [], data.horizon);
-            }
+        // 3. Prediction:
+        // - controller/timeline uses buttons_prob (0..1)
+        // - bars use buttons_prob too
+        if (data.prediction) {
+            updateController('pr', data.prediction.buttons_prob, 'pred-active', PR_PROB_THRES);
+            updateBars(data.prediction.buttons_prob);
+
+            const prSeqProb = (data.prediction_seq || []).map(s => s?.buttons_prob || {});
+            renderTimeline(data.ground_truth_seq, prSeqProb, data.horizon);
+        } else {
+            renderTimeline(data.ground_truth_seq, [], data.horizon);
         }
-    </script>
+    }
+</script>
+
 </body>
 
 </html>

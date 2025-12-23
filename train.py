@@ -2,21 +2,22 @@
 # -----------------------------------------------------------------------------
 # Tango NitroGen training (cached dataset) — horizon-aligned, tokenizer-faithful
 #
-# Key points (NitroGen-style):
-# - Input:  vision_horizon frames (past->present, ending at anchor t)
-# - Target: action_horizon actions (future plan starting at t + ACTION_OFFSET)
-# - Tokenizer builds model_input; we ensure our sample matches horizons exactly.
+# Cache-space action layout (what precache_dataset.py wrote):
+#   actions[t] = [AXIS_LEFTX, AXIS_LEFTY, AXIS_RIGHTX, AXIS_RIGHTY, ...BUTTONS...]
+#   where buttons are in action_schema.BUTTON_TOKENS order
 #
-# Update (no remapping):
-# - We DO NOT reorder button channels.
-# - We assume cached .pt "actions[:,4:]" is already in nitrogen.shared.BUTTON_ACTION_TOKENS order.
-# - We log that canonical order and validate shapes; if order is wrong, fix the cache writer (source).
+# Tokenizer-space action layout (what NitrogenTokenizer.pack_actions produces):
+#   action[t]  = [BUTTONS..., j_left(x,y), j_right(x,y)]  # buttons first
+#   and it normalizes sticks from [-1,1] -> [0,1] internally
 #
-# Extras:
-# - Balanced sampling to avoid idle collapse (buttons-only)
-# - Deterministic per-worker RNG
-# - Strong logging to verify alignment + sampling
-# - bf16 autocast, no GradScaler
+# Therefore, training must feed the tokenizer:
+#   - frames:  [1, V, 3, H, W] float32 in [-1,1]
+#   - j_left:  [1, T, 2] from cache axes[0:2]
+#   - j_right: [1, T, 2] from cache axes[2:4]
+#   - buttons: [1, T, 21] from cache actions[4:]
+#
+# NOTE: We must call tokenizer.encode() PER SAMPLE because NitrogenTokenizer.pack_actions()
+# currently squeezes the leading "chunk" dim and assumes it is 1 in training mode.
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import bisect
 import importlib
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -37,6 +38,8 @@ from tqdm import tqdm
 
 from nitrogen.mm_tokenizers import NitrogenTokenizer
 from nitrogen.shared import BUTTON_ACTION_TOKENS as NG_BUTTON_TOKENS
+
+from action_schema import BUTTON_TOKENS, ACTION_DIM
 
 
 # -----------------------------------------------------------------------------
@@ -55,7 +58,7 @@ CONFIG: Dict[str, Any] = {
     "resume_path": os.getenv("RESUME_PATH", ""),  # optional
     "num_workers": int(os.getenv("NUM_WORKERS", "0")),
     "pin_memory": bool(int(os.getenv("PIN_MEMORY", "1"))),
-    "tune_vision_tower": bool(int(os.getenv("TUNE_VISION_TOWER", "1"))),  # False => freeze params by name
+    "tune_vision_tower": bool(int(os.getenv("TUNE_VISION_TOWER", "1"))),  # 0 => freeze by name
     "max_keep_ckpts": int(os.getenv("MAX_KEEP_CKPTS", "3")),
     "seed": int(os.getenv("SEED", "0")),  # 0 => no fixed seed
 }
@@ -66,11 +69,8 @@ NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", "weights/ng.pt")
 BALANCE_SAMPLING = os.getenv("BALANCE_SAMPLING", "1").strip() not in ("0", "false", "False")
 ACTIVE_RATIO = float(os.getenv("ACTIVE_RATIO", "0.7"))  # target fraction of active anchors
 PRESS_THRESHOLD = float(os.getenv("PRESS_THRESHOLD", "0.5"))
-AXIS_THRESHOLD = float(os.getenv("AXIS_THRESHOLD", "0.5"))  # kept for config compatibility; not used for "active"
 
-# Temporal alignment:
-# - ACTION_OFFSET=0 => predict action at same frame t (common for screen->action)
-# - ACTION_OFFSET=1 => predict next-frame action (use if capture shows 1-frame latency)
+# Temporal alignment
 ACTION_OFFSET = int(os.getenv("ACTION_OFFSET", "0"))
 
 
@@ -135,9 +135,7 @@ def _cleanup_old_checkpoints(ckpt_dir: Path, max_keep: int) -> None:
 
 
 def _window_indices_end(idx: int, T: int, n: int) -> List[int]:
-    """
-    Past-to-present window ending at idx (inclusive), clamped.
-    """
+    """Past-to-present window ending at idx (inclusive), clamped."""
     idx = max(0, min(idx, n - 1))
     start = idx - (T - 1)
     out: List[int] = []
@@ -152,9 +150,7 @@ def _window_indices_end(idx: int, T: int, n: int) -> List[int]:
 
 
 def _future_indices_start(idx: int, T: int, n: int) -> List[int]:
-    """
-    Future window starting at idx (inclusive), clamped.
-    """
+    """Future window starting at idx (inclusive), clamped."""
     idx = max(0, min(idx, n - 1))
     out: List[int] = []
     for t in range(T):
@@ -199,14 +195,6 @@ def _tensorize_value(v: Any, *, dtype: torch.dtype = torch.float32) -> Optional[
     if isinstance(v, (list, tuple)):
         if len(v) == 0:
             return torch.tensor([], dtype=dtype)
-        if all(torch.is_tensor(x) for x in v):
-            try:
-                return torch.cat(list(v), dim=0)
-            except Exception:
-                try:
-                    return torch.stack(list(v), dim=0)
-                except Exception:
-                    return None
         if all(_is_numeric_scalar(x) for x in v):
             return torch.tensor(v, dtype=dtype)
         if all(isinstance(x, (list, tuple, np.ndarray)) for x in v):
@@ -236,14 +224,15 @@ def _compute_batch_activity_stats(
 
     active_frac:
       - fraction of samples where ANY button is pressed at the first predicted step.
-
     action_change:
       - mean abs delta across time for buttons only (detects degenerate/clamped horizons).
     """
     with torch.no_grad():
-        b = batch["buttons"].float()  # [B,T,21]
+        b = batch["buttons"].float()  # [B,T,NB]
+        if b.ndim != 3:
+            return {"active_frac": 0.0, "action_change": 0.0}
 
-        btn0 = b[:, 0, :]  # [B,21]
+        btn0 = b[:, 0, :]  # [B,NB]
         active_frac = float((btn0 > press_threshold).any(dim=-1).float().mean().item())
 
         if b.shape[1] > 1:
@@ -260,25 +249,26 @@ def _update_ema(ema: Optional[float], x: float, alpha: float) -> float:
     return float((1.0 - alpha) * float(ema) + alpha * float(x))
 
 
-def _action_dim_stats(actions_all: torch.Tensor) -> Dict[str, float]:
+def _get_loss_from_outputs(outputs: Any) -> torch.Tensor:
     """
-    Quick sanity stats to catch:
-      - axes not near zero (unexpected for GBA DPAD-only)
-      - button values not in {0,1} (or at least bounded)
-    actions_all: [N,25]
+    NitroGen forward has varied return conventions across versions.
+    Support:
+      - dict with "loss"
+      - object with .loss
+      - tuple/list where first element is loss
     """
-    a = actions_all.detach().float()
-    if a.ndim != 2 or a.shape[1] < 25:
-        return {"N": float(a.shape[0]) if a.ndim >= 1 else 0.0}
-
-    return {
-        "N": float(a.shape[0]),
-        "ax_abs_mean": float(a[:, 0:4].abs().mean().item()),
-        "ax_abs_max": float(a[:, 0:4].abs().max().item()),
-        "btn_mean": float(a[:, 4:].mean().item()),
-        "btn_max": float(a[:, 4:].max().item()),
-        "btn_min": float(a[:, 4:].min().item()),
-    }
+    if isinstance(outputs, dict) and "loss" in outputs:
+        return outputs["loss"]
+    if hasattr(outputs, "loss"):
+        loss = getattr(outputs, "loss")
+        if torch.is_tensor(loss):
+            return loss
+    if isinstance(outputs, (tuple, list)) and outputs:
+        if torch.is_tensor(outputs[0]):
+            return outputs[0]
+        if isinstance(outputs[0], dict) and "loss" in outputs[0]:
+            return outputs[0]["loss"]
+    raise RuntimeError(f"Could not extract loss from model outputs of type {type(outputs)}")
 
 
 # -----------------------------------------------------------------------------
@@ -329,6 +319,7 @@ def load_ng_checkpoint_faithful(ckpt_path: str, device: torch.device) -> NgLoade
         try:
             tokenizer_cfg = NitrogenTokenizerConfig.model_validate(tokenizer_cfg)
         except Exception:
+            # keep raw dict if validation fails
             pass
 
     mod = _try_import("nitrogen.flow_matching_transformer.nitrogen")
@@ -346,7 +337,6 @@ def load_ng_checkpoint_faithful(ckpt_path: str, device: torch.device) -> NgLoade
         raise NgPolicyError("Checkpoint missing 'model' state_dict key.")
 
     missing, unexpected = model.load_state_dict(state, strict=False)
-
     if unexpected:
         raise NgPolicyError(f"Unexpected keys in state_dict (first 30): {unexpected[:30]}")
     if missing:
@@ -364,24 +354,16 @@ class CachedTangoDataset(Dataset):
     """
     Cached *.pt files:
       frames:  uint8 [N,3,H,W]
-      actions: float [N,25]  (4 axes + 21 buttons)
-
-    IMPORTANT:
-      - We do NOT reorder buttons.
-      - We assume cache writer stored buttons in nitrogen.shared.BUTTON_ACTION_TOKENS order.
+      actions: float [N,ACTION_DIM]  (4 axes + len(BUTTON_TOKENS) buttons)
 
     Returns (per sample):
-      frames:  float32 [-1,1] [V,3,H,W]   where V = vision_horizon
-      j_left:  float32 [T,2]              where T = action_horizon (future plan)
-      j_right: float32 [T,2]
-      buttons: float32 [T,21]             (AS-STORED in cache; no remap)
-      dropped_frames: bool  [V]
+      frames:  float32 [-1,1] [V,3,H,W]
+      j_left:  float32 [T,2]  from cache axes[0:2]
+      j_right: float32 [T,2]  from cache axes[2:4]
+      buttons: float32 [T,NB] from cache buttons[4:]
+      dropped_frames: bool [V]
       game: str
-      __meta: dict (optional, used for logging only)
-
-    Balanced sampling:
-      - choose an anchor index from active/idle pools
-      - active = any button pressed at that frame (stored order)
+      __meta: dict (for debugging only)
     """
 
     def __init__(
@@ -394,10 +376,8 @@ class CachedTangoDataset(Dataset):
         balance_sampling: bool,
         active_ratio: float,
         press_threshold: float,
-        axis_threshold: float,  # kept for config compatibility, not used for "active"
         base_seed: int,
         include_meta: bool = True,
-        debug_print_file_stats: bool = False,
     ):
         self.root = Path(root_dir)
         self.files = sorted(self.root.glob("*.pt"))
@@ -416,41 +396,36 @@ class CachedTangoDataset(Dataset):
         self.balance_sampling = bool(balance_sampling)
         self.active_ratio = float(active_ratio)
         self.press_threshold = float(press_threshold)
-        self.axis_threshold = float(axis_threshold)  # not used for "active"
 
         self.base_seed = int(base_seed) if base_seed > 0 else 0
         self._rng: Optional[np.random.Generator] = None
 
         self.include_meta = bool(include_meta)
-        self._debug_print_file_stats = bool(debug_print_file_stats)
 
-        # --- Dataset indexing ---
+        # Index
         self.cumulative_sizes: List[int] = []
         self.file_lengths: List[int] = []
         total_frames = 0
 
         print(f"🔍 Scanning cached dataset at {self.root}...")
         for pt_file in tqdm(self.files, desc="Indexing"):
-            try:
-                data = torch.load(pt_file, weights_only=True, map_location="cpu")
-                n = int(data["frames"].shape[0])
-                total_frames += n
-                self.cumulative_sizes.append(total_frames)
-                self.file_lengths.append(n)
-            except Exception as e:
-                print(f"⚠️ Error reading {pt_file}: {e}")
+            data = torch.load(pt_file, weights_only=True, map_location="cpu")
+            n = int(data["frames"].shape[0])
+            total_frames += n
+            self.cumulative_sizes.append(total_frames)
+            self.file_lengths.append(n)
 
         if not self.cumulative_sizes or self.cumulative_sizes[-1] <= 0:
             raise RuntimeError("Indexed dataset but found no frames.")
 
         print(f"✅ Indexed {len(self.files)} files, {total_frames:,} total frames.")
 
-        # --- Per-file cache ---
+        # Per-file cache
         self.cache_idx: int = -1
         self.cache_data: Optional[Dict[str, Any]] = None
         self._active_idx: Optional[torch.Tensor] = None
         self._idle_idx: Optional[torch.Tensor] = None
-        self._cache_active_frac: Optional[float] = None
+        self._cache_active_frac: float = 0.0
 
     def __len__(self) -> int:
         return int(self.cumulative_sizes[-1])
@@ -475,34 +450,22 @@ class CachedTangoDataset(Dataset):
         self.cache_idx = file_idx
         self._active_idx = None
         self._idle_idx = None
-        self._cache_active_frac = None
+        self._cache_active_frac = 0.0
 
         assert self.cache_data is not None
-        acts = self.cache_data["actions"].float()  # [N,25]
-
-        if acts.ndim != 2 or acts.shape[1] < 25:
-            raise RuntimeError(f"actions tensor expected [N,25], got {tuple(acts.shape)}")
-
-        if self._debug_print_file_stats:
-            st = _action_dim_stats(acts)
-            print(
-                f"[file_stats] {self.files[file_idx].name} "
-                f"ax_abs_max={st.get('ax_abs_max', -1.0):.3f} "
-                f"ax_abs_mean={st.get('ax_abs_mean', -1.0):.3f} "
-                f"btn_mean={st.get('btn_mean', -1.0):.3f} "
-                f"btn_range=[{st.get('btn_min', -1.0):.3f},{st.get('btn_max', -1.0):.3f}]"
-            )
+        acts = self.cache_data["actions"].float()  # [N,ACTION_DIM]
+        if acts.ndim != 2 or acts.shape[1] != ACTION_DIM:
+            raise RuntimeError(f"actions expected [N,{ACTION_DIM}], got {tuple(acts.shape)}")
 
         if not self.balance_sampling:
             return
 
-        buttons = acts[:, 4:]  # [N,21] AS-STORED (no remap)
+        buttons = acts[:, 4:]  # [N,NB] cache order
         active = (buttons > self.press_threshold).any(dim=1)
 
         self._active_idx = torch.where(active)[0]
         self._idle_idx = torch.where(~active)[0]
-        n = int(acts.shape[0])
-        self._cache_active_frac = float(active.float().mean().item()) if n > 0 else 0.0
+        self._cache_active_frac = float(active.float().mean().item())
 
     def _choose_anchor(self, default_anchor: int, n: int) -> int:
         if not self.balance_sampling:
@@ -530,10 +493,9 @@ class CachedTangoDataset(Dataset):
         j = int(self._rng.integers(0, int(pool.numel())))
         anchor = int(pool[j].item())
 
-        # avoid always clamping the plan at end-of-file
+        # avoid always clamping plan at end-of-file
         max_anchor = max(0, n - 1 - max(0, self.action_offset))
-        anchor = max(0, min(anchor, max_anchor))
-        return anchor
+        return max(0, min(anchor, max_anchor))
 
     def __getitem__(self, global_idx: int) -> Dict[str, Any]:
         file_idx = bisect.bisect_right(self.cumulative_sizes, global_idx)
@@ -548,11 +510,11 @@ class CachedTangoDataset(Dataset):
             self._load_file(file_idx)
 
         assert self.cache_data is not None
-        actions_all = self.cache_data["actions"]  # [N,25]
+        actions_all = self.cache_data["actions"]  # [N,ACTION_DIM]
         frames_all = self.cache_data["frames"]    # [N,3,H,W] uint8
         n = int(frames_all.shape[0])
         if n <= 0:
-            raise RuntimeError("Empty file encountered in cached dataset.")
+            raise RuntimeError("Empty cached file encountered.")
 
         local_idx = max(0, min(local_idx, n - 1))
         anchor = self._choose_anchor(local_idx, n)
@@ -560,21 +522,20 @@ class CachedTangoDataset(Dataset):
         V = self.vision_horizon
         T = self.action_horizon
 
-        # Vision context: past->present ending at anchor
         ids_vis = _window_indices_end(anchor, V, n)
 
-        # Action targets: future plan starting at anchor + offset
         start_act = anchor + self.action_offset
         ids_act = _future_indices_start(start_act, T, n)
 
-        act_win = actions_all[ids_act].float()  # [T,25]
+        act_win = actions_all[ids_act].float()  # [T,ACTION_DIM]
 
-        j_left = act_win[:, 0:2]     # [T,2]
-        j_right = act_win[:, 2:4]    # [T,2]
-        buttons = act_win[:, 4:]     # [T,21] AS-STORED (no remap)
+        # cache -> tokenizer inputs
+        j_left = act_win[:, 0:2]   # [T,2]  (AXIS_LEFTX, AXIS_LEFTY) in [-1,1]
+        j_right = act_win[:, 2:4]  # [T,2]  (AXIS_RIGHTX, AXIS_RIGHTY) in [-1,1]
+        buttons = act_win[:, 4:]   # [T,NB] in [0,1]
 
         frames_u8 = frames_all[ids_vis]  # [V,3,H,W] uint8
-        frames = frames_u8.float().div(255.0).mul(2.0).sub(1.0)
+        frames = frames_u8.float().div(255.0).mul(2.0).sub(1.0)  # [-1,1]
 
         out: Dict[str, Any] = {
             "frames": frames,
@@ -594,8 +555,7 @@ class CachedTangoDataset(Dataset):
                 "ids_vis": ids_vis,
                 "ids_act": ids_act,
                 "action_offset": int(self.action_offset),
-                "file_active_frac": float(self._cache_active_frac or 0.0),
-                "button_order": "AS_STORED_NO_REMAP",
+                "file_active_frac": float(self._cache_active_frac),
             }
 
         return out
@@ -606,6 +566,13 @@ class CachedTangoDataset(Dataset):
 # -----------------------------------------------------------------------------
 
 def _collate_encoded(encoded_list: List[Dict[str, Any]], device: torch.device) -> Dict[str, Any]:
+    """
+    Tokenizer outputs may include:
+      - torch tensors
+      - numpy arrays
+      - python scalars / lists
+    We convert numpy -> torch and batch across samples.
+    """
     out: Dict[str, Any] = {}
     keys = encoded_list[0].keys()
 
@@ -633,17 +600,7 @@ def _collate_encoded(encoded_list: List[Dict[str, Any]], device: torch.device) -
                 t_vals.append(tv)
 
             if ok:
-                try:
-                    if t_vals[0].ndim >= 1 and t_vals[0].shape[0] == 1:
-                        batched = torch.cat(t_vals, dim=0)
-                    else:
-                        batched = torch.stack(t_vals, dim=0)
-                except Exception:
-                    batched = torch.stack(t_vals, dim=0)
-
-                if k == "actions":
-                    batched = batched.to(dtype=torch.float32)
-
+                batched = torch.stack(t_vals, dim=0)
                 out[k] = batched.to(device=device, non_blocking=True)
                 continue
 
@@ -653,21 +610,22 @@ def _collate_encoded(encoded_list: List[Dict[str, Any]], device: torch.device) -
 
 
 # -----------------------------------------------------------------------------
-# Tokenizer introspection (logs)
+# Tokenizer introspection
 # -----------------------------------------------------------------------------
 
-def _log_tokenizer(tokenizer: Any) -> Tuple[int, int]:
-    ah = int(getattr(tokenizer, "action_horizon", 18))
+def _log_tokenizer(tokenizer: Any) -> tuple[int, int]:
+    ah = int(getattr(tokenizer, "action_horizon", 16))
     vh = int(getattr(tokenizer, "vision_horizon", 1))
     if vh <= 0:
         vh = 1
 
+    old_layout = getattr(tokenizer, "old_layout", None)
+
     print("\n=== TOKENIZER INTROSPECTION ===")
     print(f"action_horizon = {ah}")
     print(f"vision_horizon = {vh}")
-    for k in ["image_size", "frame_size", "num_buttons", "num_action_dims"]:
-        if hasattr(tokenizer, k):
-            print(f"{k} = {getattr(tokenizer, k)}")
+    if isinstance(old_layout, bool):
+        print(f"old_layout = {old_layout}  (NOTE: pack_actions still uses [buttons, j_left, j_right])")
     print("=== END ===\n")
     return ah, vh
 
@@ -683,17 +641,34 @@ def main() -> None:
     ckpt_dir = Path(CONFIG["checkpoints_dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # Canonical button order (the only one we trust end-to-end now)
-    tok_bt = list(NG_BUTTON_TOKENS)
-    if len(tok_bt) != 21 or not all(isinstance(x, str) for x in tok_bt):
+    # -------------------------------------------------------------------------
+    # Canonical button order verification
+    # -------------------------------------------------------------------------
+    ng_bt = list(NG_BUTTON_TOKENS)
+    schema_bt = list(BUTTON_TOKENS)
+
+    if len(ng_bt) != len(schema_bt):
         raise RuntimeError(
-            f"Unexpected NG_BUTTON_TOKENS: len={len(tok_bt)} "
-            f"type0={type(tok_bt[0]) if tok_bt else None}"
+            f"Button token length mismatch: nitrogen.shared={len(ng_bt)} vs action_schema={len(schema_bt)}"
+        )
+    if ng_bt != schema_bt:
+        raise RuntimeError(
+            "Button token order mismatch between nitrogen.shared.BUTTON_ACTION_TOKENS and action_schema.BUTTON_TOKENS.\n"
+            "Fix: ensure action_schema imports the same Nitrogen installation used here, and rebuild cache if needed."
         )
 
-    print("✅ Canonical button order (no remap anywhere): nitrogen.shared.BUTTON_ACTION_TOKENS")
-    print("   Token order:", tok_bt)
+    print("✅ Canonical button order verified.")
+    print(f"✅ Expected cached ACTION_DIM={ACTION_DIM} (4 axes + {len(schema_bt)} buttons)")
+    print(f"✅ ACTION_OFFSET={ACTION_OFFSET}")
 
+    # Perf knobs (safe defaults)
+    if device.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
+    # -------------------------------------------------------------------------
+    # Load base checkpoint + tokenizer
+    # -------------------------------------------------------------------------
     print(f"🧠 Loading base checkpoint (faithful): {NG_CKPT_PATH}")
     loaded = load_ng_checkpoint_faithful(NG_CKPT_PATH, device=device)
 
@@ -706,7 +681,7 @@ def main() -> None:
     model = loaded.model
     model.train()
 
-    # Optional: freeze vision tower params
+    # Optional: freeze vision tower params (best-effort by name match)
     if not CONFIG["tune_vision_tower"]:
         frozen = 0
         total = 0
@@ -722,12 +697,11 @@ def main() -> None:
     print(
         "HORIZON ALIGNMENT:\n"
         f"  vision_horizon={vision_horizon}  (frames: past->present ending at anchor t)\n"
-        f"  action_horizon={action_horizon}  (actions: future starting at t+ACTION_OFFSET)\n"
+        f"  action_horizon={action_horizon}  (plan: future starting at t+ACTION_OFFSET)\n"
         f"  ACTION_OFFSET={ACTION_OFFSET}\n"
     )
     print(
-        f"balance_sampling={BALANCE_SAMPLING} active_ratio={ACTIVE_RATIO} "
-        f"press_th={PRESS_THRESHOLD} axis_th={AXIS_THRESHOLD}"
+        f"balance_sampling={BALANCE_SAMPLING} active_ratio={ACTIVE_RATIO} press_th={PRESS_THRESHOLD}"
     )
 
     writer = SummaryWriter(CONFIG["log_dir"])
@@ -740,10 +714,8 @@ def main() -> None:
         balance_sampling=BALANCE_SAMPLING,
         active_ratio=ACTIVE_RATIO,
         press_threshold=PRESS_THRESHOLD,
-        axis_threshold=AXIS_THRESHOLD,
         base_seed=CONFIG["seed"],
         include_meta=True,
-        debug_print_file_stats=False,
     )
 
     loader = DataLoader(
@@ -770,7 +742,7 @@ def main() -> None:
 
     did_probe = False
 
-    # Live stats (verifies sampling + nontrivial horizons)
+    # Live stats (sampling + nontrivial horizons)
     ema_active = None
     ema_action_change = None
     ema_alpha = 0.02
@@ -785,34 +757,29 @@ def main() -> None:
 
             with torch.no_grad():
                 stats = _compute_batch_activity_stats(batch, press_threshold=PRESS_THRESHOLD)
-                active_frac = stats["active_frac"]
-                action_change = stats["action_change"]
-                ema_active = _update_ema(ema_active, active_frac, ema_alpha)
-                ema_action_change = _update_ema(ema_action_change, action_change, ema_alpha)
+                ema_active = _update_ema(ema_active, stats["active_frac"], ema_alpha)
+                ema_action_change = _update_ema(ema_action_change, stats["action_change"], ema_alpha)
 
+            # -----------------------------------------------------------------
+            # Tokenize per-sample (required by tokenizer.pack_actions squeeze)
+            # -----------------------------------------------------------------
             encoded_samples: List[Dict[str, Any]] = []
 
             for i in range(bs):
-                frames_btchw = batch["frames"][i].unsqueeze(0)       # [1,V,3,H,W]
-                j_left = batch["j_left"][i].unsqueeze(0)             # [1,T,2]
-                j_right = batch["j_right"][i].unsqueeze(0)           # [1,T,2]
-                buttons = batch["buttons"][i].unsqueeze(0)           # [1,T,21] (AS-STORED)
-                dropped = batch["dropped_frames"][i].unsqueeze(0)    # [1,V]
-                game = batch["game"][i] if isinstance(batch["game"], list) else batch["game"]
-
                 sample = {
-                    "frames": frames_btchw,
-                    "j_left": j_left,
-                    "j_right": j_right,
-                    "buttons": buttons,
-                    "dropped_frames": dropped,
-                    "game": game,
+                    # tokenizer expects "chunk dim" = 1 in training mode
+                    "frames": batch["frames"][i].unsqueeze(0),            # [1,V,3,H,W] float[-1,1]
+                    "j_left": batch["j_left"][i].unsqueeze(0),            # [1,T,2]   float[-1,1]
+                    "j_right": batch["j_right"][i].unsqueeze(0),          # [1,T,2]   float[-1,1]
+                    "buttons": batch["buttons"][i].unsqueeze(0),          # [1,T,NB]  float[0,1]
+                    "dropped_frames": batch["dropped_frames"][i].unsqueeze(0),  # [1,V] bool
+                    "game": batch["game"][i] if isinstance(batch["game"], list) else batch["game"],
                 }
 
                 try:
                     enc = tokenizer.encode(sample)
-                except ValueError as e:
-                    print(f"⚠️ Tokenizer error: {e}")
+                except Exception as e:
+                    print(f"⚠️ Tokenizer.encode failed (skipping sample): {e}")
                     enc = None
 
                 if enc is not None:
@@ -821,10 +788,13 @@ def main() -> None:
             if not encoded_samples:
                 continue
 
-
             model_input = _collate_encoded(encoded_samples, device=device)
 
+            # -----------------------------------------------------------------
+            # One-time probe (critical sanity)
+            # -----------------------------------------------------------------
             if not did_probe:
+                did_probe = True
                 print("=== MODEL_INPUT KEYS / SHAPES ===")
                 for k in sorted(model_input.keys()):
                     v = model_input[k]
@@ -834,53 +804,37 @@ def main() -> None:
                         print(f"{k:24s} {type(v)}")
                 print("===============================")
 
-                a = model_input.get("actions", None)
-                if torch.is_tensor(a):
-                    print("actions[0,0,:10] =", a[0, 0, :10].detach().float().cpu().tolist())
-                    print("actions[0,1,:10] =", a[0, 1, :10].detach().float().cpu().tolist())
-
-                    btn = a[0, :, 4:]  # [T,21]
-                    print("btn any-pressed per step:",
-                          (btn > 0.5).any(dim=-1).int().cpu().tolist())
-                    print("btn mean:", float(btn.mean().item()),
-                          "max:", float(btn.max().item()))
-
-            if "actions" in model_input and not torch.is_tensor(model_input["actions"]):
-                raise RuntimeError(f"model_input['actions'] is not a tensor, got {type(model_input['actions'])}")
-            if "actions" not in model_input:
-                raise RuntimeError(f"Tokenizer output missing 'actions' key. Keys: {sorted(list(model_input.keys()))[:64]}")
-
-            if not did_probe:
-                did_probe = True
-
                 x_in = batch["frames"][0]  # [V,3,H,W]
-                print(f"\n[probe] dataset frames range: {_tensor_stats(x_in)}")
+                print(f"\n[probe] dataset frames range: {_tensor_stats(x_in)} (should be ~[-1,1])")
 
-                pv = model_input.get("pixel_values", None)
-                pf = model_input.get("frames", None)
-                if torch.is_tensor(pv):
-                    print(f"[probe] tokenizer pixel_values range: {_tensor_stats(pv)} | shape={tuple(pv.shape)}")
-                if torch.is_tensor(pf):
-                    print(f"[probe] tokenizer frames range: {_tensor_stats(pf)} | shape={tuple(pf.shape)}")
+                # Tokenizer actions are numpy -> torch here, shape [B,T,25]
+                a = model_input["actions"]  # [B,T,25]
+                btn = a[0, 0, 0:21]
+                jl  = a[0, 0, 21:23]
+                jr  = a[0, 0, 23:25]
+                print("probe buttons[0,0] pressed idx:", (btn > 0.5).nonzero().reshape(-1).tolist())
+                print("probe j_left [0,0] =", jl.detach().float().cpu().tolist())
+                print("probe j_right[0,0] =", jr.detach().float().cpu().tolist())
 
-                a = model_input["actions"]
-                print(f"[probe] tokenizer actions: shape={tuple(a.shape)} dtype={a.dtype} device={a.device}")
 
                 meta0 = batch.get("__meta", None)
-                if meta0 is not None and isinstance(meta0, list) and len(meta0) > 0:
+                if isinstance(meta0, list) and meta0:
                     m = meta0[0]
-                    print("[probe] sample meta:")
-                    print(f"  anchor={m.get('anchor')} ids_vis[0..]={m.get('ids_vis')[:min(6, len(m.get('ids_vis', [])))]} ...")
-                    print(f"  ids_act[0..]={m.get('ids_act')[:min(6, len(m.get('ids_act', [])))]} ... offset={m.get('action_offset')}")
-                    print(f"  file_active_frac={m.get('file_active_frac'):.3f}")
-                    print(f"  button_order={m.get('button_order')}")
+                    print("[probe] meta:", {k: m.get(k) for k in ["anchor", "action_offset", "file_active_frac"]})
                 print()
 
+            # -----------------------------------------------------------------
+            # Forward / backward
+            # -----------------------------------------------------------------
             optimizer.zero_grad(set_to_none=True)
 
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=(device.type == "cuda")):
-                outputs = model(model_input)
-                loss = outputs["loss"]
+            use_amp = (device.type == "cuda")
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+                try:
+                    outputs = model(model_input)     # some versions accept dict
+                except TypeError:
+                    outputs = model(**model_input)   # others require kwargs
+                loss = _get_loss_from_outputs(outputs)
 
             loss.backward()
             optimizer.step()
@@ -889,8 +843,7 @@ def main() -> None:
             loss_val = float(loss.detach().item())
 
             pbar.set_description(
-                f"Loss: {loss_val:.4f} act~{(float(ema_active or 0.0)) * 100:4.1f}% "
-                f"Δa~{float(ema_action_change or 0.0):.3f}"
+                f"Loss: {loss_val:.4f} act~{(float(ema_active or 0.0))*100:4.1f}% Δa~{float(ema_action_change or 0.0):.3f}"
             )
             writer.add_scalar("Training/Loss", loss_val, global_step)
             writer.add_scalar("Training/ActiveFrac_EMA", float(ema_active or 0.0), global_step)
@@ -904,6 +857,7 @@ def main() -> None:
                         "optimizer": optimizer.state_dict(),
                         "step": global_step,
                         "ckpt_config": _to_dict(loaded.ckpt_config),
+                        "tokenizer_cfg": _to_dict(loaded.tokenizer_cfg),
                     },
                     save_path,
                 )
