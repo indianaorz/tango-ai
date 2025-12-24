@@ -51,9 +51,9 @@ def generate_instances(n_pairs: int, base_port: int = BASE_PORT) -> List[Dict]:
 
         # Default: learner uses DRL; opponent uses curriculum
         if i % 2 == 0:
-            opp_strategy = STRAT_WANDER   # Game1 Opponent
+            opp_strategy = STRAT_DRL   # Game1 Opponent
         elif i % 2 == 1:
-            opp_strategy = STRAT_WANDER   # Game2 Opponent
+            opp_strategy = STRAT_DRL   # Game2 Opponent
         else:
             opp_strategy = STRAT_DRL      # remaining pairs: self-play
 
@@ -102,7 +102,31 @@ RANDOM_ACTION_KEYS_FOR_SKIP_STRATEGY = ["B", "DOWN", "UP", "LEFT", "RIGHT", "A"]
 # =============================================================================
 # Nitrogen (ng.pt) policy config
 # =============================================================================
-NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", os.path.join(PROJECT_ROOT, "checkpoints", "step_15000.pt"))
+def _get_latest_checkpoint(ckpt_dir: str, default: str = "ng.pt") -> str:
+    """Finds the checkpoint with the highest step count in the directory."""
+    if not os.path.exists(ckpt_dir):
+        return os.path.join(ckpt_dir, default)
+    
+    max_step = -1
+    best_ckpt = default
+    
+    for fname in os.listdir(ckpt_dir):
+        if fname.startswith("step_") and fname.endswith(".pt"):
+            try:
+                # Parse "step_12345.pt" -> 12345
+                step_str = fname.split("_")[1].split(".")[0]
+                step = int(step_str)
+                if step > max_step:
+                    max_step = step
+                    best_ckpt = fname
+            except (IndexError, ValueError):
+                continue
+                
+    return os.path.join(ckpt_dir, best_ckpt)
+
+_CKPT_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
+NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", _get_latest_checkpoint(_CKPT_DIR, "step_20000.pt"))
+
 # NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", os.path.join(PROJECT_ROOT, "weights", "ng.pt"))
 USE_NG_POLICY = 1
 NG_DEVICE = os.getenv("NG_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")

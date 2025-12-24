@@ -32,7 +32,41 @@ import logging
 # Silence Werkzeug request logs (the "127.0.0.1 - - ..." lines)
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
+class SafeHybridStrategy:
+    """
+    Wraps the heavy NG strategy and the lightweight Bootstrap strategy.
+    
+    Even if NG is loaded, we cannot run it if the game hasn't provided an image 
+    (e.g. during matchmaking/black screens).
+    
+    If an image is present -> Use NG Strategy.
+    If no image -> Fallback to Bootstrap Strategy (keep Debug UI alive).
+    """
+    def __init__(self, primary: Any, fallback: Any):
+        self.primary = primary
+        self.fallback = fallback
 
+    def reset_state(self, port: int):
+        if hasattr(self.primary, "reset_state"):
+            self.primary.reset_state(port)
+        if hasattr(self.fallback, "reset_state"):
+            self.fallback.reset_state(port)
+
+    def decide_action(self, port: int, game_state: dict) -> dict:
+        # Check if we have a valid image payload
+        image_data = game_state.get("image")
+        
+        # If image is None or empty string, the model can't see. 
+        # Use fallback to keep the loop ticking and UI updating.
+        if not image_data:
+            return self.fallback.decide_action(port, game_state)
+        
+        # Otherwise, the game is rendering. Let the model drive.
+        return self.primary.decide_action(port, game_state)
+
+    # --- NEW: Proxy attributes to the primary strategy ---
+    def __getattr__(self, name):
+        return getattr(self.primary, name)
 # ----------------------------
 # Debug helpers
 # ----------------------------
@@ -305,15 +339,17 @@ async def _run() -> None:
 
         if is_ng_learner:
             bootstrap_every_n = int(os.environ.get("NG_BOOTSTRAP_START_EVERY_N", "1"))
+            # 1. Create the bootstrap strategy
             bootstrap = StartSpamStrategy(
                 key_bit_positions=config.KEY_BIT_POSITIONS,
                 every_n=bootstrap_every_n,
             )
+            # 2. Start with bootstrap active
             sw = SwappableStrategy(initial=bootstrap)
             strat_obj = sw
 
-            # Capture everything needed for background init
-            def _load_and_swap(swappable: SwappableStrategy, cfg: dict):
+            # 3. Update the loader to use the SafeHybridStrategy
+            def _load_and_swap(swappable: SwappableStrategy, cfg: dict, fallback_strat: Any):
                 try:
                     print("[NG] Background load + warmup starting...")
                     ng_strat = NGAgentStrategy(
@@ -329,20 +365,30 @@ async def _run() -> None:
                         allow_actions_in_window=True,
                         forbid_actions_in_battle=[],
                     )
-                    swappable.swap(ng_strat)
-                    print("[NG] Ready. Swapped in NG strategy.")
+                    
+                    # --- FIX IS HERE ---
+                    # Don't swap directly to ng_strat. Swap to the Hybrid.
+                    # This ensures that if the game is still black-screened, 
+                    # we fall back to 'fallback_strat' (bootstrap) instead of crashing/stalling.
+                    safe_hybrid = SafeHybridStrategy(primary=ng_strat, fallback=fallback_strat)
+                    
+                    swappable.swap(safe_hybrid)
+                    print("[NG] Ready. Swapped in Safe Hybrid NG strategy.")
+                    # -------------------
+                    
                 except Exception as e:
-                    # If NG fails to load, keep bootstrap strategy alive so the run doesn't silently stall.
                     print(f"[NG] Failed to load NG strategy: {e!r}")
+                    import traceback
+                    traceback.print_exc()
 
+            # 4. Pass 'bootstrap' to the thread args
             t = threading.Thread(
                 target=_load_and_swap,
-                args=(sw, inst_cfg),
+                args=(sw, inst_cfg, bootstrap), # <-- Added bootstrap here
                 daemon=True,
             )
             t.start()
             ng_loader_threads.append(t)
-
         # Wrap (possibly swappable) strategy with debug capture
         strat_obj = DebugStrategyWrapper(
             inner=strat_obj,
