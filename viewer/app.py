@@ -18,6 +18,14 @@ sys.path.append(parent_dir)
 # Add 'strategy' folder to path so we can import the model class
 sys.path.append(os.path.join(parent_dir, "strategy"))
 
+# --- IMPORT ACTION SCHEMA (Single Source of Truth) ---
+try:
+    from action_schema import BUTTON_TOKENS, GBA_UI_BUTTONS
+except ImportError:
+    print("⚠️ action_schema.py not found. Using defaults.")
+    BUTTON_TOKENS = []
+    GBA_UI_BUTTONS = []
+
 app = Flask(__name__)
 
 # --- CONFIG ---
@@ -225,10 +233,8 @@ def _policy_vec_to_display(v25, *, old_layout):
         "meta": {"buttons_are_logits": buttons_are_logits}
     }
 
-# --- ADD THIS HELPER FUNCTION ---
 def _json_action_to_display(json_row: dict) -> dict:
-    """Converts a raw JSONL row (flat dict) into the nested structure the viewer expects."""
-    # 1. Extract Axes
+    """Converts a raw JSONL row (flat dict) into the nested structure."""
     axes = {
         "AXIS_LEFTX": float(json_row.get("AXIS_LEFTX", 0.0)),
         "AXIS_LEFTY": float(json_row.get("AXIS_LEFTY", 0.0)),
@@ -236,17 +242,16 @@ def _json_action_to_display(json_row: dict) -> dict:
         "AXIS_RIGHTY": float(json_row.get("AXIS_RIGHTY", 0.0))
     }
     
-    # 2. Extract Buttons
     buttons_raw = {}
+    # Use the imported BUTTON_TOKENS from action_schema
     for btn in BUTTON_TOKENS:
-        # JSONL stores 1.0/0.0
         val = float(json_row.get(btn, 0.0))
         buttons_raw[btn] = val
         
     return {
         "axes": axes,
         "buttons_raw": buttons_raw,
-        "buttons_prob": buttons_raw, # For JSONL, raw 1.0 IS the probability
+        "buttons_prob": buttons_raw, 
         "meta": {"source": "jsonl"}
     }
 
@@ -461,13 +466,13 @@ def inspect_cache(filename):
 # --- NEW ROUTE: RL INSPECTOR UI ---
 @app.route("/rl")
 def view_rl_inspector():
-    # Pass metadata so we can show counts
     stats = {
         "total": len(RL_DATA_CACHE),
         "high_reward": len([x for x in RL_DATA_CACHE if x['weight'] > 1.0]),
         "punishment": len([x for x in RL_DATA_CACHE if x['weight'] < 1.0])
     }
-    return render_template("rl_inspector.html", stats=stats)
+    # INJECT GBA_UI_BUTTONS HERE
+    return render_template("rl_inspector.html", stats=stats, ui_buttons=GBA_UI_BUTTONS)
 
 # --- NEW ROUTE: RL SAMPLE API ---
 @app.route("/api/rl_list")

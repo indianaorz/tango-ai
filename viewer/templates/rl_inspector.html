@@ -5,7 +5,7 @@
     <style>
         body { background: #0d0d0d; color: #eee; font-family: 'Consolas', monospace; margin: 0; display: flex; height: 100vh; overflow: hidden; }
         
-        /* --- SIDEBAR --- */
+        /* SIDEBAR */
         .sidebar { width: 320px; background: #1a1a1a; border-right: 1px solid #333; display: flex; flex-direction: column; flex-shrink: 0; }
         .list-header { padding: 15px; background: #222; border-bottom: 1px solid #333; }
         .list-filters { display: flex; gap: 5px; margin-top: 10px; }
@@ -22,10 +22,10 @@
         .w-low { background: rgba(255, 0, 0, 0.2); color: #ff4444; border: 1px solid #550000; }
         .w-mid { background: #333; color: #aaa; }
 
-        /* --- MAIN STAGE --- */
+        /* STAGE */
         .stage { flex: 1; padding: 20px; display: flex; flex-direction: column; gap: 20px; overflow-y: auto; align-items: center; }
         
-        /* TOP ROW: Image vs Video */
+        /* VISUALS */
         .visuals-row { display: flex; gap: 20px; width: 100%; max-width: 1200px; height: 360px; }
         .view-box { flex: 1; background: #151515; border: 1px solid #333; border-radius: 8px; padding: 10px; display: flex; flex-direction: column; position: relative; }
         .view-header { font-size: 12px; color: #888; text-transform: uppercase; margin-bottom: 10px; border-bottom: 1px solid #333; padding-bottom: 5px; display: flex; justify-content: space-between; }
@@ -33,18 +33,18 @@
         .model-view { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; background: #000; }
         video { width: 100%; height: 100%; object-fit: contain; background: #000; }
 
-        /* WEIGHT DISPLAY */
         .weight-floater { position: absolute; bottom: 20px; right: 20px; background: rgba(0,0,0,0.8); padding: 10px 20px; border-radius: 8px; border: 1px solid #444; text-align: center; z-index: 10; }
         .big-stat { font-size: 32px; font-weight: bold; line-height: 1; }
         .stat-label { font-size: 10px; color: #aaa; text-transform: uppercase; letter-spacing: 1px; }
 
-        /* --- CONTROLLER (From Inspect Cache) --- */
-        .controls-area { display: flex; gap: 40px; margin-top: 10px; }
+        /* CONTROLS */
+        .controls-area { display: flex; gap: 40px; margin-top: 10px; width: 100%; max-width: 1200px; }
         
-        .controller { background: #e0e0e0; width: 240px; height: 140px; border-radius: 15px 15px 30px 30px; position: relative; border: 2px solid #999; transform: scale(1); }
+        .controller { background: #e0e0e0; width: 240px; height: 140px; border-radius: 15px 15px 30px 30px; position: relative; border: 2px solid #999; transform: scale(1); margin: 0 auto; }
         .btn { position: absolute; background: #555; border: 1px solid #333; transition: background 0.05s; }
         .btn.active { background: #00ff00 !important; box-shadow: 0 0 10px #00ff00; }
         
+        /* GBA Layout */
         .dpad { position: absolute; top: 45px; left: 20px; width: 70px; height: 70px; }
         .btn.up { top: 0; left: 23px; width: 24px; height: 24px; }
         .btn.down { bottom: 0; left: 23px; width: 24px; height: 24px; }
@@ -58,8 +58,8 @@
         .btn.start { bottom: 15px; left: 100px; width: 25px; height: 8px; transform: rotate(-25deg); background: #999; }
         .btn.select { bottom: 15px; left: 70px; width: 25px; height: 8px; transform: rotate(-25deg); background: #999; }
 
-        /* --- TIMELINE --- */
-        .timeline-wrap { width: 500px; }
+        /* TIMELINE */
+        .timeline-wrap { flex: 1; }
         .timeline { display: grid; grid-template-columns: 60px repeat(18, 1fr); gap: 2px; align-items: center; }
         .lane-label { font-size: 10px; color: #aaa; text-align: right; padding-right: 6px; }
         .cell { width: 100%; height: 10px; background: #222; border: 1px solid #333; border-radius: 2px; }
@@ -88,7 +88,6 @@
     </div>
 
     <div class="stage">
-        
         <div class="visuals-row">
             <div class="view-box">
                 <div class="view-header">
@@ -105,7 +104,6 @@
                     <span style="color:#aaa">Video</span>
                 </div>
                 <video id="vidContext" muted></video>
-                
                 <div class="weight-floater">
                     <div class="stat-label">RL Weight</div>
                     <div id="metaWeight" class="big-stat">--</div>
@@ -118,7 +116,6 @@
         </div>
 
         <div class="controls-area">
-            
             <div>
                 <div class="view-header" style="text-align:center">Action at t=0</div>
                 <div class="controller" id="ctrl-truth">
@@ -142,23 +139,21 @@
                 <div id="timeline"></div>
             </div>
         </div>
-
     </div>
 
     <script>
-        const UI_BTNS = ['DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'EAST', 'SOUTH', 'LEFT_SHOULDER', 'RIGHT_SHOULDER', 'BACK', 'START'];
+        // INJECTED FROM FLASK (action_schema.GBA_UI_BUTTONS)
+        const UI_BTNS = {{ ui_buttons | tojson }};
         
-        // INIT
         loadList('all', document.querySelector('.filter-btn'));
 
         function niceLabel(k) {
-            if (k === 'BACK') return 'SEL';
-            if (k === 'EAST') return 'A';
-            if (k === 'SOUTH') return 'B';
-            if (k.startsWith('DPAD_')) return k.replace('DPAD_', '');
-            if (k === 'LEFT_SHOULDER') return 'L';
-            if (k === 'RIGHT_SHOULDER') return 'R';
-            return k;
+            const map = {
+                'BACK': 'SEL', 'EAST': 'A', 'SOUTH': 'B', 'START': 'STRT',
+                'DPAD_UP': 'UP', 'DPAD_DOWN': 'DN', 'DPAD_LEFT': 'LF', 'DPAD_RIGHT': 'RT',
+                'LEFT_SHOULDER': 'L', 'RIGHT_SHOULDER': 'R'
+            };
+            return map[k] || k;
         }
 
         function loadList(filter, btnEl) {
@@ -189,27 +184,22 @@
         }
 
         function loadDetail(idx, el, item) {
-            // Update UI Active
             document.querySelectorAll('.sample-item').forEach(i => i.classList.remove('active'));
             el.classList.add('active');
 
-            // Update Metadata
             document.getElementById('metaReplay').innerText = item.replay;
             document.getElementById('metaFrame').innerText = item.frame;
             const wEl = document.getElementById('metaWeight');
             wEl.innerText = item.weight.toFixed(2);
             wEl.style.color = item.weight > 1 ? '#00ff00' : (item.weight < 1 ? '#ff4d4d' : '#888');
 
-            // Video Setup (Don't play yet)
             const vid = document.getElementById('vidContext');
             const src = `/video/${item.replay}`;
             if (!vid.currentSrc.includes(src)) vid.src = src;
 
-            // Fetch Data
             fetch(`/api/rl_detail/${idx}`).then(r=>r.json()).then(data => {
-                if(data.error) { alert(data.error); return; }
+                if(data.error) { console.error(data.error); return; }
 
-                // 1. Image Handling
                 const imgEl = document.getElementById('imgInput');
                 const noImg = document.getElementById('noImg');
                 document.getElementById('srcType').innerText = data.source_type.toUpperCase();
@@ -223,35 +213,28 @@
                     noImg.style.display = 'block';
                 }
 
-                // 2. Video Looping Logic
                 const startT = Math.max(0, data.timestamp);
-                const endT = startT + 1.5; // Loop 1.5 seconds
+                const endT = startT + 1.5; 
                 
-                // Clear old listener
                 if(vid._loop) vid.removeEventListener('timeupdate', vid._loop);
-                
-                // Define new loop
-                vid._loop = () => {
-                    if(vid.currentTime >= endT) {
-                        vid.currentTime = startT;
-                        vid.play();
-                    }
-                };
+                vid._loop = () => { if(vid.currentTime >= endT) { vid.currentTime = startT; vid.play(); }};
                 vid.addEventListener('timeupdate', vid._loop);
                 
-                // Start
-                vid.currentTime = startT;
-                vid.play();
+                // Seek safely
+                if(vid.readyState > 0) { vid.currentTime = startT; vid.play(); }
+                else { vid.onloadedmetadata = () => { vid.currentTime = startT; vid.play(); }; }
 
-                // 3. Controller & Timeline
                 if(data.actions && data.actions.length > 0) {
-                    // Update Controller (Frame 0)
+                    // Update Controller (Frame 0) using dynamic keys
                     const act0 = data.actions[0].buttons_raw;
                     UI_BTNS.forEach(k => {
                         const btn = document.getElementById(`btn-${k}`);
                         if(btn) {
                             btn.classList.remove('active');
-                            if(act0[k] > 0.5) btn.classList.add('active');
+                            // Handle both scalar and 1-item list if format varies
+                            const val = act0[k];
+                            const v = (Array.isArray(val) ? val[0] : val);
+                            if(v > 0.5) btn.classList.add('active');
                         }
                     });
 
@@ -265,25 +248,24 @@
             const el = document.getElementById('timeline');
             el.innerHTML = '';
             
-            // Create Grid
             const T = actions.length;
             const grid = document.createElement('div');
             grid.className = 'timeline';
             grid.style.gridTemplateColumns = `60px repeat(${T}, 1fr)`;
 
+            // Use the injected UI_BTNS list to generate rows
             UI_BTNS.forEach(key => {
-                // Label
                 const lbl = document.createElement('div');
                 lbl.className = 'lane-label';
                 lbl.innerText = niceLabel(key);
                 grid.appendChild(lbl);
 
-                // Cells
                 actions.forEach(act => {
                     const cell = document.createElement('div');
                     cell.className = 'cell';
-                    const val = act.buttons_raw[key] || 0;
-                    if(val > 0.5) cell.classList.add('active');
+                    const val = act.buttons_raw[key];
+                    const v = (Array.isArray(val) ? val[0] : val);
+                    if(v > 0.5) cell.classList.add('active');
                     grid.appendChild(cell);
                 });
             });
