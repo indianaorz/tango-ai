@@ -13,6 +13,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, get_worker_info
 from tqdm import tqdm
+from PIL import Image
+import torchvision.transforms.functional as TF
 
 from action_schema import BUTTON_TOKENS, ACTION_DIM
 
@@ -66,69 +68,50 @@ def to_dict(x: Any) -> Any:
     return {"repr": repr(x)}
 
 # -----------------------------------------------------------------------------
-# Collation Logic (Fixes the TypeError)
+# Collation Logic
 # -----------------------------------------------------------------------------
 def _is_numeric_scalar(x: Any) -> bool:
     return isinstance(x, (int, float, np.number)) and not isinstance(x, bool)
 
 def _tensorize_value(v: Any, dtype: torch.dtype = torch.float32) -> Optional[torch.Tensor]:
-    """Best-effort conversion of numpy/list/tuple to Tensor."""
-    if torch.is_tensor(v):
-        return v
+    if torch.is_tensor(v): return v
     if isinstance(v, np.ndarray):
         if v.dtype == object: return None
         return torch.from_numpy(v)
     if isinstance(v, (list, tuple)):
         if not v: return torch.tensor([], dtype=dtype)
         if all(_is_numeric_scalar(x) for x in v): return torch.tensor(v, dtype=dtype)
-        # Handle list of arrays/lists
         try:
-            # Recursively try to convert elements if they are arrays
             if isinstance(v[0], (np.ndarray, list)):
                 return torch.tensor(np.array(v), dtype=dtype)
         except: return None
     return None
 
 def collate_encoded(encoded_list: List[Dict[str, Any]], device: torch.device) -> Dict[str, Any]:
-    """
-    Robust collation that handles mixed types (Tensors, Numpy, Lists)
-    and ensures everything meant for the model becomes a Tensor on `device`.
-    """
     out: Dict[str, Any] = {}
     if not encoded_list: return out
-    
     keys = encoded_list[0].keys()
-
     for k in keys:
         vals = [e[k] for e in encoded_list]
         v0 = vals[0]
-
-        # Case 1: Already Tensor -> Cat/Stack
         if torch.is_tensor(v0):
             try: batched = torch.cat(vals, dim=0)
             except: batched = torch.stack(vals, dim=0)
             out[k] = batched.to(device=device, non_blocking=True)
             continue
-
-        # Case 2: Try converting to Tensor (Numpy/List -> Tensor)
         t0 = _tensorize_value(v0)
         if t0 is not None:
             t_vals = []
             ok = True
             for v in vals:
                 tv = _tensorize_value(v)
-                if tv is None:
-                    ok = False; break
+                if tv is None: ok = False; break
                 t_vals.append(tv)
-            
             if ok:
                 batched = torch.stack(t_vals, dim=0)
                 out[k] = batched.to(device=device, non_blocking=True)
                 continue
-
-        # Case 3: Fallback (Strings, Metadata)
         out[k] = vals
-
     return out
 
 # -----------------------------------------------------------------------------
@@ -182,10 +165,10 @@ def load_ng_checkpoint_faithful(ckpt_path: str, device: torch.device) -> NgLoade
     return NgLoaded(model=model, ckpt_config=ckpt_config, tokenizer_cfg=tokenizer_cfg, device=device)
 
 # -----------------------------------------------------------------------------
-# Dataset (With Caching Fixes)
+# Dataset (Updated with Masking)
 # -----------------------------------------------------------------------------
 class CachedSplitDataset(Dataset):
-    def __init__(self, root_dir: str, vision_horizon: int, balance_sampling: bool, active_ratio: float, press_threshold: float, base_seed: int):
+    def __init__(self, root_dir: str, vision_horizon: int, balance_sampling: bool, active_ratio: float, press_threshold: float, base_seed: int, mask_path: str = None):
         self.root = Path(root_dir)
         self.files = sorted(self.root.glob("*.pt"))
         if not self.files: raise FileNotFoundError(f"No .pt files found in {self.root}")
@@ -197,20 +180,37 @@ class CachedSplitDataset(Dataset):
         self.base_seed = int(base_seed) if base_seed > 0 else 0
         self._rng = None
 
-        # --- Indexing Logic (Restored Speed) ---
+        # --- MASK LOADING ---
+        self.keep_mask = None
+        if mask_path and os.path.exists(mask_path):
+            print(f"🎭 Loading Noise Mask: {mask_path}")
+            try:
+                img = Image.open(mask_path).convert("RGBA")
+                # Force resize to 256x256 (Training Res) to match frames
+                img = img.resize((256, 256), Image.NEAREST)
+                # Extract Alpha Channel [H, W]
+                # Logic: User said "pixel that isn't alpha should be considered black"
+                # This implies Opaque (Alpha > 0) -> Noise -> Black it out.
+                # Transparent (Alpha == 0) -> Signal -> Keep it.
+                alpha_tensor = TF.to_tensor(img)[3, :, :] # [256, 256] in [0, 1]
+                
+                # Boolean mask: True where we keep the pixel (Alpha == 0)
+                # We add dimensions [1, 1, H, W] for easy broadcasting later
+                self.keep_mask = (alpha_tensor == 0.0).bool().unsqueeze(0).unsqueeze(0)
+                print("✅ Mask loaded and active.")
+            except Exception as e:
+                print(f"❌ Failed to load mask: {e}")
+
+        # --- Indexing Logic ---
         self.cumulative_sizes = []
         self.file_lengths = []
         total = 0
-        
         index_path = self.root / "dataset_index.json"
         index_valid = False
         
-        # 1. Try Load Index
         if index_path.exists():
             try:
-                with open(index_path, "r") as f:
-                    meta = json.load(f)
-                # Quick validation
+                with open(index_path, "r") as f: meta = json.load(f)
                 if meta.get("filenames") == [f.name for f in self.files]:
                     self.cumulative_sizes = meta["cumulative_sizes"]
                     self.file_lengths = meta["file_lengths"]
@@ -219,15 +219,12 @@ class CachedSplitDataset(Dataset):
                     index_valid = True
             except: pass
         
-        # 2. Build Index (if missing/invalid)
         if not index_valid:
             print(f"🔍 Indexing {len(self.files)} files in {self.root}...")
             file_names = []
             valid_files = []
-            
             for f in tqdm(self.files, desc="Indexing"):
                 try:
-                    # mmap=True is CRITICAL for speed here
                     d = torch.load(f, map_location="cpu", weights_only=True, mmap=True)
                     n = int(d["frames"].shape[0])
                     if n > 0:
@@ -236,20 +233,12 @@ class CachedSplitDataset(Dataset):
                         self.file_lengths.append(n)
                         file_names.append(f.name)
                         valid_files.append(f)
-                except Exception as e: 
-                    print(f"⚠️ Skipping {f.name}: {e}")
-            
-            self.files = valid_files # Remove empty/bad files from list
-            
-            # Save Index
+                except Exception as e: print(f"⚠️ Skipping {f.name}: {e}")
+            self.files = valid_files
             if total > 0:
                 try:
                     with open(index_path, "w") as f:
-                        json.dump({
-                            "filenames": file_names,
-                            "cumulative_sizes": self.cumulative_sizes,
-                            "file_lengths": self.file_lengths
-                        }, f)
+                        json.dump({"filenames": file_names, "cumulative_sizes": self.cumulative_sizes, "file_lengths": self.file_lengths}, f)
                 except: pass
         
         if total == 0: raise RuntimeError(f"No valid frames found in {self.root}")
@@ -269,15 +258,12 @@ class CachedSplitDataset(Dataset):
         self._rng = np.random.default_rng(seed)
 
     def _load_file(self, idx):
-        # mmap=True ensures we don't load the whole 1GB file for small reads
         self.cache_data = torch.load(self.files[idx], map_location="cpu", weights_only=True, mmap=True)
         self.cache_idx = idx
-        
         if self.balance_sampling:
-            acts = self.cache_data["actions"] # [N, T, D]
+            acts = self.cache_data["actions"]
             if acts.ndim == 3:
-                # Check T=0 buttons (index 4 onwards)
-                btns = acts[:, 0, 4:] 
+                btns = acts[:, 0, 4:]
                 active = (btns > self.press_threshold).any(dim=1)
                 self._active_idx = torch.where(active)[0]
                 self._idle_idx = torch.where(~active)[0]
@@ -286,39 +272,36 @@ class CachedSplitDataset(Dataset):
         if not self.balance_sampling: return default
         self._init_rng()
         if self._active_idx is None: return default
-        
         n_act, n_idl = len(self._active_idx), len(self._idle_idx)
         if n_act == 0: return default
-        
         use_active = (self._rng.random() < self.active_ratio)
         pool = self._active_idx if use_active else self._idle_idx
-        if len(pool) == 0: pool = self._active_idx # Fallback
-        
-        pick = pool[self._rng.integers(0, len(pool))]
-        return int(pick)
+        if len(pool) == 0: pool = self._active_idx
+        return int(pool[self._rng.integers(0, len(pool))])
 
     def __getitem__(self, global_idx):
         file_idx = bisect.bisect_right(self.cumulative_sizes, global_idx)
-        if file_idx == 0:
-            local_idx = global_idx
-        else:
-            local_idx = global_idx - self.cumulative_sizes[file_idx-1]
+        if file_idx == 0: local_idx = global_idx
+        else: local_idx = global_idx - self.cumulative_sizes[file_idx-1]
 
-        if self.cache_idx != file_idx:
-            self._load_file(file_idx)
+        if self.cache_idx != file_idx: self._load_file(file_idx)
 
         n = int(self.cache_data["frames"].shape[0])
         anchor = self._choose_anchor(local_idx, n)
 
-        # Vision History
         V = self.vision_horizon
         vis_ids = window_indices_end(anchor, V, n)
         
-        # Ensure copy to avoid mmap sharing issues in workers
         frames_u8 = self.cache_data["frames"][vis_ids].clone()
         frames = frames_u8.float().div(255.0).mul(2.0).sub(1.0)
 
-        # Action Future (Baked)
+        # --- APPLY MASK ---
+        if self.keep_mask is not None:
+            # Mask is [1, 1, 256, 256]. Frames is [V, 3, 256, 256].
+            # Broadcasting handles the V and C dimensions.
+            # ~keep_mask selects opaque pixels. We set them to -1.0 (Black).
+            frames.masked_fill_(~self.keep_mask, -1.0)
+
         actions_window = self.cache_data["actions"][anchor].float().clone()
         
         return {

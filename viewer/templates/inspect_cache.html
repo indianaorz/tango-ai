@@ -52,6 +52,10 @@
         .cell.both { background: linear-gradient(135deg, #00ff00 0%, #00ff00 48%, #ff00ff 52%, #ff00ff 100%); border-color: #888; }
         
         .model-badge { position: absolute; top: 0; right: 0; font-size: 10px; background: #333; padding: 2px 4px; border-radius: 2px; }
+        
+        /* Mask Toggle */
+        .mask-toggle { display: flex; align-items: center; gap: 5px; font-size: 12px; margin-left: 15px; }
+        .mask-toggle input { width: auto; accent-color: #4db8ff; }
     </style>
 </head>
 <body>
@@ -59,6 +63,10 @@
     <div style="display: flex; align-items: center;">
         <h2>{{ filename }}</h2>
         <span id="tag-baked" class="meta-tag tag-Baked" style="display:none">BAKED-3D</span>
+        <div class="mask-toggle">
+            <input type="checkbox" id="mask-check" onchange="loadFrame(document.getElementById('slider').value)">
+            <label for="mask-check" style="cursor:pointer; color:#888;">Apply Mask</label>
+        </div>
     </div>
 
     <div class="main-stage">
@@ -122,25 +130,16 @@
     </div>
     <script>
         const filename = "{{ filename }}";
-        // 1. Capture the 'type' param from the browser URL
-    const urlParams = new URLSearchParams(window.location.search);
-    const cacheTypeParam = urlParams.get('type') || '';
+        const urlParams = new URLSearchParams(window.location.search);
+        const cacheTypeParam = urlParams.get('type') || '';
 
-    let totalFrames = 0;
+        let totalFrames = 0;
         const UI_BTNS = ['DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'EAST', 'SOUTH', 'LEFT_SHOULDER', 'RIGHT_SHOULDER', 'BACK', 'START'];
         const TIMELINE_KEYS = UI_BTNS;
         const GT_THRES = 0.5;
         const PR_PROB_THRES = 0.5;
 
-        // 2. Append the type to the Meta fetch
-    fetch(`/api/cache_meta/${filename}?type=${cacheTypeParam}`).then(r => r.json()).then(d => {
-        totalFrames = d.count;
-        document.getElementById('slider').max = totalFrames - 1;
-        document.getElementById('idx-disp').innerText = `0 / ${totalFrames}`;
-        loadFrame(0);
-    });
-
-        fetch(`/api/cache_meta/${filename}`).then(r => r.json()).then(d => {
+        fetch(`/api/cache_meta/${filename}?type=${cacheTypeParam}`).then(r => r.json()).then(d => {
             totalFrames = d.count;
             document.getElementById('slider').max = totalFrames - 1;
             document.getElementById('idx-disp').innerText = `0 / ${totalFrames}`;
@@ -219,29 +218,25 @@
         }
 
         async function loadFrame(idx) {
-            // 3. Append the type to the Frame fetch
-        const res = await fetch(`/api/cache_frame/${filename}/${idx}?type=${cacheTypeParam}`);
-        const data = await res.json();
+            const useMask = document.getElementById('mask-check').checked ? '1' : '0';
+            const res = await fetch(`/api/cache_frame/${filename}/${idx}?type=${cacheTypeParam}&mask=${useMask}`);
+            const data = await res.json();
             if (data.error) return;
             
             document.getElementById('frame-img').src = data.image;
             
-            // Updates
             if (data.is_baked) document.getElementById('tag-baked').style.display = 'inline-block';
             
-            // Ground Truth
             updateController('gt', data.ground_truth, 'active', GT_THRES);
             document.getElementById('gt-axis').innerText = `${(data.ground_truth.AXIS_LEFTX || 0).toFixed(2)}, ${(data.ground_truth.AXIS_LEFTY || 0).toFixed(2)}`;
             
-            // Prediction
             const badge = document.getElementById('model-badge');
             if (data.prediction) {
                 updateController('pr', data.prediction.buttons_prob, 'pred-active', PR_PROB_THRES);
                 updateBars(data.prediction.buttons_prob);
                 const prSeqProb = (data.prediction_seq || []).map(s => s?.buttons_prob || {});
-                renderTimeline(data.ground_truth_seq, prSeqProb, 18); // Force 18 for baked view
+                renderTimeline(data.ground_truth_seq, prSeqProb, 18);
                 
-                // Meta info
                 if (data.pred_meta && data.pred_meta.model_used) {
                     badge.innerText = "Model: " + data.pred_meta.model_used;
                     badge.style.color = (data.pred_meta.model_used === 'Plan') ? '#0f0' : '#f00';

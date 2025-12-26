@@ -8,6 +8,7 @@ import io
 import base64
 from PIL import Image
 from flask import Flask, render_template, send_from_directory, jsonify, request
+import torchvision.transforms.functional as TF
 from typing import Any, Optional, Dict, List, Tuple
 
 # --- PATH SETUP ---
@@ -33,6 +34,7 @@ DATASET_DIR = os.path.join(parent_dir, "data/dataset")
 ASSETS_DIR = os.path.join(parent_dir, "data/assets")
 IMAGES_DIR = os.path.join(ASSETS_DIR, "images")
 CHIPS_JSON_PATHS = [os.path.join(ASSETS_DIR, "chips.json")]
+MASK_PATH = os.path.join(parent_dir, "chip_window_mask.png")
 
 # Cache Locations
 CACHE_DIRS = {
@@ -42,9 +44,9 @@ CACHE_DIRS = {
 }
 
 # Checkpoint Locations
-CKPT_ROOT = os.path.join(parent_dir, "checkpoints")
-PLANNING_CKPT_DIR = os.path.join(CKPT_ROOT, "planning")
-BATTLE_CKPT_DIR = os.path.join(CKPT_ROOT, "battle")
+CKPT_ROOT = ""#os.path.join(parent_dir, "checkpoints")
+PLANNING_CKPT_DIR = ""#os.path.join(CKPT_ROOT, "planning")
+BATTLE_CKPT_DIR = ""#os.path.join(CKPT_ROOT, "battle")
 
 # Strategy & RL Paths
 STRATEGY_DB_PATH = os.path.join(parent_dir, "data/chipwindows/strategy.jsonl")
@@ -88,6 +90,21 @@ def _detect_sticks_01_like(stick2: List[float]) -> bool:
     return (mn >= -0.05) and (mx <= 1.05)
 
 def _clamp_index(i, n): return max(0, min(int(i), int(n) - 1))
+
+# --- HELPER: MASK LOADING ---
+_CACHED_MASK_TENSOR = None
+def get_mask_tensor():
+    global _CACHED_MASK_TENSOR
+    if _CACHED_MASK_TENSOR is None:
+        if os.path.exists(MASK_PATH):
+            try:
+                img = Image.open(MASK_PATH).convert("RGBA").resize((256, 256), Image.NEAREST)
+                alpha = TF.to_tensor(img)[3, :, :]
+                # True = Keep (Alpha=0), False = Mask (Alpha>0)
+                _CACHED_MASK_TENSOR = (alpha == 0.0).bool()
+            except Exception as e:
+                print(f"Failed to load mask: {e}")
+    return _CACHED_MASK_TENSOR
 
 # --- NITROGEN ENGINE (DUAL MODEL SUPPORT) ---
 class DualModelEngine:
@@ -447,6 +464,7 @@ def cache_meta(filename):
 def cache_frame(filename, idx):
     # Get type from query string
     req_type = request.args.get('type')
+    apply_mask = request.args.get('mask') == '1'
     
     path, cache_type = find_cache_info(filename, hint_label=req_type)
     
@@ -463,6 +481,16 @@ def cache_frame(filename, idx):
         
         # 1. Image
         frame_uint8 = data["frames"][idx]
+
+        # --- MASK APPLICATION ---
+        if apply_mask:
+            mask = get_mask_tensor()
+            if mask is not None:
+                # Expand mask to [3, 256, 256] matching frame
+                mask_3ch = mask.unsqueeze(0).expand_as(frame_uint8)
+                # Apply mask (0 out opaque areas)
+                frame_uint8 = frame_uint8.masked_fill(~mask_3ch, 0)
+
         img_np = frame_uint8.permute(1, 2, 0).numpy()
         pil_img = Image.fromarray(img_np)
         buf = io.BytesIO()
@@ -478,7 +506,16 @@ def cache_frame(filename, idx):
         # Get frame window
         indices = [max(0, idx - (V - 1) + i) for i in range(V)]
         seq_uint8 = data["frames"][indices]
+
+        if apply_mask:
+            mask = get_mask_tensor()
+            if mask is not None:
+                mask_seq = mask.unsqueeze(0).unsqueeze(0).expand_as(seq_uint8)
+                seq_uint8 = seq_uint8.masked_fill(~mask_seq, 0)
+
         seq_float = seq_uint8.float().div(255.0).mul(2.0).sub(1.0)
+
+        # 3. Ground Truth (Baked vs Legacy)
 
         # 3. Ground Truth (Baked vs Legacy)
         gt_seq_display = []

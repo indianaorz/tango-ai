@@ -1,4 +1,3 @@
-# train_split.py
 import argparse
 import os
 import torch
@@ -21,8 +20,10 @@ BASE_CONFIG = {
     "save_every": 5000,
     "num_workers": 16,
     "max_keep_ckpts": 3,
-    "base_ckpt": "weights/ng.pt", 
+    "base_ckpt": "checkpoints_old/step_150000.pt", 
 }
+
+MASK_FILENAME = "chip_window_mask.png"
 
 def main():
     parser = argparse.ArgumentParser()
@@ -50,14 +51,20 @@ def main():
     print(f"   Dataset: {dataset_dir}")
     print(f"   Checkpoints: {ckpt_dir}")
 
-    # --- LOAD MODEL ---
+    # --- LOAD MODEL & RESUME LOGIC ---
     device = torch.device(BASE_CONFIG["device"])
     
+    # 1. Determine Load Path
     if args.resume:
         load_path = args.resume
         print(f"🔄 Resuming from specific: {load_path}")
     else:
-        existing = sorted(ckpt_dir.glob("step_*.pt"), key=lambda p: int(p.stem.split("_")[1]))
+        # Auto-resume: Check for highest step in target directory
+        existing = sorted(
+            ckpt_dir.glob("step_*.pt"), 
+            key=lambda p: int(p.stem.split("_")[1]) if "_" in p.stem else -1
+        )
+        
         if existing:
             load_path = str(existing[-1])
             print(f"🔄 Auto-resuming from latest: {load_path}")
@@ -78,14 +85,26 @@ def main():
         if "vision" in name or "siglip" in name:
             p.requires_grad = False
 
-    # --- DATASET ---
+    # --- DATASET & MASKING ---
+    mask_path = None
+    if mode == "plan":
+        # Check current dir first, then data/assets
+        if os.path.exists(MASK_FILENAME):
+            mask_path = MASK_FILENAME
+        elif os.path.exists(os.path.join("data", "assets", MASK_FILENAME)):
+            mask_path = os.path.join("data", "assets", MASK_FILENAME)
+        
+        if mask_path:
+            print(f"🎭 Masking enabled for Plan mode: {mask_path}")
+
     dataset = U.CachedSplitDataset(
         root_dir=str(dataset_dir),
         vision_horizon=int(getattr(tokenizer, "vision_horizon", 1)),
         balance_sampling=False, 
         active_ratio=0.7,
         press_threshold=0.5,
-        base_seed=42
+        base_seed=42,
+        mask_path=mask_path # Only passes mask if found + plan mode
     )
 
     loader = DataLoader(
@@ -101,14 +120,17 @@ def main():
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=BASE_CONFIG["lr"])
     writer = SummaryWriter(str(log_dir))
 
-    # --- LOOP ---
+    # --- STEP INITIALIZATION ---
     step = 0
     try:
-        if "step" in Path(load_path).name:
+        # Extract step number from filename "step_150000.pt" -> 150000
+        # If filename is "ng.pt", stays 0.
+        if "step" in Path(load_path).name and "_" in Path(load_path).stem:
             step = int(Path(load_path).stem.split("_")[1])
-    except: pass
+    except: 
+        pass
 
-    print(f"🔥 Training Loop Start (Step {step})")
+    print(f"🔥 Training Loop Start (Continuing from Step {step})")
     
     for epoch in range(BASE_CONFIG["epochs"]):
         pbar = tqdm(loader, desc=f"Epoch {epoch+1}")
@@ -120,7 +142,6 @@ def main():
             encoded_list = []
             
             for i in range(bs):
-                # Tokenizer usually expects a single sample dict
                 sample = {
                     "frames": batch["frames"][i].unsqueeze(0),
                     "j_left": batch["j_left"][i].unsqueeze(0),

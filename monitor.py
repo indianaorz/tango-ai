@@ -94,7 +94,7 @@ HTML_TEMPLATE = """
 
         <div class="control-group">
             <label>Smoothing (<span id="smooth-val">0.60</span>)</label>
-            <input type="range" id="smooth" min="0" max="0.99" step="0.01" value="0.60" oninput="updateSmoothing()">
+            <input type="range" id="smooth" min="0" max="0.9999" step="0.0001" value="0.60" oninput="updateSmoothing()">
         </div>
 
         <div class="control-group" style="flex-direction: row; align-items: center; gap: 10px;">
@@ -170,7 +170,7 @@ HTML_TEMPLATE = """
 
     function updateSmoothing() {
         const alpha = parseFloat(document.getElementById('smooth').value);
-        document.getElementById('smooth-val').innerText = alpha.toFixed(2);
+        document.getElementById('smooth-val').innerText = alpha.toFixed(4);
         renderChart();
     }
 
