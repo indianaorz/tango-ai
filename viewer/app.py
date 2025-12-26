@@ -36,7 +36,7 @@ IMAGES_DIR = os.path.join(ASSETS_DIR, "images")
 CHIPS_JSON_PATHS = [os.path.join(ASSETS_DIR, "chips.json")]
 
 STRATEGY_DB_PATH = os.path.join(parent_dir, "data/chipwindows/strategy.jsonl")
-STRATEGY_MODEL_PATH = os.path.join(parent_dir, "checkpoints_strategy_rl/strategy_model_rl.pt")
+STRATEGY_MODEL_PATH = os.path.join(parent_dir, "checkpoints_strategy/strategy_model.pt")
 RL_WEIGHTS_PATH = os.path.join(parent_dir, "data/nitrogen_rl/frame_weights.jsonl")
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -312,6 +312,11 @@ def serve_video(replay_name):
 @app.route("/assets/images/<path:filename>")
 def serve_chip_image(filename):
     return send_from_directory(IMAGES_DIR, filename)
+
+@app.route("/api/chip_library")
+def api_chip_library():
+    """Returns a simplified version of CHIP_DB for frontend visualization."""
+    return jsonify(CHIP_DB)
 
 @app.route("/strategy")
 def view_strategy():

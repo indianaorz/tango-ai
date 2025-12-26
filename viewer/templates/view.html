@@ -9,6 +9,7 @@
         a:hover { color: #fff; text-decoration: underline; }
         .container { display: flex; gap: 20px; align-items: flex-start; justify-content: center; width: 100%; max-width: 1400px; }
         
+        /* VIDEO */
         video { border: 2px solid #444; border-radius: 4px; box-shadow: 0 0 20px rgba(0,0,0,0.5); background: #000; image-rendering: pixelated; width: 100%; max-width: 720px; }
         
         .sidebar { display: flex; flex-direction: column; gap: 15px; width: 340px; flex-shrink: 0; }
@@ -52,19 +53,47 @@
         .cell-p2 { background: rgba(255, 77, 77, 0.3); border: 1px solid #ff4d4d; }
         .broken { border: 1px dashed #555 !important; background: #111 !important; }
 
-        /* HAND & QUEUE */
+        /* HAND & QUEUE (UPDATED) */
         .hand-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
-        .hand-slot { background: #2a2a2a; border: 1px solid #444; height: 35px; display: flex; flex-direction: column; justify-content: center; align-items: center; font-size: 9px; color: #fff; line-height: 10px; }
-        .hand-slot span { font-size: 8px; color: #888; }
+        .queue-list { display: flex; gap: 5px; justify-content: center; flex-wrap: wrap; }
+
+        .chip-slot { 
+            background: #222; border: 1px solid #444; 
+            height: 45px; width: 100%;
+            display: flex; flex-direction: column; 
+            align-items: center; justify-content: flex-end; 
+            border-radius: 4px; position: relative; overflow: hidden;
+            box-sizing: border-box;
+        }
+
+        .queue-slot-wrap { width: 35px; height: 45px; } 
         
-        .queue-list { display: flex; gap: 5px; justify-content: center; }
-        .queue-slot { width: 35px; height: 35px; background: #442222; border: 1px solid #ff4d4d; display: flex; justify-content: center; align-items: center; font-size: 11px; color: #fff; border-radius: 4px; }
+        .chip-img {
+            width: 100%; height: 100%;
+            object-fit: contain; 
+            position: absolute; top: 0; left: 0; z-index: 0;
+        }
+
+        .chip-code { 
+            font-size: 9px; color: #fff; font-weight: bold;
+            background: rgba(0,0,0,0.7);
+            width: 100%; text-align: center;
+            padding: 1px 0; z-index: 1; position: relative; 
+        }
+
+        .chip-fallback-id { font-size: 10px; font-weight: bold; color: #555; z-index: 1; margin-bottom: 12px; }
 
         /* FOLDER */
         .folder-list { height: 400px; overflow-y: auto; font-size: 11px; color: #aaa; }
         .folder-item { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid #333; }
         
         .meta-row { display: flex; justify-content: space-between; font-size: 11px; color: #aaa; margin-bottom: 10px; }
+
+        /* TIMELINE */
+        .timeline-container { display: grid; grid-template-columns: 50px repeat(18, 1fr); gap: 2px; align-items: center; user-select: none; }
+        .tl-label { font-size: 9px; color: #888; text-align: right; padding-right: 5px; text-transform: uppercase; }
+        .tl-cell { width: 100%; height: 8px; background: #222; border: 1px solid #333; border-radius: 1px; }
+        .tl-cell.active { background: #00ff00; box-shadow: 0 0 5px rgba(0, 255, 0, 0.5); border-color: #00cc00; }
     </style>
 </head>
 <body>
@@ -83,8 +112,13 @@
             </div>
         </div>
 
-        <div style="flex-grow: 1; display:flex; justify-content:center;">
+        <div style="flex-grow: 1; display:flex; flex-direction:column; align-items:center; gap: 10px;">
             <video id="vid" controls><source src="/video/{{ replay_name }}" type="video/mp4"></video>
+            
+            <div class="panel" style="width: 100%; max-width: 720px;">
+                <h4>Input Horizon (18f)</h4>
+                <div id="timeline-grid" class="timeline-container"></div>
+            </div>
         </div>
 
         <div class="sidebar">
@@ -158,12 +192,7 @@
             <div class="panel">
                 <h4>Selected Queue</h4>
                 <div id="queue" class="queue-list">
-                    <div class="queue-slot" id="q-0"></div>
-                    <div class="queue-slot" id="q-1"></div>
-                    <div class="queue-slot" id="q-2"></div>
-                    <div class="queue-slot" id="q-3"></div>
-                    <div class="queue-slot" id="q-4"></div>
-                </div>
+                    </div>
             </div>
 
             <div class="panel">
@@ -181,21 +210,77 @@
     <script>
         const vid = document.getElementById('vid');
         let actions = [];
+        let CHIP_LIB = {};
         const FPS = 60;
         const KEYS = {'DPAD_UP':'btn-UP', 'DPAD_DOWN':'btn-DOWN', 'DPAD_LEFT':'btn-LEFT', 'DPAD_RIGHT':'btn-RIGHT',
                       'EAST':'btn-A', 'SOUTH':'btn-B', 'LEFT_SHOULDER':'btn-L', 'RIGHT_SHOULDER':'btn-R', 'START':'btn-START', 'BACK':'btn-SELECT'};
+        
+        const TIMELINE_KEYS = ['DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'EAST', 'SOUTH', 'LEFT_SHOULDER', 'RIGHT_SHOULDER', 'BACK', 'START'];
+        const TIMELINE_LABELS = {
+            'DPAD_UP': 'UP', 'DPAD_DOWN': 'DOWN', 'DPAD_LEFT': 'LEFT', 'DPAD_RIGHT': 'RIGHT',
+            'EAST': 'A', 'SOUTH': 'B', 'LEFT_SHOULDER': 'L', 'RIGHT_SHOULDER': 'R', 'BACK': 'SEL', 'START': 'STA'
+        };
+        const HORIZON = 18;
+        const CODE_INDEXES = "ABCDEFGHIJKLMNOPQRSTUVWXYZ*";
 
         // Init Elements
         for(let i=0; i<18; i++) document.getElementById('grid').innerHTML += `<div class="grid-cell" id="c-${i}"></div>`;
-        for(let i=0; i<10; i++) document.getElementById('hand').innerHTML += `<div class="hand-slot" id="h-${i}"></div>`;
+        
+        // Init Hand Slots
+        const handEl = document.getElementById('hand');
+        handEl.innerHTML = '';
+        for(let i=0; i<10; i++) {
+            handEl.innerHTML += `<div class="chip-slot" id="h-${i}"></div>`;
+        }
 
-        // Load Data
-        fetch('/inputs/{{ replay_name }}').then(r=>r.json()).then(data => {
+        // Init Queue Slots
+        const queueEl = document.getElementById('queue');
+        queueEl.innerHTML = '';
+        for(let i=0; i<5; i++) {
+            queueEl.innerHTML += `<div class="queue-slot-wrap"><div class="chip-slot" id="q-${i}"></div></div>`;
+        }
+        
+        // Init Timeline
+        const tlGrid = document.getElementById('timeline-grid');
+        TIMELINE_KEYS.forEach(key => {
+            const lbl = document.createElement('div');
+            lbl.className = 'tl-label';
+            lbl.innerText = TIMELINE_LABELS[key];
+            tlGrid.appendChild(lbl);
+            for(let t=0; t<HORIZON; t++) {
+                const cell = document.createElement('div');
+                cell.className = 'tl-cell';
+                cell.id = `tl-${key}-${t}`; 
+                tlGrid.appendChild(cell);
+            }
+        });
+
+        // Load Chip Library then Data
+        fetch('/api/chip_library').then(r=>r.json()).then(lib => {
+            CHIP_LIB = lib;
+            // Now load replay data
+            return fetch('/inputs/{{ replay_name }}');
+        }).then(r=>r.json()).then(data => {
             actions = data.frames || [];
             const staticData = data.static || {};
             renderStatic(staticData);
             requestAnimationFrame(loop);
         });
+
+        function resolveChip(id, rawCode) {
+            if (id === 255 || id === undefined) return null;
+            const isMid = (rawCode % 2 === 1);
+            const codeIdx = Math.floor(rawCode / 2);
+            const charCode = CODE_INDEXES[codeIdx] || "?";
+            const key = (isMid ? "M" : "S") + id;
+            const data = CHIP_LIB[key];
+            return { 
+                img: data && data.Image ? `/assets/images/${data.Image}` : null,
+                name: data ? data.Name : `ID:${id}`,
+                code: charCode,
+                id: id
+            };
+        }
 
         function renderStatic(s) {
             const folderEl = document.getElementById('p-folder');
@@ -211,14 +296,42 @@
         }
 
         function loop() {
-            if(actions.length) {
-                const idx = Math.floor(vid.currentTime * FPS);
-                if(idx < actions.length) render(actions[idx]);
+            // Strict sync: recalculate index every frame from video time
+            if (actions.length) {
+                // Use vid.currentTime (seconds) * 60 to get exact frame
+                let idx = Math.floor(vid.currentTime * FPS);
+                
+                // Clamp and check safety
+                if (idx < 0) idx = 0;
+                if (idx >= actions.length) idx = actions.length - 1;
+
+                render(actions[idx], idx);
             }
             requestAnimationFrame(loop);
         }
 
-        function render(d) {
+        function renderChipSlot(el, chipInfo, opacity) {
+            if (!chipInfo) {
+                el.innerHTML = "";
+                el.style.opacity = 0.2;
+                el.style.border = "1px solid #333";
+                return;
+            }
+            el.style.opacity = opacity;
+            el.style.border = "1px solid #555";
+            el.title = chipInfo.name;
+            
+            let html = "";
+            if (chipInfo.img) {
+                html += `<img src="${chipInfo.img}" class="chip-img">`;
+            } else {
+                html += `<span class="chip-fallback-id">${chipInfo.id}</span>`;
+            }
+            html += `<span class="chip-code">${chipInfo.code}</span>`;
+            el.innerHTML = html;
+        }
+
+        function render(d, idx) {
             document.getElementById('frame').innerText = d.frame_idx;
             
             // Controller
@@ -228,7 +341,23 @@
                 if((Array.isArray(v) ? v[0] : v) > 0.5) document.getElementById(KEYS[k]).classList.add('active');
             }
 
-            // Stats Table
+            // Timeline
+            for(let t=0; t<HORIZON; t++) {
+                const futureFrame = actions[idx + t];
+                TIMELINE_KEYS.forEach(k => {
+                    const cell = document.getElementById(`tl-${k}-${t}`);
+                    if (!cell) return;
+                    let active = false;
+                    if (futureFrame) {
+                        const val = futureFrame[k];
+                        active = (Array.isArray(val) ? val[0] : val) > 0.5;
+                    }
+                    if (active) cell.classList.add('active');
+                    else cell.classList.remove('active');
+                });
+            }
+
+            // Stats
             document.getElementById('p-hp').innerText = d.player_health || 0;
             document.getElementById('e-hp').innerText = d.enemy_health || 0;
             document.getElementById('p-chip').innerText = d.player_chip || "-";
@@ -239,16 +368,13 @@
             document.getElementById('e-game-emo').innerText = d.enemy_game_emotion || 0;
             document.getElementById('p-chg').innerText = d.player_charge || 0;
             document.getElementById('e-chg').innerText = d.enemy_charge || 0;
-            
             if(d.player_pos) document.getElementById('p-pos').innerText = `[${d.player_pos}]`;
             if(d.enemy_pos) document.getElementById('e-pos').innerText = `[${d.enemy_pos}]`;
 
-            // Menu States
+            // Menu/Counters
             const w = document.getElementById('win-state');
             if(d.inside_window) { w.innerText = "[MENU OPEN]"; w.style.color = "#ffff00"; }
             else { w.innerText = "[BATTLE]"; w.style.color = "#444"; }
-
-            // Counters
             document.getElementById('cust').innerText = d.cust_gauge || 0;
             document.getElementById('menu-idx').innerText = d.selected_menu_index || 0;
             document.getElementById('cross-idx').innerText = d.selected_cross_index || 0;
@@ -260,38 +386,54 @@
                     c.className = 'grid-cell';
                     if(d.grid_owner_state[i] === 0) c.classList.add('cell-p1');
                     else if(d.grid_owner_state[i] === 1) c.classList.add('cell-p2');
-                    
                     if(d.grid_state[i] === 2) c.classList.add('broken');
                     c.innerText = d.grid_state[i] !== 0 ? d.grid_state[i] : "";
                 }
             }
 
-            // Hand
+            // Hand (Visual)
             if(d.chip_slots) {
                 for(let i=0; i<10; i++) {
                     const el = document.getElementById(`h-${i}`);
                     if (i < d.chip_slots.length) {
                         const id = d.chip_slots[i];
-                        const code = d.chip_codes ? d.chip_codes[i] : "?";
-                        el.innerHTML = (id !== 255) ? `${id}<br><span>[${code}]</span>` : "";
+                        const code = d.chip_codes ? d.chip_codes[i] : 0;
+                        const chipInfo = resolveChip(id, code);
                         
                         let maxVis = d.chip_visible_count || 5;
-                        el.style.opacity = (i >= maxVis) ? 0.3 : 1;
+                        const opacity = (i >= maxVis) ? 0.3 : 1.0;
+                        renderChipSlot(el, chipInfo, opacity);
                     } else {
-                        el.innerHTML = "";
+                        renderChipSlot(el, null, 0.2);
                     }
                 }
             }
 
-            // Queue
+            // Queue (FIXED: STRICT Check against count)
             if(d.selected_chip_indices) {
+                let count = d.chip_select_count || 0;
+                
                 for(let i=0; i<5; i++) {
-                    const val = d.selected_chip_indices[i];
                     const el = document.getElementById(`q-${i}`);
-                    el.innerText = (val !== 255 && val !== undefined) ? val : "";
                     
-                    let count = d.chip_select_count || 0;
-                    el.style.opacity = (i >= count) ? 0.3 : 1;
+                    // ONLY render if i < count
+                    if (i < count) {
+                        const handIdx = d.selected_chip_indices[i]; // Index into hand 0-9
+                        
+                        if (handIdx !== 255 && handIdx !== undefined && d.chip_slots && handIdx < d.chip_slots.length) {
+                            const id = d.chip_slots[handIdx];
+                            const code = d.chip_codes ? d.chip_codes[handIdx] : 0;
+                            const chipInfo = resolveChip(id, code);
+                            
+                            // Queue items always fully visible
+                            renderChipSlot(el, chipInfo, 1.0);
+                        } else {
+                            renderChipSlot(el, null, 0.2);
+                        }
+                    } else {
+                        // Strictly empty
+                        renderChipSlot(el, null, 0.2);
+                    }
                 }
             }
         }

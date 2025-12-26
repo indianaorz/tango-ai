@@ -22,8 +22,10 @@
 
 from __future__ import annotations
 
+import argparse
 import bisect
 import importlib
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -48,10 +50,10 @@ from action_schema import BUTTON_TOKENS, ACTION_DIM
 
 CONFIG: Dict[str, Any] = {
     "device": "cuda" if torch.cuda.is_available() else "cpu",
-    "batch_size": int(os.getenv("BATCH_SIZE", "16")),
+    "batch_size": int(os.getenv("BATCH_SIZE", "64")),
     "lr": float(os.getenv("LR", "1e-4")),
     "epochs": int(os.getenv("EPOCHS", "10")),
-    "save_every": int(os.getenv("SAVE_EVERY", "1000")),
+    "save_every": int(os.getenv("SAVE_EVERY", "5000")),
     "dataset_dir": os.getenv("DATASET_DIR", "data/dataset_cached"),
     "log_dir": os.getenv("LOG_DIR", "logs/tango_cached"),
     "checkpoints_dir": os.getenv("CKPT_DIR", "checkpoints"),
@@ -63,10 +65,11 @@ CONFIG: Dict[str, Any] = {
     "seed": int(os.getenv("SEED", "0")),  # 0 => no fixed seed
 }
 
-NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", "weights/ng.pt")
+# NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", "weights/ng.pt")
+NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", "checkpoints_old/step_150000.pt")
 
 # Rebalancing / collapse controls
-BALANCE_SAMPLING = os.getenv("BALANCE_SAMPLING", "1").strip() not in ("0", "false", "False")
+BALANCE_SAMPLING = os.getenv("BALANCE_SAMPLING", "0").strip() not in ("0", "false", "False")
 ACTIVE_RATIO = float(os.getenv("ACTIVE_RATIO", "0.7"))  # target fraction of active anchors
 PRESS_THRESHOLD = float(os.getenv("PRESS_THRESHOLD", "0.5"))
 
@@ -347,7 +350,7 @@ def load_ng_checkpoint_faithful(ckpt_path: str, device: torch.device) -> NgLoade
 
 
 # -----------------------------------------------------------------------------
-# Cached Dataset (horizon-aligned + balanced sampling)
+# Cached Dataset (horizon-aligned + balanced sampling + JSON cache)
 # -----------------------------------------------------------------------------
 
 class CachedTangoDataset(Dataset):
@@ -378,6 +381,7 @@ class CachedTangoDataset(Dataset):
         press_threshold: float,
         base_seed: int,
         include_meta: bool = True,
+        force_rebuild_index: bool = False,
     ):
         self.root = Path(root_dir)
         self.files = sorted(self.root.glob("*.pt"))
@@ -402,18 +406,70 @@ class CachedTangoDataset(Dataset):
 
         self.include_meta = bool(include_meta)
 
-        # Index
+        # ---------------------------------------------------------------------
+        # Index Loading / Rebuilding Logic
+        # ---------------------------------------------------------------------
         self.cumulative_sizes: List[int] = []
         self.file_lengths: List[int] = []
         total_frames = 0
+        
+        index_path = self.root / "dataset_index.json"
+        index_valid = False
 
-        print(f"🔍 Scanning cached dataset at {self.root}...")
-        for pt_file in tqdm(self.files, desc="Indexing"):
-            data = torch.load(pt_file, weights_only=True, map_location="cpu")
-            n = int(data["frames"].shape[0])
-            total_frames += n
-            self.cumulative_sizes.append(total_frames)
-            self.file_lengths.append(n)
+        # Try loading existing index if not forced
+        if not force_rebuild_index and index_path.exists():
+            try:
+                print(f"📄 Found cached index: {index_path}")
+                with open(index_path, "r") as f:
+                    index_data = json.load(f)
+                
+                # Validation: Check if file list matches exactly
+                cached_filenames = index_data.get("filenames", [])
+                current_filenames = [f.name for f in self.files]
+                
+                if cached_filenames == current_filenames:
+                    self.cumulative_sizes = index_data["cumulative_sizes"]
+                    self.file_lengths = index_data["file_lengths"]
+                    total_frames = self.cumulative_sizes[-1]
+                    print(f"⚡ Loaded cached index ({total_frames:,} frames).")
+                    index_valid = True
+                else:
+                    print("⚠️  Dataset files have changed since last index. Rebuilding...")
+            except Exception as e:
+                print(f"⚠️  Failed to load cached index ({e}). Rebuilding...")
+
+        # If invalid or missing, scan and save
+        if not index_valid:
+            self.cumulative_sizes = []
+            self.file_lengths = []
+            total_frames = 0
+            file_names = []
+
+            print(f"🔍 Scanning cached dataset at {self.root}...")
+            for pt_file in tqdm(self.files, desc="Indexing"):
+                # Use mmap=True for speed (header only)
+                try:
+                    data = torch.load(pt_file, weights_only=True, map_location="cpu", mmap=True)
+                except TypeError:
+                    data = torch.load(pt_file, weights_only=True, map_location="cpu")
+
+                n = int(data["frames"].shape[0])
+                total_frames += n
+                self.cumulative_sizes.append(total_frames)
+                self.file_lengths.append(n)
+                file_names.append(pt_file.name)
+
+            if total_frames > 0:
+                try:
+                    with open(index_path, "w") as f:
+                        json.dump({
+                            "filenames": file_names,
+                            "cumulative_sizes": self.cumulative_sizes,
+                            "file_lengths": self.file_lengths
+                        }, f)
+                    print(f"💾 Saved dataset index to {index_path}")
+                except Exception as e:
+                    print(f"⚠️  Could not save index: {e}")
 
         if not self.cumulative_sizes or self.cumulative_sizes[-1] <= 0:
             raise RuntimeError("Indexed dataset but found no frames.")
@@ -635,6 +691,10 @@ def _log_tokenizer(tokenizer: Any) -> tuple[int, int]:
 # -----------------------------------------------------------------------------
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Tango NitroGen Training")
+    parser.add_argument("--rebuild-index", action="store_true", help="Force rebuild of dataset index JSON")
+    args = parser.parse_args()
+
     _set_seed(CONFIG["seed"])
 
     device = torch.device(CONFIG["device"])
@@ -716,6 +776,7 @@ def main() -> None:
         press_threshold=PRESS_THRESHOLD,
         base_seed=CONFIG["seed"],
         include_meta=True,
+        force_rebuild_index=args.rebuild_index,
     )
 
     loader = DataLoader(

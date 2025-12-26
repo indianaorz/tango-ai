@@ -209,9 +209,23 @@
         .scrubber {
             width: 512px;
             display: flex;
-            gap: 10px;
+            gap: 5px;
             align-items: center;
             margin-top: 10px;
+        }
+
+        .scrubber button {
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            cursor: pointer;
+            padding: 2px 8px;
+            font-family: monospace;
+            font-weight: bold;
+        }
+
+        .scrubber button:hover {
+            background: #555;
         }
 
         input[type=range] {
@@ -226,6 +240,7 @@
             text-align: right;
             font-family: monospace;
             color: #4db8ff;
+            margin-left: 5px;
         }
 
         .bar-container {
@@ -318,9 +333,18 @@
         <div class="viewport">
             <img id="frame-img" class="frame-view" src="">
             <div class="scrubber">
-                <button onclick="step(-1)">&lt;</button>
+                <button onclick="step(-18)" title="-18 Frames">⟪</button>
+                <button onclick="step(-9)" title="-9 Frames">⟨⟨</button>
+                
+                <button onclick="step(-1)" title="-1 Frame">&lt;</button>
+                
                 <input type="range" id="slider" min="0" max="0" value="0" oninput="seek(this.value)">
-                <button onclick="step(1)">&gt;</button>
+                
+                <button onclick="step(1)" title="+1 Frame">&gt;</button>
+                
+                <button onclick="step(9)" title="+9 Frames">⟩⟩</button>
+                <button onclick="step(18)" title="+18 Frames">⟫</button>
+                
                 <div class="idx-display" id="idx-disp">0 / 0</div>
             </div>
         </div>
@@ -337,13 +361,11 @@
                         <div class="btn left" id="gt-DPAD_LEFT"></div>
                         <div class="btn right" id="gt-DPAD_RIGHT"></div>
                     </div>
-                    <!-- GBA: A=EAST, B=SOUTH -->
                     <div class="btn a" id="gt-EAST">A</div>
                     <div class="btn b" id="gt-SOUTH">B</div>
 
 
-                    <div class="btn select" id="gt-BACK"></div>   <!-- SELECT -->
-                    <div class="btn start" id="gt-START"></div>
+                    <div class="btn select" id="gt-BACK"></div>   <div class="btn start" id="gt-START"></div>
                 </div>
                 <div style="height:20px; font-size:10px; color:#666; margin-top:5px;">
                     Axis: <span id="gt-axis">0.0, 0.0</span>
@@ -363,8 +385,7 @@
                     </div>
                     <div class="btn b" id="pr-EAST">A</div>
                     <div class="btn a" id="pr-SOUTH">B</div>
-                    <div class="btn select" id="pr-BACK"></div>   <!-- SELECT -->
-                    <div class="btn start" id="pr-START"></div>
+                    <div class="btn select" id="pr-BACK"></div>   <div class="btn start" id="pr-START"></div>
                 </div>
 
                 <div class="bar-container" id="conf-bars"></div>
@@ -406,10 +427,12 @@
     function step(dir) {
         let el = document.getElementById('slider');
         let val = parseInt(el.value) + dir;
-        if (val >= 0 && val < totalFrames) {
-            el.value = val;
-            seek(val);
-        }
+        // Clamp to valid range
+        if (val < 0) val = 0;
+        if (val >= totalFrames) val = totalFrames - 1;
+        
+        el.value = val;
+        seek(val);
     }
 
     function updateController(prefix, buttonsFlat, activeClass, thres) {
