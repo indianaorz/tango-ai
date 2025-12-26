@@ -19,7 +19,7 @@ BASE_CONFIG = {
     "lr": 1e-4,
     "epochs": 50,
     "save_every": 5000,
-    "num_workers": 8,
+    "num_workers": 16,
     "max_keep_ckpts": 3,
     "base_ckpt": "weights/ng.pt", 
 }
@@ -82,7 +82,7 @@ def main():
     dataset = U.CachedSplitDataset(
         root_dir=str(dataset_dir),
         vision_horizon=int(getattr(tokenizer, "vision_horizon", 1)),
-        balance_sampling=True, 
+        balance_sampling=False, 
         active_ratio=0.7,
         press_threshold=0.5,
         base_seed=42
@@ -95,7 +95,7 @@ def main():
         num_workers=BASE_CONFIG["num_workers"],
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=1
+        prefetch_factor=8
     )
 
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=BASE_CONFIG["lr"])
