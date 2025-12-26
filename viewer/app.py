@@ -18,7 +18,7 @@ sys.path.append(parent_dir)
 # Add 'strategy' folder to path so we can import the model class
 sys.path.append(os.path.join(parent_dir, "strategy"))
 
-# --- IMPORT ACTION SCHEMA (Single Source of Truth) ---
+# --- IMPORT ACTION SCHEMA ---
 try:
     from action_schema import BUTTON_TOKENS, GBA_UI_BUTTONS
 except ImportError:
@@ -28,84 +28,162 @@ except ImportError:
 
 app = Flask(__name__)
 
-# --- CONFIG ---
+# --- CONFIG & DIRECTORIES ---
 DATASET_DIR = os.path.join(parent_dir, "data/dataset")
-CACHE_DIR = os.path.join(parent_dir, "data/dataset_cached")
 ASSETS_DIR = os.path.join(parent_dir, "data/assets")
 IMAGES_DIR = os.path.join(ASSETS_DIR, "images")
 CHIPS_JSON_PATHS = [os.path.join(ASSETS_DIR, "chips.json")]
 
+# Cache Locations
+CACHE_DIRS = {
+    "Legacy": os.path.join(parent_dir, "data/dataset_cached"),
+    "Plan": os.path.join(parent_dir, "data/planning_cache"),
+    "Battle": os.path.join(parent_dir, "data/battle_cache"),
+}
+
+# Checkpoint Locations
+CKPT_ROOT = os.path.join(parent_dir, "checkpoints")
+PLANNING_CKPT_DIR = os.path.join(CKPT_ROOT, "planning")
+BATTLE_CKPT_DIR = os.path.join(CKPT_ROOT, "battle")
+
+# Strategy & RL Paths
 STRATEGY_DB_PATH = os.path.join(parent_dir, "data/chipwindows/strategy.jsonl")
 STRATEGY_MODEL_PATH = os.path.join(parent_dir, "checkpoints_strategy/strategy_model.pt")
 RL_WEIGHTS_PATH = os.path.join(parent_dir, "data/nitrogen_rl/frame_weights.jsonl")
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-# --- NEW: RL DATA LOADER ---
-RL_DATA_CACHE = []
 
-# --- IMPORT POLICIES ---
+# --- HELPER: FIND CACHE ---
+def find_cache_info(filename: str, hint_label: str = None) -> Tuple[Optional[str], str]:
+    """
+    Returns (full_path, cache_type_label).
+    If hint_label is provided, checks that specific folder first.
+    """
+    # 1. If a hint is provided, check that specific folder first
+    if hint_label and hint_label in CACHE_DIRS:
+        candidate = os.path.join(CACHE_DIRS[hint_label], filename)
+        if os.path.exists(candidate):
+            return candidate, hint_label
+
+    # 2. Fallback: Search all folders (existing logic)
+    for label, path in CACHE_DIRS.items():
+        candidate = os.path.join(path, filename)
+        if os.path.exists(candidate):
+            return candidate, label
+            
+    return None, "Unknown"
+
+# --- HELPER: MATH ---
+def _sigmoid(x: float) -> float:
+    if x >= 0: return 1.0 / (1.0 + math.exp(-x))
+    else: return math.exp(x) / (1.0 + math.exp(x))
+
+def _detect_logits_like(values: List[float]) -> bool:
+    if not values: return False
+    mn, mx = min(values), max(values)
+    return (mn < -0.05) or (mx > 1.05)
+
+def _detect_sticks_01_like(stick2: List[float]) -> bool:
+    mn, mx = min(stick2), max(stick2)
+    return (mn >= -0.05) and (mx <= 1.05)
+
+def _clamp_index(i, n): return max(0, min(int(i), int(n) - 1))
+
+# --- NITROGEN ENGINE (DUAL MODEL SUPPORT) ---
+class DualModelEngine:
+    def __init__(self):
+        self.models = { "Battle": None, "Plan": None }
+        self.configs = {
+            "Battle": {"action_horizon": 18, "vision_horizon": 1, "old_layout": False},
+            "Plan": {"action_horizon": 18, "vision_horizon": 1, "old_layout": False},
+        }
+
+        try:
+            from ng_policy import NgNitroGenPolicy, load_ng_checkpoint
+            self.PolicyClass = NgNitroGenPolicy
+            self.loader_func = load_ng_checkpoint
+        except ImportError:
+            print("⚠️ Nitrogen policy code not found.")
+            return
+
+        # Load Models
+        self._load_best_ckpt(BATTLE_CKPT_DIR, "Battle")
+        self._load_best_ckpt(PLANNING_CKPT_DIR, "Plan")
+
+    def _load_best_ckpt(self, ckpt_dir, key):
+        if not os.path.exists(ckpt_dir): return
+        max_step = -1
+        best_file = None
+        for f in os.listdir(ckpt_dir):
+            if f.startswith("step_") and f.endswith(".pt"):
+                try:
+                    step = int(f.split("_")[1].split(".")[0])
+                    if step > max_step:
+                        max_step = step
+                        best_file = f
+                except: continue
+        
+        if best_file:
+            path = os.path.join(ckpt_dir, best_file)
+            print(f"🧠 Loading {key} Model: {best_file}...")
+            try:
+                loaded = self.loader_func(path, device=torch.device(DEVICE))
+                policy = self.PolicyClass(loaded).to(DEVICE).eval()
+                self.models[key] = policy
+                
+                tok = getattr(policy, "tokenizer", None)
+                if tok:
+                    self.configs[key]["action_horizon"] = getattr(tok, "action_horizon", 18)
+                    self.configs[key]["vision_horizon"] = getattr(tok, "vision_horizon", 1)
+                    self.configs[key]["old_layout"] = getattr(tok, "old_layout", False)
+                print(f"✅ {key} Model Loaded.")
+            except Exception as e:
+                print(f"❌ Failed to load {key}: {e}")
+
+    def infer(self, frames_tensor, model_key="Battle"):
+        # Map Legacy/Unknown to Battle by default
+        if model_key not in self.models: model_key = "Battle"
+        
+        policy = self.models.get(model_key)
+        if policy is None: return None
+
+        if frames_tensor.ndim == 3: frames_tensor = frames_tensor.unsqueeze(0)
+        frames_batch = frames_tensor.unsqueeze(0).to(DEVICE, non_blocking=True)
+        
+        with torch.inference_mode():
+            action_seq = policy(frames_batch, take_step=0, return_continuous=True, return_sequence=True)
+        
+        return action_seq.squeeze(0).detach().cpu().tolist()
+
+engine = DualModelEngine()
+
+# --- RL DATA LOADER ---
+RL_DATA_CACHE = []
 def load_rl_data():
     """Loads the lightweight JSONL file into memory for the viewer."""
     global RL_DATA_CACHE
     if os.path.exists(RL_WEIGHTS_PATH):
-        print(f"⚖️  Loading RL Weights for Viewer from {RL_WEIGHTS_PATH}...")
+        print(f"⚖️  Loading RL Weights from {RL_WEIGHTS_PATH}...")
         temp_list = []
         try:
             with open(RL_WEIGHTS_PATH, 'r') as f:
                 for line in f:
                     if line.strip():
-                        # Line format: {"key": "replay/frame", "val": 3.0}
                         obj = json.loads(line)
                         parts = obj['key'].split('/')
-                        replay_name = parts[0]
-                        frame_idx = int(parts[1])
-                        
-                        temp_list.append({
-                            "replay": replay_name,
-                            "frame": frame_idx,
-                            "weight": obj['val']
-                        })
-            
+                        if len(parts) >= 2:
+                            temp_list.append({
+                                "replay": parts[0],
+                                "frame": int(parts[1]),
+                                "weight": obj['val']
+                            })
             # Sort by weight descending (Most interesting first)
             RL_DATA_CACHE = sorted(temp_list, key=lambda x: x['weight'], reverse=True)
             print(f"✅ Loaded {len(RL_DATA_CACHE)} RL samples.")
-        except Exception as e:
-            print(f"❌ Error loading RL weights: {e}")
-
-# Load immediately
+        except Exception as e: print(f"❌ Error loading RL weights: {e}")
 load_rl_data()
 
-# 1. NITROGEN (Battle Policy)
-try:
-    from ng_policy import NgNitroGenPolicy, load_ng_checkpoint
-    from action_schema import BUTTON_TOKENS, GBA_UI_BUTTONS
-    
-    # Nitrogen Config
-    _CKPT_DIR = os.path.join(parent_dir, "checkpoints")
-    
-    def _get_latest_checkpoint(ckpt_dir: str, default: str = "ng.pt") -> str:
-        if not os.path.exists(ckpt_dir): return os.path.join(ckpt_dir, default)
-        max_step = -1
-        best_ckpt = default
-        for fname in os.listdir(ckpt_dir):
-            if fname.startswith("step_") and fname.endswith(".pt"):
-                try:
-                    step = int(fname.split("_")[1].split(".")[0])
-                    if step > max_step:
-                        max_step = step
-                        best_ckpt = fname
-                except: continue
-        return os.path.join(ckpt_dir, best_ckpt)
-
-    CHECKPOINT_PATH = os.getenv("NG_CKPT_PATH", _get_latest_checkpoint(_CKPT_DIR, "step_20000.pt"))
-    UI_BUTTONS = list(GBA_UI_BUTTONS)
-except ImportError:
-    print("⚠️ Nitrogen policy not found.")
-    NgNitroGenPolicy = None
-    BUTTON_TOKENS = []
-    UI_BUTTONS = []
-
-# 2. STRATEGY (Chip Selection Policy)
+# --- STRATEGY MODEL ---
 strategy_model = None
 meta_proc = None
 
@@ -129,8 +207,7 @@ try:
 except ImportError as e:
     print(f"⚠️ Strategy modules not found: {e}")
 
-
-# --- CHIP DATABASE (For Visualization) ---
+# --- CHIP DATABASE ---
 CHIP_DB = {}
 def load_chip_db():
     global CHIP_DB
@@ -143,12 +220,11 @@ def load_chip_db():
                     for chip in data:
                         if chip.get('SId'): CHIP_DB[f"S{chip['SId']}"] = chip
                         if chip.get('MId'): CHIP_DB[f"M{chip['MId']}"] = chip
-                print(f"  ✅ Loaded chips from {os.path.basename(path)}")
             except Exception as e:
                 print(f"  ❌ Error loading {path}: {e}")
 load_chip_db()
 
-# --- HELPERS ---
+# --- FORMATTING HELPERS ---
 CODE_INDEXES = "ABCDEFGHIJKLMNOPQRSTUVWXYZ*"
 
 def resolve_chip_info(raw_id, raw_code):
@@ -170,41 +246,10 @@ def resolve_chip_info(raw_id, raw_code):
         "image_url": f"/assets/images/{image_file}" if image_file else None
     }
 
-def _sigmoid(x: float) -> float:
-    if x >= 0: return 1.0 / (1.0 + math.exp(-x))
-    else: return math.exp(x) / (1.0 + math.exp(x))
-
-def _get_frame_window_uint8(frames_uint8, idx, V):
-    n = int(frames_uint8.shape[0])
-    idx = max(0, min(idx, n - 1))
-    start = idx - (V - 1)
-    out = []
-    for t in range(V):
-        src_i = max(0, min(start + t, n - 1))
-        out.append(frames_uint8[src_i])
-    return torch.stack(out, dim=0)
-
-def _clamp_index(i, n): return max(0, min(int(i), int(n) - 1))
-
-def _vec_cache_to_gt_dict(v_cache):
-    d = {"AXIS_LEFTX": float(v_cache[0]), "AXIS_LEFTY": float(v_cache[1]), "AXIS_RIGHTX": float(v_cache[2]), "AXIS_RIGHTY": float(v_cache[3])}
-    btn = v_cache[4:4 + len(BUTTON_TOKENS)]
-    for name, value in zip(BUTTON_TOKENS, btn): d[name] = float(value)
-    return d
-
-def _detect_logits_like(values: List[float]) -> bool:
-    if not values: return False
-    mn = min(values)
-    mx = max(values)
-    return (mn < -0.05) or (mx > 1.05)
-
-def _detect_sticks_01_like(stick2: List[float]) -> bool:
-    mn = min(stick2)
-    mx = max(stick2)
-    return (mn >= -0.05) and (mx <= 1.05)
-
 def _split_policy_action_layout(v25, *, old_layout):
-    if len(v25) != 25: raise ValueError(f"Expected 25, got {len(v25)}")
+    if len(v25) != 25: 
+        # Fallback/Error state
+        return [0]*21, [0,0], [0,0]
     if old_layout:
         jl = [float(v25[0]), float(v25[1])]
         jr = [float(v25[2]), float(v25[3])]
@@ -217,6 +262,7 @@ def _split_policy_action_layout(v25, *, old_layout):
 
 def _policy_vec_to_display(v25, *, old_layout):
     buttons_raw, jl_raw, jr_raw = _split_policy_action_layout(v25, old_layout=old_layout)
+    
     jl01 = _detect_sticks_01_like(jl_raw)
     jr01 = _detect_sticks_01_like(jr_raw)
     jl_axis = [x * 2.0 - 1.0 for x in jl_raw] if jl01 else jl_raw[:]
@@ -233,6 +279,13 @@ def _policy_vec_to_display(v25, *, old_layout):
         "meta": {"buttons_are_logits": buttons_are_logits}
     }
 
+def _cache_vec_to_gt(v):
+    # Cache format: [LX, LY, RX, RY, BTNS...]
+    d = {"AXIS_LEFTX": float(v[0]), "AXIS_LEFTY": float(v[1]), "AXIS_RIGHTX": float(v[2]), "AXIS_RIGHTY": float(v[3])}
+    btn_vals = v[4:]
+    for name, val in zip(BUTTON_TOKENS, btn_vals): d[name] = float(val)
+    return d
+
 def _json_action_to_display(json_row: dict) -> dict:
     """Converts a raw JSONL row (flat dict) into the nested structure."""
     axes = {
@@ -243,7 +296,6 @@ def _json_action_to_display(json_row: dict) -> dict:
     }
     
     buttons_raw = {}
-    # Use the imported BUTTON_TOKENS from action_schema
     for btn in BUTTON_TOKENS:
         val = float(json_row.get(btn, 0.0))
         buttons_raw[btn] = val
@@ -255,51 +307,23 @@ def _json_action_to_display(json_row: dict) -> dict:
         "meta": {"source": "jsonl"}
     }
 
-# --- NITROGEN ENGINE ---
-class ModelEngine:
-    def __init__(self):
-        self.policy = None
-        self.loaded = False
-        self.action_horizon = 18
-        self.vision_horizon = 1
-        self.tokenizer_old_layout = False
-
-        if NgNitroGenPolicy and load_ng_checkpoint and os.path.exists(CHECKPOINT_PATH):
-            try:
-                print(f"🧠 Loading Nitrogen from {CHECKPOINT_PATH}...")
-                loaded = load_ng_checkpoint(CHECKPOINT_PATH, device=torch.device(DEVICE))
-                self.policy = NgNitroGenPolicy(loaded).to(DEVICE).eval()
-                self.loaded = True
-                
-                tok = getattr(self.policy, "tokenizer", None)
-                if tok:
-                    self.action_horizon = getattr(tok, "action_horizon", 18)
-                    self.vision_horizon = getattr(tok, "vision_horizon", 1)
-                    self.tokenizer_old_layout = getattr(tok, "old_layout", False)
-                print("✅ Nitrogen loaded.")
-            except Exception as e:
-                print(f"❌ Nitrogen load failed: {e}")
-
-    def infer_seq(self, frames_tensor):
-        if not self.loaded: return None
-        if frames_tensor.ndim == 3: frames_tensor = frames_tensor.unsqueeze(0)
-        frames_tensor = frames_tensor.to(dtype=torch.float32).unsqueeze(0).to(DEVICE, non_blocking=True)
-        with torch.inference_mode():
-            action_seq = self.policy(frames_tensor, take_step=0, return_continuous=True, return_sequence=True)
-        return action_seq.squeeze(0).detach().cpu().tolist()
-
-engine = ModelEngine()
-
 # --- ROUTES ---
 
 @app.route("/")
 def index():
     replays = [d for d in os.listdir(DATASET_DIR) if os.path.isdir(os.path.join(DATASET_DIR, d))]
     replays.sort()
-    cached = [f for f in os.listdir(CACHE_DIR) if f.endswith(".pt")]
-    cached.sort()
+    
+    # List files for all cache types
+    cached_files = {}
+    for label, path in CACHE_DIRS.items():
+        if os.path.exists(path):
+            files = [f for f in os.listdir(path) if f.endswith(".pt")]
+            files.sort()
+            cached_files[label] = files
+            
     has_strategy = os.path.exists(STRATEGY_DB_PATH)
-    return render_template("index.html", replays=replays, cached=cached, has_strategy=has_strategy)
+    return render_template("index.html", replays=replays, cached_files=cached_files, has_strategy=has_strategy)
 
 @app.route("/view/<path:replay_name>")
 def view_replay(replay_name):
@@ -391,12 +415,14 @@ def serve_inputs(replay_name):
     response: Dict[str, Any] = {"frames": [], "static": None}
 
     if os.path.exists(jsonl_path):
-        with open(jsonl_path, "r") as f:
-            for line in f:
-                if line.strip():
-                    try:
-                        response["frames"].append(json.loads(line))
-                    except: continue
+        try:
+            with open(jsonl_path, "r") as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            response["frames"].append(json.loads(line))
+                        except: continue
+        except: pass
     if os.path.exists(static_path):
         try:
             with open(static_path, "r") as f:
@@ -406,8 +432,12 @@ def serve_inputs(replay_name):
 
 @app.route("/api/cache_meta/<path:filename>")
 def cache_meta(filename):
-    path = os.path.join(CACHE_DIR, filename)
-    if not os.path.exists(path): return jsonify({"error": "File not found"}), 404
+    # Get type from query string
+    req_type = request.args.get('type')
+    
+    path, _ = find_cache_info(filename, hint_label=req_type)
+    
+    if not path: return jsonify({"error": "File not found"}), 404
     try:
         data = torch.load(path, map_location="cpu", weights_only=True)
         return jsonify({"count": int(data["frames"].shape[0])})
@@ -415,60 +445,83 @@ def cache_meta(filename):
 
 @app.route("/api/cache_frame/<path:filename>/<int:idx>")
 def cache_frame(filename, idx):
-    path = os.path.join(CACHE_DIR, filename)
-    if not os.path.exists(path): return jsonify({"error": "File not found"}), 404
+    # Get type from query string
+    req_type = request.args.get('type')
+    
+    path, cache_type = find_cache_info(filename, hint_label=req_type)
+    
+    if not path: return jsonify({"error": "File not found"}), 404
+    
     try:
         data = torch.load(path, map_location="cpu", weights_only=True)
-        n = int(data["actions"].shape[0])
-        idx = _clamp_index(idx, n)
+        actions_tensor = data["actions"]
+        n_frames = int(data["frames"].shape[0])
+        idx = max(0, min(idx, n_frames - 1))
         
-        # Frame
+        # Check if actions are baked (3D) or flat (2D)
+        is_baked_3d = (actions_tensor.ndim == 3)
+        
+        # 1. Image
         frame_uint8 = data["frames"][idx]
         img_np = frame_uint8.permute(1, 2, 0).numpy()
         pil_img = Image.fromarray(img_np)
         buf = io.BytesIO()
         pil_img.save(buf, format="PNG")
         b64_img = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+        # 2. Config & Input Window
+        # Determine which model config to use based on folder name
+        model_key = cache_type if cache_type in ["Plan", "Battle"] else "Battle"
+        cfg = engine.configs.get(model_key, engine.configs["Battle"])
+        V = cfg["vision_horizon"]
         
-        # Inference Prep
-        V = int(getattr(engine, "vision_horizon", 1))
-        seq_uint8 = _get_frame_window_uint8(data["frames"], idx, V)
+        # Get frame window
+        indices = [max(0, idx - (V - 1) + i) for i in range(V)]
+        seq_uint8 = data["frames"][indices]
         seq_float = seq_uint8.float().div(255.0).mul(2.0).sub(1.0)
+
+        # 3. Ground Truth (Baked vs Legacy)
+        gt_seq_display = []
+        T = 18
+        if is_baked_3d:
+            # Baked: [N, 18, Dim]. Current frame has its whole future baked in.
+            baked_seq = actions_tensor[idx] 
+            limit = min(T, baked_seq.shape[0])
+            for t in range(limit):
+                gt_seq_display.append(_cache_vec_to_gt(baked_seq[t].tolist()))
+        else:
+            # Legacy: [N, Dim]. We must look ahead in the big tensor.
+            for t in range(T):
+                target_idx = min(idx + t, actions_tensor.shape[0] - 1)
+                gt_seq_display.append(_cache_vec_to_gt(actions_tensor[target_idx].tolist()))
+
+        # 4. Inference
+        pred_seq_display = None
+        pred_meta = {}
+        pred_vecs = engine.infer(seq_float, model_key=model_key)
         
-        # Ground Truth
-        ACTION_OFFSET_LOCAL = int(os.getenv("ACTION_OFFSET", "0"))
-        T = int(getattr(engine, "action_horizon", 18))
-        gt_seq = []
-        for s in range(T):
-            v = data["actions"][_clamp_index(idx + ACTION_OFFSET_LOCAL + s, n)].tolist()
-            gt_seq.append(_vec_cache_to_gt_dict(v))
-        truth_dict = gt_seq[0] if gt_seq else {}
-        
-        # Pred
-        pred_seq, pred_dict, pred_debug = None, None, None
-        if engine.loaded:
-            pred_vecs = engine.infer_seq(seq_float)
-            if pred_vecs:
-                pred_seq = [_policy_vec_to_display(v, old_layout=engine.tokenizer_old_layout) for v in pred_vecs]
-                pred_dict = pred_seq[0]
-                
+        if pred_vecs:
+            pred_seq_display = [_policy_vec_to_display(v, old_layout=cfg["old_layout"]) for v in pred_vecs]
+            pred_meta = {"model_used": model_key, "horizon": len(pred_vecs)}
+        else:
+            pred_meta = {"error": f"Model {model_key} not loaded"}
+
         return jsonify({
             "image": "data:image/png;base64," + b64_img,
-            "ground_truth": truth_dict,
-            "ground_truth_seq": gt_seq,
-            "prediction": pred_dict,
-            "prediction_seq": pred_seq,
-            "idx": idx, "horizon": T, "vision_horizon": V
+            "ground_truth_seq": gt_seq_display,
+            "ground_truth": gt_seq_display[0] if gt_seq_display else {},
+            "prediction_seq": pred_seq_display,
+            "prediction": pred_seq_display[0] if pred_seq_display else {},
+            "pred_meta": pred_meta,
+            "idx": idx, "is_baked": is_baked_3d
         })
+
     except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route("/inspect/<path:filename>")
 def inspect_cache(filename):
     return render_template("inspect_cache.html", filename=filename)
 
-
-
-# --- NEW ROUTE: RL INSPECTOR UI ---
 @app.route("/rl")
 def view_rl_inspector():
     stats = {
@@ -476,14 +529,12 @@ def view_rl_inspector():
         "high_reward": len([x for x in RL_DATA_CACHE if x['weight'] > 1.0]),
         "punishment": len([x for x in RL_DATA_CACHE if x['weight'] < 1.0])
     }
-    # INJECT GBA_UI_BUTTONS HERE
+    # Pass ui_buttons if needed for the template
     return render_template("rl_inspector.html", stats=stats, ui_buttons=GBA_UI_BUTTONS)
 
-# --- NEW ROUTE: RL SAMPLE API ---
 @app.route("/api/rl_list")
 def api_rl_list():
     """Returns the lightweight list for the sidebar."""
-    # Optional filtering
     filter_type = request.args.get('filter', 'all') # all, high, low
     
     data = RL_DATA_CACHE
@@ -492,14 +543,10 @@ def api_rl_list():
     elif filter_type == 'low':
         data = [x for x in RL_DATA_CACHE if x['weight'] < 1.0]
         
-    # Limit to first 1000 to prevent browser lag if list is huge
     return jsonify(data[:2000])
 
-
-# --- REPLACE THE api_rl_detail ROUTE ---
 @app.route("/api/rl_detail/<int:list_idx>")
 def api_rl_detail(list_idx):
-    # 1. Validate Index
     if list_idx < 0 or list_idx >= len(RL_DATA_CACHE):
         return jsonify({"error": "Index out of bounds"}), 404
         
@@ -513,9 +560,10 @@ def api_rl_detail(list_idx):
     data_found = False
     
     # 2. STRATEGY A: TRY CACHE (.PT)
-    pt_path = os.path.join(CACHE_DIR, f"{replay_name}.pt")
+    # Use find_cache_info to locate the file in any cache dir
+    pt_path, _ = find_cache_info(f"{replay_name}.pt")
     
-    if os.path.exists(pt_path):
+    if pt_path:
         try:
             # CPU map avoids VRAM usage
             data = torch.load(pt_path, map_location='cpu')
@@ -528,15 +576,21 @@ def api_rl_detail(list_idx):
                 pil_img.save(buf, format="PNG")
                 b64_img = base64.b64encode(buf.getvalue()).decode("utf-8")
                 
-                # Extract Actions
-                horizon = 18
-                end_idx = min(frame_idx + horizon, data['actions'].shape[0])
-                actions_tensor = data['actions'][frame_idx : end_idx]
+                # Extract Actions (Handle Baked vs Legacy)
+                acts = data['actions']
+                is_baked = (acts.ndim == 3)
                 
-                for t in range(actions_tensor.shape[0]):
-                    vec = actions_tensor[t].tolist()
-                    disp = _policy_vec_to_display(vec, old_layout=False)
-                    action_seq.append(disp)
+                if is_baked:
+                    # Baked: 18 frames are pre-packaged at this index
+                    baked = acts[frame_idx]
+                    limit = min(18, baked.shape[0])
+                    for t in range(limit):
+                        action_seq.append(_policy_vec_to_display(baked[t].tolist(), old_layout=False))
+                else:
+                    # Legacy: Look ahead
+                    end_idx = min(frame_idx + 18, acts.shape[0])
+                    for t in range(frame_idx, end_idx):
+                        action_seq.append(_policy_vec_to_display(acts[t].tolist(), old_layout=False))
                 
                 data_found = True
         except Exception as e:
@@ -547,8 +601,6 @@ def api_rl_detail(list_idx):
         jsonl_path = os.path.join(DATASET_DIR, replay_name, "actions.jsonl")
         if os.path.exists(jsonl_path):
             try:
-                # Read specific window of lines
-                # (Reading all lines is fine for <50MB files)
                 with open(jsonl_path, 'r') as f:
                     lines = f.readlines()
                 
@@ -556,9 +608,7 @@ def api_rl_detail(list_idx):
                     # No Tensor Image available in JSONL
                     b64_img = "" 
                     
-                    # Extract Actions
-                    horizon = 18
-                    end_idx = min(frame_idx + horizon, len(lines))
+                    end_idx = min(frame_idx + 18, len(lines))
                     
                     for i in range(frame_idx, end_idx):
                         try:
@@ -583,7 +633,6 @@ def api_rl_detail(list_idx):
         "timestamp": float(frame_idx) / 60.0,
         "source_type": "pt" if b64_img else "jsonl"
     })
-
 
 if __name__ == "__main__":
     print("🚀 Viewer running at http://127.0.0.1:5011")

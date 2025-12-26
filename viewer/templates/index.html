@@ -1,55 +1,118 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <title>Tango Dataset Viewer</title>
     <style>
-        /* Changed: Removed display:flex from body so items stack vertically by default */
-        body { 
-            font-family: 'Consolas', sans-serif; 
-            background: #222; 
-            color: #eee; 
-            padding: 20px; 
-        } 
-        
-        h2 { border-bottom: 1px solid #444; padding-bottom: 10px; color: #4db8ff; }
-        
-        /* New class for the side-by-side columns */
+        body {
+            font-family: 'Consolas', sans-serif;
+            background: #222;
+            color: #eee;
+            padding: 20px;
+        }
+
+        h2 {
+            border-bottom: 1px solid #444;
+            padding-bottom: 10px;
+            color: #4db8ff;
+        }
+
         .columns-container {
-            display: flex; 
+            display: flex;
             gap: 40px;
         }
 
-        .col { flex: 1; }
-
-        a { 
-            color: #aaa; 
-            text-decoration: none; 
-            font-size: 14px; 
-            display: block; 
-            margin: 5px 0; 
-            padding: 5px; 
-            background: #333; 
-            border-radius: 4px; 
+        .col {
+            flex: 1;
+            min-width: 300px;
         }
-        
-        a:hover { background: #444; color: #fff; }
-        
-        .tag { font-size: 10px; background: #000; padding: 2px 5px; border-radius: 3px; float: right; color: #666; }
+
+        a {
+            color: #aaa;
+            text-decoration: none;
+            font-size: 14px;
+            display: block;
+            margin: 5px 0;
+            padding: 5px;
+            background: #333;
+            border-radius: 4px;
+        }
+
+        a:hover {
+            background: #444;
+            color: #fff;
+        }
+
+        .tag {
+            font-size: 10px;
+            padding: 2px 5px;
+            border-radius: 3px;
+            float: right;
+            font-weight: bold;
+        }
+
+        .tag-Plan {
+            background: #004400;
+            color: #00ff00;
+        }
+
+        .tag-Battle {
+            background: #440000;
+            color: #ff0000;
+        }
+
+        .tag-Legacy {
+            background: #444400;
+            color: #ffff00;
+        }
+
+        .dash-row {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .dash-card {
+            border: 1px solid #4db8ff;
+            padding: 10px;
+            border-radius: 4px;
+            background: rgba(77, 184, 255, 0.1);
+            flex: 1;
+        }
+
+        .dash-title {
+            margin: 0 0 5px 0;
+            color: #fff;
+            font-size: 1.1em;
+        }
+
+        .dash-link {
+            color: #4db8ff;
+            font-weight: bold;
+        }
+
+        .dash-card.green {
+            border-color: #00ff00;
+            background: rgba(0, 255, 0, 0.1);
+        }
+
+        .dash-card.green .dash-link {
+            color: #00ff00;
+        }
     </style>
 </head>
+
 <body>
-    
-    <div style="display:flex; gap:10px; margin-bottom: 20px;">
+    <div class="dash-row">
         {% if has_strategy %}
-        <div style="border: 1px solid #4db8ff; padding: 10px; border-radius: 4px; background: rgba(77, 184, 255, 0.1); flex:1;">
-            <h3 style="margin:0 0 5px 0; color: #fff;">🧠 Strategy Analysis</h3>
-            <a href="/strategy" style="color:#4db8ff; font-weight:bold;">View Chip Window Dataset &rarr;</a>
+        <div class="dash-card">
+            <h3 class="dash-title">🧠 Strategy Analysis</h3>
+            <a href="/strategy" class="dash-link">View Chip Window Dataset &rarr;</a>
         </div>
         {% endif %}
-
-        <div style="border: 1px solid #00ff00; padding: 10px; border-radius: 4px; background: rgba(0, 255, 0, 0.1); flex:1;">
-            <h3 style="margin:0 0 5px 0; color: #fff;">⚖️ RL Weights Inspector</h3>
-            <a href="/rl" style="color:#00ff00; font-weight:bold;">Debug Rewards &amp; Punishments &rarr;</a>
+        <div class="dash-card green">
+            <h3 class="dash-title">⚖️ RL Weights Inspector</h3>
+            <a href="/rl" class="dash-link">Debug Rewards &amp; Punishments &rarr;</a>
         </div>
     </div>
 
@@ -57,25 +120,24 @@
         <div class="col">
             <h2>📂 Raw Replays (Video + JSONL)</h2>
             {% for replay in replays %}
-                <a href="/view/{{ replay }}">
-                    {{ replay }}
-                </a>
+            <a href="/view/{{ replay }}">{{ replay }}</a>
             {% else %}
-                <p style="color:#666">No raw datasets found in data/dataset/</p>
+            <p style="color:#666">No raw datasets found.</p>
             {% endfor %}
         </div>
 
         <div class="col">
-            <h2>📦 Cached Tensors (.pt)</h2>
-            {% for f in cached %}
-                <a href="/inspect/{{ f }}">
-                    {{ f }} <span class="tag">PT</span>
-                </a>
-            {% else %}
-                <p style="color:#666">No cached files in data/dataset_cached/</p>
+            <h2>📦 Processed Caches</h2>
+            {% for label, files in cached_files.items() %}
+            <h3 style="color:#888; margin-top: 20px;">{{ label }} Cache</h3>
+            {% for f in files %}
+            <a href="/inspect/{{ f }}?type={{ label }}">
+                {{ f }} <span class="tag tag-{{ label }}">{{ label }}</span>
+            </a>
+            {% endfor %}
             {% endfor %}
         </div>
     </div>
-
 </body>
+
 </html>

@@ -1,333 +1,65 @@
 <!DOCTYPE html>
 <html>
-
 <head>
     <title>Inspector: {{ filename }}</title>
     <style>
-        body {
-            background: #111;
-            color: #fff;
-            font-family: 'Consolas', monospace;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            margin: 0;
-            padding: 20px;
-        }
-
-        h2 {
-            margin-bottom: 5px;
-            color: #ccc;
-        }
-
-        a {
-            color: #888;
-            text-decoration: none;
-            align-self: flex-start;
-            margin-bottom: 20px;
-            font-size: 14px;
-        }
-
-        a:hover {
-            color: #fff;
-            text-decoration: underline;
-        }
-
-        .main-stage {
-            display: flex;
-            gap: 40px;
-            margin-top: 20px;
-            align-items: flex-start;
-        }
-
-        .viewport {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 10px;
-        }
-
-        img.frame-view {
-            width: 512px;
-            height: 512px;
-            image-rendering: pixelated;
-            border: 2px solid #444;
-            background: #000;
-            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
-        }
-
-        .controls-area {
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-        }
-
-        .controller-box {
-            text-align: center;
-        }
-
-        .controller-label {
-            color: #888;
-            font-size: 12px;
-            margin-bottom: 5px;
-            letter-spacing: 1px;
-            text-transform: uppercase;
-        }
-
-        .controller {
-            background: #e0e0e0;
-            width: 240px;
-            height: 140px;
-            border-radius: 15px 15px 30px 30px;
-            position: relative;
-            border: 2px solid #999;
-            margin: 0 auto;
-            transform: scale(0.9);
-        }
-
-        .btn {
-            position: absolute;
-            background: #555;
-            border: 1px solid #333;
-            transition: background 0.05s, transform 0.05s;
-        }
-
-        .btn.active {
-            background: #00ff00 !important;
-            box-shadow: 0 0 10px #00ff00;
-        }
-
-        .btn.pred-active {
-            background: #ff00ff !important;
-            box-shadow: 0 0 10px #ff00ff;
-            border-color: #cc00cc;
-        }
-
-        .dpad {
-            position: absolute;
-            top: 45px;
-            left: 20px;
-            width: 70px;
-            height: 70px;
-        }
-
-        .btn.up {
-            top: 0;
-            left: 23px;
-            width: 24px;
-            height: 24px;
-        }
-
-        .btn.down {
-            bottom: 0;
-            left: 23px;
-            width: 24px;
-            height: 24px;
-        }
-
-        .btn.left {
-            top: 23px;
-            left: 0;
-            width: 24px;
-            height: 24px;
-        }
-
-        .btn.right {
-            top: 23px;
-            right: 0;
-            width: 24px;
-            height: 24px;
-        }
-
-        /* Render these as the GBA face buttons */
-        .btn.a {
-            top: 55px;
-            right: 15px;
-            width: 28px;
-            height: 28px;
-            border-radius: 50%;
-            background: #a00;
-            color: rgba(255, 255, 255, 0.5);
-            font-size: 10px;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        }
-
-        .btn.b {
-            top: 70px;
-            right: 50px;
-            width: 28px;
-            height: 28px;
-            border-radius: 50%;
-            background: #a00;
-            color: rgba(255, 255, 255, 0.5);
-            font-size: 10px;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        }
-
-        .btn.l {
-            top: -8px;
-            left: 10px;
-            width: 60px;
-            height: 15px;
-            border-radius: 5px 5px 0 0;
-            background: #ccc;
-            z-index: -1;
-        }
-
-        .btn.r {
-            top: -8px;
-            right: 10px;
-            width: 60px;
-            height: 15px;
-            border-radius: 5px 5px 0 0;
-            background: #ccc;
-            z-index: -1;
-        }
-
-        .btn.start {
-            bottom: 15px;
-            left: 100px;
-            width: 25px;
-            height: 8px;
-            transform: rotate(-25deg);
-            background: #999;
-        }
-
-        .btn.select {
-            bottom: 15px;
-            left: 70px;
-            width: 25px;
-            height: 8px;
-            transform: rotate(-25deg);
-            background: #999;
-        }
-
-        .scrubber {
-            width: 512px;
-            display: flex;
-            gap: 5px;
-            align-items: center;
-            margin-top: 10px;
-        }
-
-        .scrubber button {
-            background: #333;
-            color: #fff;
-            border: 1px solid #555;
-            cursor: pointer;
-            padding: 2px 8px;
-            font-family: monospace;
-            font-weight: bold;
-        }
-
-        .scrubber button:hover {
-            background: #555;
-        }
-
-        input[type=range] {
-            flex-grow: 1;
-            accent-color: #4db8ff;
-            cursor: pointer;
-        }
-
-        .idx-display {
-            font-size: 14px;
-            width: 110px;
-            text-align: right;
-            font-family: monospace;
-            color: #4db8ff;
-            margin-left: 5px;
-        }
-
-        .bar-container {
-            width: 240px;
-            margin-top: 5px;
-        }
-
-        .bar-row {
-            display: flex;
-            justify-content: space-between;
-            font-size: 10px;
-            color: #aaa;
-            margin-bottom: 2px;
-        }
-
-        .bar-bg {
-            width: 100%;
-            height: 4px;
-            background: #333;
-            border-radius: 2px;
-            overflow: hidden;
-        }
-
-        .bar-fill {
-            height: 100%;
-            background: #ff00ff;
-            width: 0%;
-            transition: width 0.1s;
-        }
-
-        .timeline-wrap {
-            width: 240px;
-        }
-
-        .timeline-title {
-            font-size: 10px;
-            color: #888;
-            margin: 8px 0 4px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-
-        .timeline {
-            display: grid;
-            grid-template-columns: 60px repeat(18, 1fr);
-            gap: 2px;
-            align-items: center;
-            user-select: none;
-        }
-
-        .lane-label {
-            font-size: 10px;
-            color: #aaa;
-            text-align: right;
-            padding-right: 6px;
-        }
-
-        .cell {
-            width: 10px;
-            height: 10px;
-            background: #222;
-            border: 1px solid #333;
-            border-radius: 2px;
-        }
-
-        .cell.gt {
-            background: #00ff00;
-            box-shadow: 0 0 6px rgba(0, 255, 0, 0.35);
-            border-color: #00cc00;
-        }
-
-        .cell.pr {
-            background: #ff00ff;
-            box-shadow: 0 0 6px rgba(255, 0, 255, 0.35);
-            border-color: #cc00cc;
-        }
-
-        .cell.both {
-            background: linear-gradient(135deg, #00ff00 0%, #00ff00 48%, #ff00ff 52%, #ff00ff 100%);
-            border-color: #888;
-        }
+        body { background: #111; color: #fff; font-family: 'Consolas', monospace; display: flex; flex-direction: column; align-items: center; margin: 0; padding: 20px; }
+        h2 { margin-bottom: 5px; color: #ccc; }
+        .meta-tag { font-size: 11px; padding: 2px 6px; border-radius: 4px; border: 1px solid #444; margin-left: 10px; color: #888; }
+        .tag-Plan { color: #00ff00; border-color: #004400; }
+        .tag-Battle { color: #ff0000; border-color: #440000; }
+        .tag-Baked { color: #ffff00; border-color: #444400; }
+        
+        a { color: #888; text-decoration: none; align-self: flex-start; margin-bottom: 20px; font-size: 14px; }
+        a:hover { color: #fff; text-decoration: underline; }
+        .main-stage { display: flex; gap: 40px; margin-top: 20px; align-items: flex-start; }
+        .viewport { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+        img.frame-view { width: 512px; height: 512px; image-rendering: pixelated; border: 2px solid #444; background: #000; box-shadow: 0 0 20px rgba(0, 0, 0, 0.5); }
+        .controls-area { display: flex; flex-direction: column; gap: 20px; }
+        .controller-box { text-align: center; position: relative; }
+        .controller-label { color: #888; font-size: 12px; margin-bottom: 5px; letter-spacing: 1px; text-transform: uppercase; }
+        .controller { background: #e0e0e0; width: 240px; height: 140px; border-radius: 15px 15px 30px 30px; position: relative; border: 2px solid #999; margin: 0 auto; transform: scale(0.9); }
+        .btn { position: absolute; background: #555; border: 1px solid #333; transition: background 0.05s, transform 0.05s; }
+        .btn.active { background: #00ff00 !important; box-shadow: 0 0 10px #00ff00; }
+        .btn.pred-active { background: #ff00ff !important; box-shadow: 0 0 10px #ff00ff; border-color: #cc00cc; }
+        .dpad { position: absolute; top: 45px; left: 20px; width: 70px; height: 70px; }
+        .btn.up { top: 0; left: 23px; width: 24px; height: 24px; }
+        .btn.down { bottom: 0; left: 23px; width: 24px; height: 24px; }
+        .btn.left { top: 23px; left: 0; width: 24px; height: 24px; }
+        .btn.right { top: 23px; right: 0; width: 24px; height: 24px; }
+        .btn.a { top: 55px; right: 15px; width: 28px; height: 28px; border-radius: 50%; background: #a00; color: rgba(255, 255, 255, 0.5); font-size: 10px; display: flex; justify-content: center; align-items: center; }
+        .btn.b { top: 70px; right: 50px; width: 28px; height: 28px; border-radius: 50%; background: #a00; color: rgba(255, 255, 255, 0.5); font-size: 10px; display: flex; justify-content: center; align-items: center; }
+        .btn.l { top: -8px; left: 10px; width: 60px; height: 15px; border-radius: 5px 5px 0 0; background: #ccc; z-index: -1; }
+        .btn.r { top: -8px; right: 10px; width: 60px; height: 15px; border-radius: 5px 5px 0 0; background: #ccc; z-index: -1; }
+        .btn.start { bottom: 15px; left: 100px; width: 25px; height: 8px; transform: rotate(-25deg); background: #999; }
+        .btn.select { bottom: 15px; left: 70px; width: 25px; height: 8px; transform: rotate(-25deg); background: #999; }
+        .scrubber { width: 512px; display: flex; gap: 5px; align-items: center; margin-top: 10px; }
+        .scrubber button { background: #333; color: #fff; border: 1px solid #555; cursor: pointer; padding: 2px 8px; font-family: monospace; font-weight: bold; }
+        .scrubber button:hover { background: #555; }
+        input[type=range] { flex-grow: 1; accent-color: #4db8ff; cursor: pointer; }
+        .idx-display { font-size: 14px; width: 110px; text-align: right; font-family: monospace; color: #4db8ff; margin-left: 5px; }
+        .bar-container { width: 240px; margin-top: 5px; }
+        .bar-row { display: flex; justify-content: space-between; font-size: 10px; color: #aaa; margin-bottom: 2px; }
+        .bar-bg { width: 100%; height: 4px; background: #333; border-radius: 2px; overflow: hidden; }
+        .bar-fill { height: 100%; background: #ff00ff; width: 0%; transition: width 0.1s; }
+        .timeline-wrap { width: 240px; }
+        .timeline-title { font-size: 10px; color: #888; margin: 8px 0 4px; text-transform: uppercase; letter-spacing: 1px; }
+        .timeline { display: grid; grid-template-columns: 60px repeat(18, 1fr); gap: 2px; align-items: center; user-select: none; }
+        .lane-label { font-size: 10px; color: #aaa; text-align: right; padding-right: 6px; }
+        .cell { width: 10px; height: 10px; background: #222; border: 1px solid #333; border-radius: 2px; }
+        .cell.gt { background: #00ff00; box-shadow: 0 0 6px rgba(0, 255, 0, 0.35); border-color: #00cc00; }
+        .cell.pr { background: #ff00ff; box-shadow: 0 0 6px rgba(255, 0, 255, 0.35); border-color: #cc00cc; }
+        .cell.both { background: linear-gradient(135deg, #00ff00 0%, #00ff00 48%, #ff00ff 52%, #ff00ff 100%); border-color: #888; }
+        
+        .model-badge { position: absolute; top: 0; right: 0; font-size: 10px; background: #333; padding: 2px 4px; border-radius: 2px; }
     </style>
 </head>
-
 <body>
     <a href="/">&larr; Back to List</a>
-    <h2>{{ filename }}</h2>
+    <div style="display: flex; align-items: center;">
+        <h2>{{ filename }}</h2>
+        <span id="tag-baked" class="meta-tag tag-Baked" style="display:none">BAKED-3D</span>
+    </div>
 
     <div class="main-stage">
         <div class="viewport">
@@ -335,23 +67,17 @@
             <div class="scrubber">
                 <button onclick="step(-18)" title="-18 Frames">⟪</button>
                 <button onclick="step(-9)" title="-9 Frames">⟨⟨</button>
-                
                 <button onclick="step(-1)" title="-1 Frame">&lt;</button>
-                
                 <input type="range" id="slider" min="0" max="0" value="0" oninput="seek(this.value)">
-                
                 <button onclick="step(1)" title="+1 Frame">&gt;</button>
-                
                 <button onclick="step(9)" title="+9 Frames">⟩⟩</button>
                 <button onclick="step(18)" title="+18 Frames">⟫</button>
-                
                 <div class="idx-display" id="idx-disp">0 / 0</div>
             </div>
         </div>
-
         <div class="controls-area">
             <div class="controller-box">
-                <div class="controller-label">Ground Truth (Human)</div>
+                <div class="controller-label">Ground Truth (Next 18)</div>
                 <div class="controller" id="ctrl-truth">
                     <div class="btn l" id="gt-LEFT_SHOULDER"></div>
                     <div class="btn r" id="gt-RIGHT_SHOULDER"></div>
@@ -363,17 +89,16 @@
                     </div>
                     <div class="btn a" id="gt-EAST">A</div>
                     <div class="btn b" id="gt-SOUTH">B</div>
-
-
-                    <div class="btn select" id="gt-BACK"></div>   <div class="btn start" id="gt-START"></div>
+                    <div class="btn select" id="gt-BACK"></div> <div class="btn start" id="gt-START"></div>
                 </div>
                 <div style="height:20px; font-size:10px; color:#666; margin-top:5px;">
                     Axis: <span id="gt-axis">0.0, 0.0</span>
                 </div>
             </div>
-
             <div class="controller-box">
                 <div class="controller-label" style="color:#ff00ff">Model Prediction</div>
+                <div class="model-badge" id="model-badge"></div>
+                
                 <div class="controller" id="ctrl-pred">
                     <div class="btn l" id="pr-LEFT_SHOULDER"></div>
                     <div class="btn r" id="pr-RIGHT_SHOULDER"></div>
@@ -383,13 +108,11 @@
                         <div class="btn left" id="pr-DPAD_LEFT"></div>
                         <div class="btn right" id="pr-DPAD_RIGHT"></div>
                     </div>
-                    <div class="btn b" id="pr-EAST">A</div>
-                    <div class="btn a" id="pr-SOUTH">B</div>
-                    <div class="btn select" id="pr-BACK"></div>   <div class="btn start" id="pr-START"></div>
+                    <div class="btn a" id="pr-EAST">A</div>
+                    <div class="btn b" id="pr-SOUTH">B</div>
+                    <div class="btn select" id="pr-BACK"></div> <div class="btn start" id="pr-START"></div>
                 </div>
-
                 <div class="bar-container" id="conf-bars"></div>
-
                 <div class="timeline-wrap">
                     <div class="timeline-title">Next 18 (GT vs Plan)</div>
                     <div id="timeline"></div>
@@ -397,153 +120,138 @@
             </div>
         </div>
     </div>
-<script>
-    const filename = "{{ filename }}";
+    <script>
+        const filename = "{{ filename }}";
+        // 1. Capture the 'type' param from the browser URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const cacheTypeParam = urlParams.get('type') || '';
+
     let totalFrames = 0;
+        const UI_BTNS = ['DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'EAST', 'SOUTH', 'LEFT_SHOULDER', 'RIGHT_SHOULDER', 'BACK', 'START'];
+        const TIMELINE_KEYS = UI_BTNS;
+        const GT_THRES = 0.5;
+        const PR_PROB_THRES = 0.5;
 
-    // Only GBA-relevant buttons
-    const UI_BTNS = ['DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'EAST', 'SOUTH', 'LEFT_SHOULDER', 'RIGHT_SHOULDER', 'BACK', 'START'];
-    const TIMELINE_KEYS = UI_BTNS;
-
-    // Thresholds:
-    // - GT is 0/1 so 0.5 is correct
-    // - Pred now uses probabilities (0..1) computed server-side
-    const GT_THRES = 0.5;
-    const PR_PROB_THRES = 0.5;
-
-    // Load Meta
-    fetch(`/api/cache_meta/${filename}`).then(r => r.json()).then(d => {
+        // 2. Append the type to the Meta fetch
+    fetch(`/api/cache_meta/${filename}?type=${cacheTypeParam}`).then(r => r.json()).then(d => {
         totalFrames = d.count;
         document.getElementById('slider').max = totalFrames - 1;
         document.getElementById('idx-disp').innerText = `0 / ${totalFrames}`;
         loadFrame(0);
     });
 
-    function seek(val) {
-        document.getElementById('idx-disp').innerText = `${val} / ${totalFrames}`;
-        loadFrame(parseInt(val));
-    }
+        fetch(`/api/cache_meta/${filename}`).then(r => r.json()).then(d => {
+            totalFrames = d.count;
+            document.getElementById('slider').max = totalFrames - 1;
+            document.getElementById('idx-disp').innerText = `0 / ${totalFrames}`;
+            loadFrame(0);
+        });
 
-    function step(dir) {
-        let el = document.getElementById('slider');
-        let val = parseInt(el.value) + dir;
-        // Clamp to valid range
-        if (val < 0) val = 0;
-        if (val >= totalFrames) val = totalFrames - 1;
-        
-        el.value = val;
-        seek(val);
-    }
+        function seek(val) { document.getElementById('idx-disp').innerText = `${val} / ${totalFrames}`; loadFrame(parseInt(val)); }
+        function step(dir) {
+            let el = document.getElementById('slider');
+            let val = parseInt(el.value) + dir;
+            if (val < 0) val = 0;
+            if (val >= totalFrames) val = totalFrames - 1;
+            el.value = val;
+            seek(val);
+        }
 
-    function updateController(prefix, buttonsFlat, activeClass, thres) {
-        UI_BTNS.forEach(k => {
-            const el = document.getElementById(`${prefix}-${k}`);
+        function updateController(prefix, buttonsFlat, activeClass, thres) {
+            UI_BTNS.forEach(k => {
+                const el = document.getElementById(`${prefix}-${k}`);
+                if (!el) return;
+                el.classList.remove(activeClass);
+                const v = (typeof buttonsFlat?.[k] === 'number') ? buttonsFlat[k] : 0;
+                if (v > thres) el.classList.add(activeClass);
+            });
+        }
+
+        function niceLabel(k) {
+            if (k === 'BACK') return 'SELECT';
+            if (k === 'EAST') return 'A';
+            if (k === 'SOUTH') return 'B';
+            if (k.startsWith('DPAD_')) return k.replace('DPAD_', '');
+            if (k === 'LEFT_SHOULDER') return 'L';
+            if (k === 'RIGHT_SHOULDER') return 'R';
+            return k;
+        }
+
+        function updateBars(probFlat) {
+            const container = document.getElementById('conf-bars');
+            container.innerHTML = '';
+            UI_BTNS.forEach(k => {
+                const val = (typeof probFlat?.[k] === 'number') ? probFlat[k] : 0;
+                const pct = Math.max(0, Math.min(100, val * 100));
+                const color = val > 0.7 ? '#ff00ff' : '#555';
+                container.innerHTML += `<div class="bar-row"><span>${niceLabel(k)}</span><span>${val.toFixed(2)}</span></div><div class="bar-bg"><div class="bar-fill" style="width:${pct}%; background:${color}"></div></div>`;
+            });
+        }
+
+        function valOf(a, k) { const v = a?.[k]; return (typeof v === 'number') ? v : 0; }
+
+        function renderTimeline(gtSeq, prSeqProb, horizon) {
+            const T = horizon || 18;
+            const el = document.getElementById('timeline');
             if (!el) return;
+            el.innerHTML = '';
+            const grid = document.createElement('div');
+            grid.className = 'timeline';
+            grid.style.gridTemplateColumns = `60px repeat(${T}, 1fr)`;
 
-            el.classList.remove(activeClass);
-            const v = (typeof buttonsFlat?.[k] === 'number') ? buttonsFlat[k] : 0;
-            if (v > thres) el.classList.add(activeClass);
-        });
-    }
+            for (const key of TIMELINE_KEYS) {
+                const lbl = document.createElement('div');
+                lbl.className = 'lane-label';
+                lbl.textContent = niceLabel(key);
+                grid.appendChild(lbl);
+                for (let t = 0; t < T; t++) {
+                    const gt = gtSeq?.[t] ? (valOf(gtSeq[t], key) > GT_THRES) : false;
+                    const pr = prSeqProb?.[t] ? (valOf(prSeqProb[t], key) > PR_PROB_THRES) : false;
+                    const c = document.createElement('div');
+                    c.className = 'cell';
+                    if (gt && pr) c.classList.add('both');
+                    else if (gt) c.classList.add('gt');
+                    else if (pr) c.classList.add('pr');
+                    grid.appendChild(c);
+                }
+            }
+            el.appendChild(grid);
+        }
 
-    function niceLabel(k) {
-        if (k === 'BACK') return 'SELECT';
-        if (k === 'EAST') return 'A';
-        if (k === 'SOUTH') return 'B';
-        if (k.startsWith('DPAD_')) return k.replace('DPAD_', '');
-        if (k === 'LEFT_SHOULDER') return 'L';
-        if (k === 'RIGHT_SHOULDER') return 'R';
-        return k;
-    }
-
-    // Show probability bars (0..1) for the GBA buttons.
-    function updateBars(probFlat) {
-        const container = document.getElementById('conf-bars');
-        container.innerHTML = '';
-
-        UI_BTNS.forEach(k => {
-            const val = (typeof probFlat?.[k] === 'number') ? probFlat[k] : 0;
-            const pct = Math.max(0, Math.min(100, val * 100));
-            const color = val > 0.7 ? '#ff00ff' : '#555';
-
-            const html = `
-                <div class="bar-row">
-                    <span>${niceLabel(k)}</span>
-                    <span>${val.toFixed(2)}</span>
-                </div>
-                <div class="bar-bg"><div class="bar-fill" style="width:${pct}%; background:${color}"></div></div>
-            `;
-            container.innerHTML += html;
-        });
-    }
-
-    function valOf(a, k) {
-        const v = a?.[k];
-        return (typeof v === 'number') ? v : 0;
-    }
-
-    function renderTimeline(gtSeq, prSeqProb, horizon) {
-        const T = horizon || 18;
-        const el = document.getElementById('timeline');
-        if (!el) return;
-
-        el.innerHTML = '';
-
-        const grid = document.createElement('div');
-        grid.className = 'timeline';
-        grid.style.gridTemplateColumns = `60px repeat(${T}, 1fr)`;
-
-        for (const key of TIMELINE_KEYS) {
-            const lbl = document.createElement('div');
-            lbl.className = 'lane-label';
-            lbl.textContent = niceLabel(key);
-            grid.appendChild(lbl);
-
-            for (let t = 0; t < T; t++) {
-                const gt = gtSeq?.[t] ? (valOf(gtSeq[t], key) > GT_THRES) : false;
-                const pr = prSeqProb?.[t] ? (valOf(prSeqProb[t], key) > PR_PROB_THRES) : false;
-
-                const c = document.createElement('div');
-                c.className = 'cell';
-                if (gt && pr) c.classList.add('both');
-                else if (gt) c.classList.add('gt');
-                else if (pr) c.classList.add('pr');
-
-                grid.appendChild(c);
+        async function loadFrame(idx) {
+            // 3. Append the type to the Frame fetch
+        const res = await fetch(`/api/cache_frame/${filename}/${idx}?type=${cacheTypeParam}`);
+        const data = await res.json();
+            if (data.error) return;
+            
+            document.getElementById('frame-img').src = data.image;
+            
+            // Updates
+            if (data.is_baked) document.getElementById('tag-baked').style.display = 'inline-block';
+            
+            // Ground Truth
+            updateController('gt', data.ground_truth, 'active', GT_THRES);
+            document.getElementById('gt-axis').innerText = `${(data.ground_truth.AXIS_LEFTX || 0).toFixed(2)}, ${(data.ground_truth.AXIS_LEFTY || 0).toFixed(2)}`;
+            
+            // Prediction
+            const badge = document.getElementById('model-badge');
+            if (data.prediction) {
+                updateController('pr', data.prediction.buttons_prob, 'pred-active', PR_PROB_THRES);
+                updateBars(data.prediction.buttons_prob);
+                const prSeqProb = (data.prediction_seq || []).map(s => s?.buttons_prob || {});
+                renderTimeline(data.ground_truth_seq, prSeqProb, 18); // Force 18 for baked view
+                
+                // Meta info
+                if (data.pred_meta && data.pred_meta.model_used) {
+                    badge.innerText = "Model: " + data.pred_meta.model_used;
+                    badge.style.color = (data.pred_meta.model_used === 'Plan') ? '#0f0' : '#f00';
+                }
+            } else {
+                renderTimeline(data.ground_truth_seq, [], 18);
+                badge.innerText = "No Model";
+                badge.style.color = '#555';
             }
         }
-
-        el.appendChild(grid);
-    }
-
-    async function loadFrame(idx) {
-        const res = await fetch(`/api/cache_frame/${filename}/${idx}`);
-        const data = await res.json();
-        if (data.error) return;
-
-        // 1. Image
-        document.getElementById('frame-img').src = data.image;
-
-        // 2. Ground Truth (buttons live directly on ground_truth)
-        updateController('gt', data.ground_truth, 'active', GT_THRES);
-        document.getElementById('gt-axis').innerText =
-            `${(data.ground_truth.AXIS_LEFTX || 0).toFixed(2)}, ${(data.ground_truth.AXIS_LEFTY || 0).toFixed(2)}`;
-
-        // 3. Prediction:
-        // - controller/timeline uses buttons_prob (0..1)
-        // - bars use buttons_prob too
-        if (data.prediction) {
-            updateController('pr', data.prediction.buttons_prob, 'pred-active', PR_PROB_THRES);
-            updateBars(data.prediction.buttons_prob);
-
-            const prSeqProb = (data.prediction_seq || []).map(s => s?.buttons_prob || {});
-            renderTimeline(data.ground_truth_seq, prSeqProb, data.horizon);
-        } else {
-            renderTimeline(data.ground_truth_seq, [], data.horizon);
-        }
-    }
-</script>
-
+    </script>
 </body>
-
 </html>
