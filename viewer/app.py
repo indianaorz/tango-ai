@@ -1096,15 +1096,56 @@ def view_strategy():
 
     return render_template("view_strategy.html", turns=turns[::-1])
 
+from derived_state import compute_derived
+import time
 
-from derived_state import compute_derived  # NEW
+_CRITIC = None
+_CRITIC_ERR = None
+
+# ---------------------------------------------------------------------------
+# Critic config
+# ---------------------------------------------------------------------------
+
+_DEFAULT_CRITIC_CKPT = "C:\\Users\\leeor\\FFCO\\ai\\tango-ai\\checkpoints\\critic_rl\\tdlam_overfit_bs32_lr1e3_wd0\\last.pt"
+# _DEFAULT_CRITIC_CKPT = "C:\\Users\\leeor\\FFCO\\ai\\tango-ai\\checkpoints\\critic_rl\\tdlam_v1\\last.pt"
+_DEFAULT_CRITIC_DEVICE = "cuda"
+
+# Increase batch size significantly to saturate GPU
+_DEFAULT_BATCH_SEQS = 2048  
+
+
+def _init_critic():
+    global _CRITIC, _CRITIC_ERR
+    try:
+        from critic_infer import CriticRunner
+
+        ckpt = (os.environ.get("CRITIC_RL_CKPT", "").strip() or _DEFAULT_CRITIC_CKPT).strip()
+        device = (os.environ.get("CRITIC_RL_DEVICE", "").strip() or _DEFAULT_CRITIC_DEVICE).strip()
+
+        if not ckpt:
+            print("[Critic] No checkpoint path configured.")
+            return
+
+        print(f"[Critic] Loading model from: {ckpt} on {device}...")
+        # Use a large batch size for inference speed
+        _CRITIC = CriticRunner(ckpt_path=ckpt, device=device, use_amp=True, batch_seqs=_DEFAULT_BATCH_SEQS)
+        _CRITIC_ERR = None
+        print("[Critic] Model loaded successfully.")
+    except Exception as e:
+        _CRITIC = None
+        _CRITIC_ERR = str(e)
+        print(f"[Critic] Failed to load model: {e}")
+
+
+_init_critic()
 
 @app.route("/inputs/<path:replay_name>")
 def serve_inputs(replay_name):
+    print(f"\n[Serve] Loading replay: {replay_name}")
     replay_path = os.path.join(DATASET_DIR, replay_name)
     jsonl_path = os.path.join(replay_path, "actions.jsonl")
     static_path = os.path.join(replay_path, "static_data.json")
-    response: Dict[str, Any] = {"frames": [], "static": None, "derived": []}  # NEW
+    response: Dict[str, Any] = {"frames": [], "static": None, "derived": []}
 
     if os.path.exists(jsonl_path):
         try:
@@ -1117,6 +1158,8 @@ def serve_inputs(replay_name):
                             continue
         except Exception:
             pass
+    
+    print(f"[Serve] Loaded {len(response['frames'])} frames.")
 
     if os.path.exists(static_path):
         try:
@@ -1125,19 +1168,67 @@ def serve_inputs(replay_name):
         except Exception:
             pass
 
-    # Derived state (kept out of app.py; computed in a dedicated module)
+    # 1) Compute Derived State
     try:
-        from derived_state import compute_derived  # viewer/derived_state.py
-        response["derived"] = compute_derived(response["frames"], response["static"])
+        t0 = time.time()
+        derived_data = compute_derived(response["frames"], response["static"])
+        print(f"[Serve] Derived state computed in {time.time()-t0:.3f}s")
     except Exception as e:
-        # Never break the viewer if derived computation fails.
-        response["derived"] = []
+        derived_data = []
         print(f"⚠️ derived_state compute failed: {e}")
 
+    critic_values = None
+    critic_meta = None
+
+    # 2) Critic Inference
+    if _CRITIC is not None and derived_data:
+        try:
+            trained_seq_len = getattr(_CRITIC, "trained_seq_len", 16)
+            
+            # FORCE STRIDE 1 to get a value for every single frame
+            stride = 1 
+
+            print(f"[Serve] Inferencing Critic (stride={stride}, seq_len={trained_seq_len})...")
+            
+            t0 = time.time()
+            res = _CRITIC.infer_from_derived(
+                frames=response["frames"],
+                static=response["static"],
+                derived=derived_data,
+                stride=stride,
+                seq_len=trained_seq_len,
+                require_cust_gt0=False 
+            )
+            dt = time.time() - t0
+
+            critic_values = res.values_by_frame
+            critic_meta = res.meta
+            
+            print(f"[Serve] Inference complete in {dt:.3f}s. Coverage: {res.meta.get('coverage_frames')} frames.")
+
+        except Exception as e:
+            critic_values = None
+            critic_meta = {"error": str(e)}
+            print(f"[Serve] Critic inference failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # 3) Attach
+    if critic_values:
+        if len(critic_values) == len(derived_data):
+            for i, val in enumerate(critic_values):
+                derived_data[i]["critic_v"] = val
+        else:
+            print(f"⚠️ Mismatch: derived len {len(derived_data)} vs critic len {len(critic_values)}")
+
+    response["derived"] = derived_data
+    response["critic"] = {
+        "enabled": _CRITIC is not None,
+        "error": _CRITIC_ERR,
+        "meta": critic_meta,
+    }
+
     return jsonify(response)
-
-
-
 
 @app.route("/api/cache_meta/<path:filename>")
 def cache_meta(filename):

@@ -384,7 +384,12 @@ def _drop_held_prefix_until_current(held: List[Dict[str, int]], current_chip_id:
     return [x for x in dropped_ids if x >= 0]
 
 
-def compute_derived(frames: List[Dict[str, Any]], static: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def compute_derived(
+    frames: List[Dict[str, Any]],
+    static: Optional[Dict[str, Any]],
+    *,
+    critic_v: Optional[List[Optional[float]]] = None,
+) -> List[Dict[str, Any]]:
     """
     Derived per-frame state.
 
@@ -574,6 +579,11 @@ def compute_derived(frames: List[Dict[str, Any]], static: Optional[Dict[str, Any
                 return None
             return int(turn_index) - int(last_turn)
 
+        cv: Optional[float] = None
+        if critic_v is not None and 0 <= i < len(critic_v):
+            v0 = critic_v[i]
+            cv = float(v0) if v0 is not None else None
+
         derived.append(
             {
                 "turn_index": int(turn_index),
@@ -616,6 +626,9 @@ def compute_derived(frames: List[Dict[str, Any]], static: Optional[Dict[str, Any
                         "last_frame": int(enemy_last_beast_frame) if enemy_last_beast_frame is not None else None,
                     },
                 },
+                # Critic value estimate aligned to this absolute frame index.
+                # None means "not available for this frame" (e.g. stride holes).
+                "critic_v": cv,
             }
         )
 
@@ -626,11 +639,14 @@ def compute_derived(frames: List[Dict[str, Any]], static: Optional[Dict[str, Any
     return derived
 
 
-def compute_derived_states(frames: List[Dict[str, Any]], static: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    """
-    Public entrypoint expected by viewer/app.py.
-    """
-    return compute_derived(frames, static)
+def compute_derived_states(
+    frames: List[Dict[str, Any]],
+    static: Optional[Dict[str, Any]] = None,
+    *,
+    critic_v: Optional[List[Optional[float]]] = None,
+) -> List[Dict[str, Any]]:
+    return compute_derived(frames, static, critic_v=critic_v)
+
 
 
 __all__ = [

@@ -701,6 +701,14 @@
                     <span>Cross: <span id="cross-idx">0</span></span>
                 </div>
             </div>
+            <div class="panel">
+                <h4>Critic Value</h4>
+                <div class="kv">
+                    <span>V(s)</span>
+                    <strong id="critic-v">—</strong>
+                </div>
+                <div style="margin-top:6px; font-size:10px; color:#777;" id="critic-note"></div>
+            </div>
 
             <div class="panel">
                 <h4>Cross / Beast</h4>
@@ -767,6 +775,8 @@
         let actions = [];
         let derived = [];
         let CHIP_LIB = {};
+        let criticMeta = null;
+
 
 
 
@@ -1081,6 +1091,7 @@
         }).then(r => r.json()).then(data => {
             actions = data.frames || [];
             derived = data.derived || [];
+            criticMeta = (data.critic && data.critic.meta) ? data.critic.meta : null;
             const staticData = data.static || {};
             renderStatic(staticData);
 
@@ -1161,6 +1172,23 @@
             const d = derived[idx] || {};
             const p = d.player || null;
             const e = d.enemy || null;
+
+            const cvEl = document.getElementById("critic-v");
+            const noteEl = document.getElementById("critic-note");
+            const cv = d && (d.critic_v !== undefined) ? d.critic_v : null;
+
+            if (cvEl) {
+                if (typeof cv === "number" && Number.isFinite(cv)) {
+                    cvEl.textContent = cv.toFixed(2);
+                } else {
+                    cvEl.textContent = "—";
+                }
+            }
+            if (noteEl) {
+                const err = criticMeta && criticMeta.error ? criticMeta.error : null;
+                noteEl.textContent = err ? `critic: ${err}` : "";
+            }
+
 
             // --------------------
             // Folder masks
