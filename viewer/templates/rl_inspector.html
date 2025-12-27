@@ -1,89 +1,409 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <title>RL Dataset Inspector</title>
     <style>
-        body { background: #0d0d0d; color: #eee; font-family: 'Consolas', monospace; margin: 0; display: flex; height: 100vh; overflow: hidden; }
-        
-        /* SIDEBAR */
-        .sidebar { width: 320px; background: #1a1a1a; border-right: 1px solid #333; display: flex; flex-direction: column; flex-shrink: 0; }
-        .list-header { padding: 15px; background: #222; border-bottom: 1px solid #333; }
-        .list-filters { display: flex; gap: 5px; margin-top: 10px; }
-        .filter-btn { flex: 1; background: #333; border: 1px solid #444; color: #888; cursor: pointer; padding: 5px; font-size: 11px; }
-        .filter-btn.active { background: #4db8ff; color: #000; border-color: #4db8ff; }
-        
-        .sample-list { flex: 1; overflow-y: auto; }
-        .sample-item { padding: 10px 15px; border-bottom: 1px solid #222; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
-        .sample-item:hover { background: #2a2a2a; }
-        .sample-item.active { background: #2c3e50; border-left: 3px solid #4db8ff; }
-        
-        .w-badge { font-weight: bold; padding: 2px 6px; border-radius: 4px; font-size: 11px; width: 40px; text-align: center; }
-        .w-high { background: rgba(0, 255, 0, 0.2); color: #00ff00; border: 1px solid #005500; }
-        .w-low { background: rgba(255, 0, 0, 0.2); color: #ff4444; border: 1px solid #550000; }
-        .w-mid { background: #333; color: #aaa; }
+        body {
+            background: #0d0d0d;
+            color: #eee;
+            font-family: Consolas, monospace;
+            margin: 0;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
 
-        /* STAGE */
-        .stage { flex: 1; padding: 20px; display: flex; flex-direction: column; gap: 20px; overflow-y: auto; align-items: center; }
-        
-        /* VISUALS */
-        .visuals-row { display: flex; gap: 20px; width: 100%; max-width: 1200px; height: 360px; }
-        .view-box { flex: 1; background: #151515; border: 1px solid #333; border-radius: 8px; padding: 10px; display: flex; flex-direction: column; position: relative; }
-        .view-header { font-size: 12px; color: #888; text-transform: uppercase; margin-bottom: 10px; border-bottom: 1px solid #333; padding-bottom: 5px; display: flex; justify-content: space-between; }
-        
-        .model-view { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; background: #000; }
-        video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+        .sidebar {
+            width: 360px;
+            background: #1a1a1a;
+            border-right: 1px solid #333;
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
 
-        .weight-floater { position: absolute; bottom: 20px; right: 20px; background: rgba(0,0,0,0.8); padding: 10px 20px; border-radius: 8px; border: 1px solid #444; text-align: center; z-index: 10; }
-        .big-stat { font-size: 32px; font-weight: bold; line-height: 1; }
-        .stat-label { font-size: 10px; color: #aaa; text-transform: uppercase; letter-spacing: 1px; }
+        .list-header {
+            padding: 15px;
+            background: #222;
+            border-bottom: 1px solid #333;
+        }
 
-        /* CONTROLS */
-        .controls-area { display: flex; gap: 40px; margin-top: 10px; width: 100%; max-width: 1200px; }
-        
-        .controller { background: #e0e0e0; width: 240px; height: 140px; border-radius: 15px 15px 30px 30px; position: relative; border: 2px solid #999; transform: scale(1); margin: 0 auto; }
-        .btn { position: absolute; background: #555; border: 1px solid #333; transition: background 0.05s; }
-        .btn.active { background: #00ff00 !important; box-shadow: 0 0 10px #00ff00; }
-        
-        /* GBA Layout */
-        .dpad { position: absolute; top: 45px; left: 20px; width: 70px; height: 70px; }
+        .row {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+            flex-wrap: wrap;
+        }
+
+        .pill {
+            background: #333;
+            border: 1px solid #444;
+            color: #bbb;
+            cursor: pointer;
+            padding: 6px 8px;
+            font-size: 11px;
+            border-radius: 999px;
+        }
+
+        .pill.active {
+            background: #4db8ff;
+            color: #000;
+            border-color: #4db8ff;
+        }
+
+        select {
+            width: 100%;
+            background: #111;
+            border: 1px solid #444;
+            color: #ddd;
+            padding: 6px;
+            border-radius: 6px;
+            font-family: inherit;
+            font-size: 12px;
+            margin-top: 10px;
+        }
+
+        .sample-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .sample-item {
+            padding: 10px 12px;
+            border-bottom: 1px solid #222;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .sample-item:hover {
+            background: #2a2a2a;
+        }
+
+        .sample-item.active {
+            background: #2c3e50;
+            border-left: 3px solid #4db8ff;
+        }
+
+        .w-badge {
+            font-weight: bold;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 11px;
+            width: 56px;
+            text-align: center;
+            flex-shrink: 0;
+        }
+
+        .w-good {
+            background: rgba(0, 255, 0, 0.18);
+            color: #00ff00;
+            border: 1px solid #005500;
+        }
+
+        .w-bad {
+            background: rgba(255, 0, 0, 0.18);
+            color: #ff4444;
+            border: 1px solid #550000;
+        }
+
+        .stage {
+            flex: 1;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow-y: auto;
+            align-items: center;
+        }
+
+        .visuals-row {
+            display: flex;
+            gap: 20px;
+            width: 100%;
+            max-width: 1200px;
+            height: 360px;
+        }
+
+        .view-box {
+            flex: 1;
+            background: #151515;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+
+        .view-header {
+            font-size: 12px;
+            color: #888;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 5px;
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        .model-view {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            image-rendering: pixelated;
+            background: #000;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            background: #000;
+        }
+
+        .weight-floater {
+            bottom: 10px;
+            right: 10px;
+            padding: 8px 12px;
+            min-width: 140px;
+            max-width: 260px;
+            opacity: 0.92;
+            pointer-events: none;
+            position: absolute;
+            background: rgba(0,0,0,0.35);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 10px;
+            backdrop-filter: blur(4px);
+        }
+
+        .big-stat {
+            font-size: 22px;
+        }
+
+        .stat-label {
+            font-size: 10px;
+            color: #aaa;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .meta-info {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+            width: 100%;
+            max-width: 1200px;
+        }
+
+        .controls-area {
+            display: flex;
+            gap: 40px;
+            margin-top: 10px;
+            width: 100%;
+            max-width: 1200px;
+        }
+
+        .controller {
+            background: #e0e0e0;
+            width: 240px;
+            height: 140px;
+            border-radius: 15px 15px 30px 30px;
+            position: relative;
+            border: 2px solid #999;
+            margin: 0 auto;
+        }
+
+        .btn {
+            position: absolute;
+            background: #555;
+            border: 1px solid #333;
+            transition: background 0.05s;
+        }
+
+        .btn.active {
+            background: #00ff00 !important;
+            box-shadow: 0 0 10px #00ff00;
+        }
+
+        .dpad {
+            position: absolute;
+            top: 45px;
+            left: 20px;
+            width: 70px;
+            height: 70px;
+        }
+
         .btn.up { top: 0; left: 23px; width: 24px; height: 24px; }
         .btn.down { bottom: 0; left: 23px; width: 24px; height: 24px; }
         .btn.left { top: 23px; left: 0; width: 24px; height: 24px; }
         .btn.right { top: 23px; right: 0; width: 24px; height: 24px; }
-        
-        .btn.a { top: 55px; right: 15px; width: 28px; height: 28px; border-radius: 50%; background: #a00; display: flex; justify-content: center; align-items: center; font-size: 10px; color: rgba(255,255,255,0.5); }
-        .btn.b { top: 70px; right: 50px; width: 28px; height: 28px; border-radius: 50%; background: #a00; display: flex; justify-content: center; align-items: center; font-size: 10px; color: rgba(255,255,255,0.5); }
-        .btn.l { top: -8px; left: 10px; width: 60px; height: 15px; border-radius: 5px 5px 0 0; background: #ccc; z-index: -1; }
-        .btn.r { top: -8px; right: 10px; width: 60px; height: 15px; border-radius: 5px 5px 0 0; background: #ccc; z-index: -1; }
-        .btn.start { bottom: 15px; left: 100px; width: 25px; height: 8px; transform: rotate(-25deg); background: #999; }
-        .btn.select { bottom: 15px; left: 70px; width: 25px; height: 8px; transform: rotate(-25deg); background: #999; }
 
-        /* TIMELINE */
+        .btn.a {
+            top: 55px;
+            right: 15px;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: #a00;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.5);
+        }
+
+        .btn.b {
+            top: 70px;
+            right: 50px;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: #a00;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.5);
+        }
+
+        .btn.l {
+            top: -8px;
+            left: 10px;
+            width: 60px;
+            height: 15px;
+            border-radius: 5px 5px 0 0;
+            background: #ccc;
+            z-index: -1;
+        }
+
+        .btn.r {
+            top: -8px;
+            right: 10px;
+            width: 60px;
+            height: 15px;
+            border-radius: 5px 5px 0 0;
+            background: #ccc;
+            z-index: -1;
+        }
+
+        .btn.start {
+            bottom: 15px;
+            left: 100px;
+            width: 25px;
+            height: 8px;
+            transform: rotate(-25deg);
+            background: #999;
+        }
+
+        .btn.select {
+            bottom: 15px;
+            left: 70px;
+            width: 25px;
+            height: 8px;
+            transform: rotate(-25deg);
+            background: #999;
+        }
+
         .timeline-wrap { flex: 1; }
-        .timeline { display: grid; grid-template-columns: 60px repeat(18, 1fr); gap: 2px; align-items: center; }
-        .lane-label { font-size: 10px; color: #aaa; text-align: right; padding-right: 6px; }
-        .cell { width: 100%; height: 10px; background: #222; border: 1px solid #333; border-radius: 2px; }
-        .cell.active { background: #00ff00; box-shadow: 0 0 4px rgba(0, 255, 0, 0.5); border-color: #00cc00; }
-        
-        .meta-info { font-size: 12px; color: #666; margin-top: 5px; }
+
+        .timeline {
+            display: grid;
+            grid-template-columns: 60px repeat(18, 1fr);
+            gap: 2px;
+            align-items: center;
+        }
+
+        .lane-label {
+            font-size: 10px;
+            color: #aaa;
+            text-align: right;
+            padding-right: 6px;
+        }
+
+        .cell {
+            width: 100%;
+            height: 10px;
+            background: #222;
+            border: 1px solid #333;
+            border-radius: 2px;
+        }
+
+        .cell.active {
+            background: #00ff00;
+            box-shadow: 0 0 4px rgba(0, 255, 0, 0.5);
+            border-color: #00cc00;
+        }
+
+        /* chip header bits */
+        .chip-head {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .chip-img {
+            width: 28px;
+            height: 28px;
+            object-fit: contain;
+            image-rendering: pixelated;
+            background: #000;
+            border: 1px solid #333;
+            border-radius: 6px;
+        }
+        .chip-title {
+            font-size: 11px;
+            color: #fff;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 190px;
+        }
+        .chip-sub {
+            font-size: 10px;
+            color: #888;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 190px;
+        }
     </style>
 </head>
+
 <body>
 
     <div class="sidebar">
         <div class="list-header">
-            <h3 style="margin:0">RL Samples</h3>
-            <div style="font-size:11px; color:#666; margin-top:5px;">
-                Total: {{ stats.total }} <br>
-                <span style="color:#00ff00">High: {{ stats.high_reward }}</span> | 
-                <span style="color:#ff4d4d">Low: {{ stats.punishment }}</span>
+            <h3 style="margin:0">RL Events</h3>
+            <div style="font-size:11px; color:#666; margin-top:6px;">
+                Total: {{ stats.total }}<br>
+                <span style="color:#00ff00">Good: {{ stats.good }}</span> |
+                <span style="color:#ff4d4d">Bad: {{ stats.bad }}</span>
             </div>
-            <div class="list-filters">
-                <button class="filter-btn active" onclick="loadList('all', this)">ALL</button>
-                <button class="filter-btn" onclick="loadList('high', this)">REWARDS</button>
-                <button class="filter-btn" onclick="loadList('low', this)">PUNISH</button>
+
+            <div class="row">
+                <div class="pill active" id="actor-player" onclick="setActor('player')">PLAYER</div>
+                <div class="pill" id="actor-enemy" onclick="setActor('enemy')">ENEMY</div>
             </div>
+
+            <div class="row">
+                <div class="pill active" id="kind-chip" onclick="setKind('chip')">CHIP</div>
+                <div class="pill" id="kind-charge" onclick="setKind('charge')">CHARGE</div>
+            </div>
+
+            <div class="row">
+                <div class="pill active" id="outcome-all" onclick="setOutcome('all')">ALL</div>
+                <div class="pill" id="outcome-good" onclick="setOutcome('good')">GOOD</div>
+                <div class="pill" id="outcome-bad" onclick="setOutcome('bad')">BAD</div>
+            </div>
+
+            <select id="labelSelect" onchange="setLabel(this.value)">
+                <option value="">Loading labels...</option>
+            </select>
         </div>
+
         <div class="sample-list" id="sampleList"></div>
     </div>
 
@@ -91,28 +411,40 @@
         <div class="visuals-row">
             <div class="view-box">
                 <div class="view-header">
-                    <span>Model Input (Frame t)</span>
-                    <span style="color:#4db8ff" id="srcType">TENSOR</span>
+                    <span>Model Input (start = event-18)</span>
+                    <span style="color:#4db8ff" id="srcType">--</span>
                 </div>
                 <img id="imgInput" class="model-view" src="" onerror="this.style.display='none'">
-                <div id="noImg" style="display:none; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#555;">No Tensor Cache</div>
+                <div id="noImg"
+                    style="display:none; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#555;">
+                    No Tensor Cache</div>
             </div>
 
             <div class="view-box">
                 <div class="view-header">
-                    <span>Context Window (t ... t+90)</span>
+                    <span>Context Window (4s)</span>
                     <span style="color:#aaa">Video</span>
                 </div>
                 <video id="vidContext" muted></video>
                 <div class="weight-floater">
-                    <div class="stat-label">RL Weight</div>
+                    <div class="stat-label">Weight</div>
                     <div id="metaWeight" class="big-stat">--</div>
+
+                    <div style="margin-top:10px" id="metaChipHead"></div>
+
+                    <div style="margin-top:6px; font-size:11px; color:#bbb" id="metaLabel">--</div>
+                    <div style="margin-top:4px; font-size:11px; color:#777" id="metaDmg">--</div>
                 </div>
             </div>
         </div>
 
         <div class="meta-info">
-            <span id="metaReplay" style="color:#fff">Select a sample...</span> | Frame: <span id="metaFrame">0</span>
+            <span id="metaReplay" style="color:#fff">Select an event...</span>
+            | Start: <span id="metaFrame">0</span>
+            | Exec: <span id="metaExec">0</span>
+            | Actor: <span id="metaActor">--</span>
+            | Kind: <span id="metaKind">--</span>
+            | Outcome: <span id="metaOutcome">--</span>
         </div>
 
         <div class="controls-area">
@@ -142,10 +474,15 @@
     </div>
 
     <script>
-        // INJECTED FROM FLASK (action_schema.GBA_UI_BUTTONS)
         const UI_BTNS = {{ ui_buttons | tojson }};
-        
-        loadList('all', document.querySelector('.filter-btn'));
+
+        const state = {
+            actor: 'player',
+            kind: 'chip',
+            outcome: 'all',
+            label: '',
+            currentList: []
+        };
 
         function niceLabel(k) {
             const map = {
@@ -156,54 +493,152 @@
             return map[k] || k;
         }
 
-        function loadList(filter, btnEl) {
-            if(btnEl) {
-                document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-                btnEl.classList.add('active');
-            }
-            document.getElementById('sampleList').innerHTML = '<div style="padding:20px; color:#666; text-align:center">Loading...</div>';
-
-            fetch(`/api/rl_list?filter=${filter}`).then(r=>r.json()).then(data => {
-                const listEl = document.getElementById('sampleList');
-                listEl.innerHTML = '';
-                data.forEach((item, idx) => {
-                    const el = document.createElement('div');
-                    el.className = 'sample-item';
-                    const wClass = item.weight > 1.0 ? 'w-high' : (item.weight < 1.0 ? 'w-low' : 'w-mid');
-                    el.innerHTML = `
-                        <div style="font-size:11px; overflow:hidden;">
-                            <div style="color:#fff; white-space:nowrap;">${item.replay}</div>
-                            <div style="color:#666;">Frame: ${item.frame}</div>
-                        </div>
-                        <div class="w-badge ${wClass}">${item.weight}</div>
-                    `;
-                    el.onclick = () => loadDetail(idx, el, item);
-                    listEl.appendChild(el);
-                });
-            });
+        function setActor(a) {
+            state.actor = a;
+            document.getElementById('actor-player').classList.toggle('active', a === 'player');
+            document.getElementById('actor-enemy').classList.toggle('active', a === 'enemy');
+            refreshLabels();
+        }
+        function setKind(k) {
+            state.kind = k;
+            document.getElementById('kind-chip').classList.toggle('active', k === 'chip');
+            document.getElementById('kind-charge').classList.toggle('active', k === 'charge');
+            refreshLabels();
+        }
+        function setOutcome(o) {
+            state.outcome = o;
+            document.getElementById('outcome-all').classList.toggle('active', o === 'all');
+            document.getElementById('outcome-good').classList.toggle('active', o === 'good');
+            document.getElementById('outcome-bad').classList.toggle('active', o === 'bad');
+            loadList();
+        }
+        function setLabel(lbl) {
+            state.label = lbl;
+            loadList();
         }
 
-        function loadDetail(idx, el, item) {
+        function refreshLabels() {
+            const sel = document.getElementById('labelSelect');
+            sel.innerHTML = `<option value="">Loading labels...</option>`;
+            fetch(`/api/rl_groups?actor=${state.actor}&kind=${state.kind}`)
+                .then(r => r.json())
+                .then(groups => {
+                    sel.innerHTML = `<option value="">(All labels)</option>`;
+                    groups.forEach(g => {
+                        const opt = document.createElement('option');
+                        opt.value = g.label;
+                        // show chip name if available
+                        const name = g.chip_name ? ` — ${g.chip_name}` : '';
+                        opt.textContent = `${g.display_label || g.label}${name}  (good:${g.good} / bad:${g.bad})`;
+                        sel.appendChild(opt);
+                    });
+                    state.label = '';
+                    loadList();
+                });
+        }
+
+        function loadList() {
+            const listEl = document.getElementById('sampleList');
+            listEl.innerHTML = '<div style="padding:20px; color:#666; text-align:center">Loading...</div>';
+
+            const qs = new URLSearchParams({
+                actor: state.actor,
+                kind: state.kind,
+                outcome: state.outcome,
+                label: state.label
+            });
+
+            fetch(`/api/rl_list?${qs.toString()}`)
+                .then(r => r.json())
+                .then(data => {
+                    state.currentList = data;
+                    listEl.innerHTML = '';
+                    data.forEach((item, idx) => {
+                        const el = document.createElement('div');
+                        el.className = 'sample-item';
+                        const good = (item.outcome === 'good');
+
+                        const title = item.chip_name ? item.chip_name : (item.display_label || item.label);
+                        const sub = item.chip_name ? (item.display_label || item.label) : item.label;
+
+                        const chipImg = item.chip_image_url
+                            ? `<img class="chip-img" src="${item.chip_image_url}">`
+                            : `<div class="chip-img" style="display:flex;align-items:center;justify-content:center;color:#444;">—</div>`;
+
+                        el.innerHTML = `
+                            <div style="font-size:11px; overflow:hidden;">
+                                <div style="color:#fff; white-space:nowrap;">${item.replay}</div>
+                                <div class="chip-head" style="margin-top:6px;">
+                                    ${chipImg}
+                                    <div style="min-width:0;">
+                                        <div class="chip-title">${title}</div>
+                                        <div class="chip-sub">${sub}</div>
+                                    </div>
+                                </div>
+                                <div style="color:#666; margin-top:6px;">start:${item.start_frame} exec:${item.event_frame}</div>
+                            </div>
+                            <div class="w-badge ${good ? 'w-good' : 'w-bad'}">${Number(item.weight).toFixed(2)}</div>
+                        `;
+                        el.onclick = () => loadDetail(idx, el);
+                        listEl.appendChild(el);
+                    });
+                });
+        }
+
+        function loadDetail(idx, el) {
             document.querySelectorAll('.sample-item').forEach(i => i.classList.remove('active'));
-            el.classList.add('active');
+            if (el) el.classList.add('active');
 
-            document.getElementById('metaReplay').innerText = item.replay;
-            document.getElementById('metaFrame').innerText = item.frame;
-            const wEl = document.getElementById('metaWeight');
-            wEl.innerText = item.weight.toFixed(2);
-            wEl.style.color = item.weight > 1 ? '#00ff00' : (item.weight < 1 ? '#ff4d4d' : '#888');
+            const item = state.currentList[idx];
+            if (!item) return;
 
-            const vid = document.getElementById('vidContext');
-            const src = `/video/${item.replay}`;
-            if (!vid.currentSrc.includes(src)) vid.src = src;
+            const serverIdx = item.idx;
+            if (serverIdx === undefined) {
+                console.error("Missing item.idx from /api/rl_list");
+                return;
+            }
 
-            fetch(`/api/rl_detail/${idx}`).then(r=>r.json()).then(data => {
-                if(data.error) { console.error(data.error); return; }
+            fetch(`/api/rl_detail/${serverIdx}`).then(r => r.json()).then(data => {
+                if (data.error) { console.error(data.error); return; }
+
+                document.getElementById('metaReplay').innerText = data.replay;
+                document.getElementById('metaFrame').innerText = data.start_frame;
+                document.getElementById('metaExec').innerText = data.event_frame;
+                document.getElementById('metaActor').innerText = data.actor;
+                document.getElementById('metaKind').innerText = data.kind;
+                document.getElementById('metaOutcome').innerText = data.outcome;
+
+                const wEl = document.getElementById('metaWeight');
+                wEl.innerText = Number(data.weight).toFixed(2);
+                wEl.style.color = (data.outcome === 'good') ? '#00ff00' : '#ff4d4d';
+
+                // chip header in floater
+                const head = document.getElementById('metaChipHead');
+                if (data.chip_name || data.chip_image_url) {
+                    const img = data.chip_image_url
+                        ? `<img class="chip-img" src="${data.chip_image_url}">`
+                        : `<div class="chip-img" style="display:flex;align-items:center;justify-content:center;color:#444;">—</div>`;
+                    const nm = data.chip_name ? data.chip_name : '';
+                    head.innerHTML = `
+                        <div class="chip-head">
+                            ${img}
+                            <div style="min-width:0;">
+                                <div class="chip-title">${nm}</div>
+                                <div class="chip-sub">${data.label}</div>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    head.innerHTML = '';
+                }
+
+                document.getElementById('metaLabel').innerText = data.label;
+                document.getElementById('metaDmg').innerText = `dealt:${data.damage_dealt} taken:${data.damage_taken}`;
+
+                document.getElementById('srcType').innerText = String(data.source_type || '--').toUpperCase();
 
                 const imgEl = document.getElementById('imgInput');
                 const noImg = document.getElementById('noImg');
-                document.getElementById('srcType').innerText = data.source_type.toUpperCase();
-                
                 if (data.image) {
                     imgEl.src = data.image;
                     imgEl.style.display = 'block';
@@ -213,32 +648,57 @@
                     noImg.style.display = 'block';
                 }
 
-                const startT = Math.max(0, data.timestamp);
-                const endT = startT + 1.5; 
-                
-                if(vid._loop) vid.removeEventListener('timeupdate', vid._loop);
-                vid._loop = () => { if(vid.currentTime >= endT) { vid.currentTime = startT; vid.play(); }};
-                vid.addEventListener('timeupdate', vid._loop);
-                
-                // Seek safely
-                if(vid.readyState > 0) { vid.currentTime = startT; vid.play(); }
-                else { vid.onloadedmetadata = () => { vid.currentTime = startT; vid.play(); }; }
+                const vid = document.getElementById('vidContext');
+                const src = `/video/${data.replay}`;
+                if (!vid.currentSrc.includes(src)) vid.src = src;
 
-                if(data.actions && data.actions.length > 0) {
-                    // Update Controller (Frame 0) using dynamic keys
+                const startT = Number(data.start_timestamp ?? data.timestamp ?? 0);
+                const endT = Number(data.end_timestamp ?? (Number.isFinite(startT) ? (startT + 4.0) : 4.0));
+
+                if (!Number.isFinite(startT) || !Number.isFinite(endT) || endT <= startT) {
+                    console.error("Bad timestamps from server:", { startT, endT, data });
+                    armLoop(vid, 0, 4.0);
+                } else {
+                    armLoop(vid, startT, endT);
+                }
+
+                function armLoop(videoEl, loopStart, loopEnd) {
+                    if (videoEl._loop) videoEl.removeEventListener('timeupdate', videoEl._loop);
+
+                    videoEl._loop = () => {
+                        if (videoEl.currentTime >= loopEnd) {
+                            videoEl.currentTime = loopStart;
+                            videoEl.play().catch(() => { });
+                        }
+                    };
+                    videoEl.addEventListener('timeupdate', videoEl._loop);
+
+                    const seekAndPlay = () => {
+                        try {
+                            videoEl.currentTime = loopStart;
+                            videoEl.play().catch(() => { });
+                        } catch (e) {
+                            console.warn("Seek failed", e);
+                        }
+                    };
+
+                    if (videoEl.readyState >= 1) {
+                        seekAndPlay();
+                    } else {
+                        videoEl.onloadedmetadata = () => seekAndPlay();
+                    }
+                }
+
+                if (data.actions && data.actions.length > 0) {
                     const act0 = data.actions[0].buttons_raw;
                     UI_BTNS.forEach(k => {
                         const btn = document.getElementById(`btn-${k}`);
-                        if(btn) {
-                            btn.classList.remove('active');
-                            // Handle both scalar and 1-item list if format varies
-                            const val = act0[k];
-                            const v = (Array.isArray(val) ? val[0] : val);
-                            if(v > 0.5) btn.classList.add('active');
-                        }
+                        if (!btn) return;
+                        btn.classList.remove('active');
+                        const val = act0[k];
+                        const v = (Array.isArray(val) ? val[0] : val);
+                        if (v > 0.5) btn.classList.add('active');
                     });
-
-                    // Update Timeline
                     renderTimeline(data.actions);
                 }
             });
@@ -247,13 +707,12 @@
         function renderTimeline(actions) {
             const el = document.getElementById('timeline');
             el.innerHTML = '';
-            
+
             const T = actions.length;
             const grid = document.createElement('div');
             grid.className = 'timeline';
             grid.style.gridTemplateColumns = `60px repeat(${T}, 1fr)`;
 
-            // Use the injected UI_BTNS list to generate rows
             UI_BTNS.forEach(key => {
                 const lbl = document.createElement('div');
                 lbl.className = 'lane-label';
@@ -265,12 +724,17 @@
                     cell.className = 'cell';
                     const val = act.buttons_raw[key];
                     const v = (Array.isArray(val) ? val[0] : val);
-                    if(v > 0.5) cell.classList.add('active');
+                    if (v > 0.5) cell.classList.add('active');
                     grid.appendChild(cell);
                 });
             });
+
             el.appendChild(grid);
         }
+
+        // Boot
+        refreshLabels();
     </script>
 </body>
+
 </html>

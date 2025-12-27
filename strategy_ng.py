@@ -14,10 +14,11 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 import torch
 import torchvision.transforms.functional as TF
 from PIL import Image
-
 # Import policy loader
 from ng_policy import NgNitroGenPolicy, load_ng_checkpoint
-
+import os
+os.environ["NG_PLAN_REFRESH_MODE"] = "append"
+os.environ["NG_PLAN_PREFETCH_WATERMARK"] = "0.5"
 # -----------------------------------------------------------------------------
 # Token layout (Dynamic - Matches Training)
 # -----------------------------------------------------------------------------
@@ -464,6 +465,7 @@ class NGAgentStrategy:
         allow_actions_in_window: bool = False,
         forbid_actions_in_battle: Optional[List[str]] = None,
         button_alias: Optional[Dict[str, str]] = None,
+        mask_path: Optional[str] = None,
     ):
         self.dev = torch.device(device)
         self.key_bits = dict(key_bit_positions or {})
@@ -491,6 +493,25 @@ class NGAgentStrategy:
         self._seed_base = os.getenv("NG_SEED_BASE", "").strip()
         self._use_seed = bool(self._seed_base)
         self.use_fp16 = bool(int(os.getenv("NG_USE_FP16", "1").strip() or "1"))
+
+        # --- MASK LOADING ---
+        self.mask_tensor = None
+        if mask_path and os.path.exists(mask_path):
+            try:
+                print(f"[NG] Loading mask from {mask_path}")
+                img = Image.open(mask_path).convert("RGBA")
+                # Resize to match target frame dims (usually 256x256)
+                img = img.resize((self.frame_w, self.frame_h), Image.NEAREST)
+                
+                # Extract Alpha. 0.0 = Transparent (Keep), >0.0 = Opaque (Mask Out)
+                alpha = TF.to_tensor(img)[3, :, :] 
+                
+                # Create Boolean Mask: True = Keep, False = Mask
+                # We unsqueeze to [1, H, W] for broadcasting against [3, H, W]
+                self.mask_tensor = (alpha == 0.0).bool().unsqueeze(0)
+                print("[NG] Mask loaded successfully.")
+            except Exception as e:
+                print(f"[NG] ⚠️ Failed to load mask: {e}")
 
         # Vision horizon V (from policy/tokenizer when available)
         self.V = 1
@@ -752,9 +773,30 @@ class NGAgentStrategy:
                 self._pending_ready[p] = False
                 return False
 
-            self._plan_keys[p] = list(keys)
-            self._plan_ng_keys[p] = list(ng_keys)
-            self._plan_idx[p] = 0
+            # --- NEW LOGIC START ---
+            if self.plan_refresh_mode == "append":
+                # 1. Get current remaining actions
+                current_idx = int(self._plan_idx.get(p, 0))
+                current_keys = self._plan_keys.get(p) or []
+                current_ng = self._plan_ng_keys.get(p) or []
+
+                # Slice: Keep only what hasn't been played yet
+                remaining_keys = current_keys[current_idx:]
+                remaining_ng = current_ng[current_idx:]
+
+                # 2. Append new actions to the remaining ones
+                self._plan_keys[p] = remaining_keys + list(keys)
+                self._plan_ng_keys[p] = remaining_ng + list(ng_keys)
+                
+                # 3. Reset index to 0 because we re-based the list to start "now"
+                self._plan_idx[p] = 0
+            else:
+                # Default "overwrite" or "prefetch" behavior: Replace entirely
+                self._plan_keys[p] = list(keys)
+                self._plan_ng_keys[p] = list(ng_keys)
+                self._plan_idx[p] = 0
+            # --- NEW LOGIC END ---
+
             self._plan_id[p] = new_id
 
             # clear pending
@@ -798,6 +840,14 @@ class NGAgentStrategy:
 
         try:
             frame_chw = _pil_to_chw_float01(pil, out_h=self.frame_h, out_w=self.frame_w)
+            
+            # --- APPLY MASK ---
+            if self.mask_tensor is not None:
+                # frame_chw is [3, H, W]. mask_tensor is [1, H, W].
+                # ~mask_tensor selects the "opaque" pixels (Noise).
+                # We set those to -1.0 (Black in normalized space).
+                frame_chw.masked_fill_(~self.mask_tensor, -1.0)
+
         except Exception as e:
             return _no_op("preprocess failed", {"err": repr(e)})
 
@@ -817,25 +867,33 @@ class NGAgentStrategy:
         total_ticks = len(plan_keys)
         remaining = max(0, total_ticks - plan_idx)
 
-        # Default overwrite mode: swap immediately if pending is ready
-        if self.plan_refresh_mode == "overwrite":
+        # --- UPDATED LOGIC START ---
+        # Both "overwrite" and "append" check for new data immediately.
+        # "overwrite" replaces the buffer; "append" extends it (handled in _try_swap_in_pending).
+        if self.plan_refresh_mode in ("overwrite", "append"):
             self._try_swap_in_pending(port=p)
+            
+            # Refresh local variables in case a swap/append occurred
             plan_keys = self._plan_keys.get(p) or []
             plan_ng_keys = self._plan_ng_keys.get(p) or []
             plan_idx = int(self._plan_idx.get(p, 0))
             total_ticks = len(plan_keys)
             remaining = max(0, total_ticks - plan_idx)
         else:
-            # prefetch mode: swap only when current plan ends
+            # "prefetch" (Legacy mode): Only swap when the current plan is completely exhausted.
+            # This risks stalling if inference is slow.
             if total_ticks > 0 and plan_idx >= total_ticks:
                 self._try_swap_in_pending(port=p)
+                
+                # Refresh local variables
                 plan_keys = self._plan_keys.get(p) or []
                 plan_ng_keys = self._plan_ng_keys.get(p) or []
                 plan_idx = int(self._plan_idx.get(p, 0))
                 total_ticks = len(plan_keys)
                 remaining = max(0, total_ticks - plan_idx)
+        # --- UPDATED LOGIC END ---
 
-        # If no plan yet, must build one synchronously (first tick only)
+        # If no plan yet (start of game or buffer ran dry), build one synchronously
         raw = None
         if not plan_keys:
             try:
@@ -855,20 +913,20 @@ class NGAgentStrategy:
             except Exception as e:
                 return _no_op("initial_plan_infer_failed", {"err": repr(e)})
 
-        # Prefetch when under watermark
+        # Trigger background prefetch if we drop below the watermark
         if self._should_prefetch(remaining=remaining, total=total_ticks):
             self._start_prefetch_if_needed(port=p, seq=seq, seed=seed, game_state=game_state)
 
         # Playback one tick
         if plan_idx >= len(plan_keys):
-            # best-effort swap now (prefetch miss)
+            # If we ran out, try a best-effort swap immediately (prefetch missed)
             swapped = self._try_swap_in_pending(port=p)
             if swapped:
                 plan_keys = self._plan_keys.get(p) or []
                 plan_ng_keys = self._plan_ng_keys.get(p) or []
                 plan_idx = int(self._plan_idx.get(p, 0))
             else:
-                # hold last if possible
+                # Hold last action if possible to avoid stuttering inputs
                 if plan_keys:
                     plan_idx = len(plan_keys) - 1
                 else:
@@ -877,7 +935,7 @@ class NGAgentStrategy:
         step_key = plan_keys[plan_idx]
         step_ng_key = plan_ng_keys[plan_idx] if plan_idx < len(plan_ng_keys) else ""
 
-        # Advance
+        # Advance index for next frame
         self._plan_idx[p] = plan_idx + 1
 
         remaining_keys = plan_keys[plan_idx:]

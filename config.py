@@ -47,7 +47,7 @@ def generate_instances(n_pairs: int, base_port: int = BASE_PORT) -> List[Dict]:
         learner_port  = base_port + i * 2
         opponent_port = learner_port + 1
         # save_path     = SAVE_PATH_TEMPLATE.format(idx=i + 1)
-        save_path     = "/home/lee/Documents/Tango/saves/BN6 Gregar.sav"
+        save_path     = "/home/lee/Documents/Tango/saves/BN6_JCode.sav"
 
         # Default: learner uses DRL; opponent uses curriculum
         if i % 2 == 0:
@@ -99,34 +99,46 @@ DISCRETE_ACTIONS = [
 ]
 RANDOM_ACTION_KEYS_FOR_SKIP_STRATEGY = ["B", "DOWN", "UP", "LEFT", "RIGHT", "A"]
 
-# =============================================================================
-# Nitrogen (ng.pt) policy config
-# =============================================================================
+_CKPT_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
+_BATTLE_DIR = os.path.join(_CKPT_DIR, "battle")
+_PLAN_DIR = os.path.join(_CKPT_DIR, "planning")
+
 def _get_latest_checkpoint(ckpt_dir: str, default: str = "ng.pt") -> str:
     """Finds the checkpoint with the highest step count in the directory."""
     if not os.path.exists(ckpt_dir):
-        return os.path.join(ckpt_dir, default)
+        # Fallback to root weights if subfolder missing
+        return os.path.join(PROJECT_ROOT, "weights", default)
     
     max_step = -1
     best_ckpt = default
+    found = False
     
     for fname in os.listdir(ckpt_dir):
         if fname.startswith("step_") and fname.endswith(".pt"):
             try:
-                # Parse "step_12345.pt" -> 12345
-                step_str = fname.split("_")[1].split(".")[0]
-                step = int(step_str)
+                step = int(fname.split("_")[1].split(".")[0])
                 if step > max_step:
                     max_step = step
                     best_ckpt = fname
-            except (IndexError, ValueError):
-                continue
-                
+                    found = True
+            except: continue
+            
+    if not found:
+         return os.path.join(PROJECT_ROOT, "weights", default)
+
     return os.path.join(ckpt_dir, best_ckpt)
 
-_CKPT_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
-NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", _get_latest_checkpoint(_CKPT_DIR, "step_20000.pt"))
+# Define paths for both models
+BATTLE_CKPT_PATH = os.getenv("BATTLE_CKPT_PATH", _get_latest_checkpoint(_BATTLE_DIR, "step_150000.pt"))
+# PLAN_CKPT_PATH = os.getenv("PLAN_CKPT_PATH", _get_latest_checkpoint(_PLAN_DIR, "step_150000.pt"))
 
+# NEW: Point to the Strategy Transformer
+PLAN_CKPT_PATH = os.getenv("PLAN_CKPT_PATH", "checkpoints_strategy/strategy_model.pt") 
+# NEW: Point to the Chips Database
+CHIPS_DB_PATH = os.getenv("CHIPS_DB_PATH", "data/assets/chips.json")
+
+# Keep NG_CKPT_PATH for backward compat if needed, but point it to battle
+NG_CKPT_PATH = BATTLE_CKPT_PATH
 # NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", os.path.join(PROJECT_ROOT, "weights", "ng.pt"))
 USE_NG_POLICY = 1
 NG_DEVICE = os.getenv("NG_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")

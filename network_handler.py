@@ -1,4 +1,5 @@
 # network_handler.py
+
 from __future__ import annotations
 
 import asyncio
@@ -9,12 +10,26 @@ import sys
 import traceback
 import time as _time
 from collections import deque
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 import torch
 
 from strategy import DRLAgentStrategy
 
+# 🚀 RESTORED: Full Form Mapping Configuration
+FORM_MAPPING = [
+    {"type": 'Normal', "normal": 0, "beast": 11},
+    {"type": 'Fire',   "normal": 1, "beast": 13},  
+    {"type": 'Elec',   "normal": 2, "beast": 14},
+    {"type": 'Slash',  "normal": 3, "beast": 15},
+    {"type": 'Erase',  "normal": 4, "beast": 16},
+    {"type": 'Charge', "normal": 5, "beast": 17},
+    {"type": 'Aqua',   "normal": 6, "beast": 18},
+    {"type": 'Thawk',  "normal": 7, "beast": 19},
+    {"type": 'Tengu',  "normal": 8, "beast": 20},
+    {"type": 'Grnd',   "normal": 9, "beast": 21},
+    {"type": 'Dust',   "normal": 10, "beast": 22},
+]
 
 def _c(text: str, code: int) -> str:
     return f"\033[{code}m{text}\033[0m" if sys.stdout.isatty() else text
@@ -63,6 +78,9 @@ class ConnectionHandler:
         # ---- lock-step sync ----
         self._inference_done_event = asyncio.Event()
         self._inference_done_event.set()
+        
+        # Flag to track if we have successfully established 2-way comms
+        self._has_received_first_response = False
 
         # ---- action playback ----
         self.action_fps = float(os.getenv("NG_ACTION_FPS", "60").strip() or "60")
@@ -91,8 +109,15 @@ class ConnectionHandler:
         self.instance_game_data_cache = {
             "player_chips_in_window": [],
             "current_hand_selected": [],
+            
+            # 🚀 UPDATED: Using lists directly as requested
             "player_used_crosses_list": [],
             "enemy_used_crosses_list": [],
+            
+            # Derived State
+            "player_cross_id": 0, 
+            "enemy_cross_id": 0,
+            
             "is_player_beasted_out": False,
             "is_enemy_beasted_out": False,
             "is_player_beasted_over": False,
@@ -122,36 +147,26 @@ class ConnectionHandler:
         self.collect_experience = isinstance(active_strategy, DRLAgentStrategy) and ("Learner" in self.name)
 
     # ---------------------------------------------------------------------
-    # Socket send helpers (SERIALIZED!)
+    # Socket send helpers
     # ---------------------------------------------------------------------
     async def _send_command_internal(self, command_dict: Dict[str, Any]) -> bool:
-        """
-        CRITICAL INVARIANT:
-          Only one coroutine may write to self.writer at a time.
-        """
         if not self.writer or self.writer.is_closing():
-            print(f"Port {self.port} ({self.name}): writer not available or closing.")
             self._is_running = False
             return False
-
         try:
             payload = json.dumps(command_dict)
             data = payload.encode() + b"\n"
-
             async with self._send_lock:
-                # Re-check inside lock, in case we got closed while waiting
                 if not self.writer or self.writer.is_closing():
                     self._is_running = False
                     return False
                 self.writer.write(data)
                 await self.writer.drain()
-
             return True
         except (ConnectionResetError, BrokenPipeError):
             print(f"Port {self.port} ({self.name}): connection closed while sending.")
         except Exception as e:
             print(f"Port {self.port} ({self.name}): failed to send command: {e}")
-
         self._is_running = False
         return False
 
@@ -174,53 +189,81 @@ class ConnectionHandler:
 
     def _update_instance_game_data_cache(self, screen_data_dict: Dict[str, Any]) -> None:
         cache = self.instance_game_data_cache
+        
+        # Extract raw emotions for logic
+        current_player_game_emotion = int(float(screen_data_dict.get("player_game_emotion", 0)))
+        current_enemy_game_emotion = int(float(screen_data_dict.get("enemy_game_emotion", 0)))
 
+        # 🚀 1. Player Cross Tracking
+        if 'player_used_crosses_list' not in cache:
+            cache['player_used_crosses_list'] = []
+        
+        # Determine Current Form
+        selected_cross_form = next((cross for cross in FORM_MAPPING if cross['normal'] == current_player_game_emotion or cross['beast'] == current_player_game_emotion), None)
+        
+        if selected_cross_form is not None:
+            selected_cross_index = FORM_MAPPING.index(selected_cross_form)
+            
+            # Update Current ID for Inference/UI
+            cache["player_cross_id"] = selected_cross_index 
+            
+            # Add to History (Only if not Normal/0)
+            if selected_cross_index >= 1 and selected_cross_index not in cache['player_used_crosses_list']:
+                cache['player_used_crosses_list'].append(selected_cross_index)
+                if self._should_log():
+                    print(f"Port {self.port}: Adding to used crosses: {selected_cross_index} ({selected_cross_form['type']})")
+
+        # 🚀 2. Enemy Cross Tracking
+        if 'enemy_used_crosses_list' not in cache:
+            cache['enemy_used_crosses_list'] = []
+        
+        enemy_cross_form = next((cross for cross in FORM_MAPPING if cross['normal'] == current_enemy_game_emotion or cross['beast'] == current_enemy_game_emotion), None)
+        
+        if enemy_cross_form is not None:
+            enemy_cross_index = FORM_MAPPING.index(enemy_cross_form)
+            cache["enemy_cross_id"] = enemy_cross_index
+            
+            if enemy_cross_index >= 1 and enemy_cross_index not in cache['enemy_used_crosses_list']:
+                cache['enemy_used_crosses_list'].append(enemy_cross_index)
+                if self._should_log():
+                    print(f"Port {self.port}: Adding to ENEMY used crosses: {enemy_cross_index}")
+
+        # 🚀 3. Beast / Emotion Flags
+        if current_player_game_emotion >= 11: cache["is_player_beasted_out"] = True
+        if current_player_game_emotion >= 23: cache["is_player_beasted_over"] = True
+        if current_enemy_game_emotion >= 11: cache["is_enemy_beasted_out"] = True
+        if current_enemy_game_emotion >= 23: cache["is_enemy_beasted_over"] = True
+
+        # 4. Standard Chip & Folder Logic
         new_player_chip_id = screen_data_dict.get("player_chip", 0)
         if new_player_chip_id != cache["previous_player_chip_from_server"] and cache["previous_player_chip_from_server"] != 0:
             cache["player_active_chip"] = cache["previous_player_chip_from_server"]
-            if cache["player_chip_timer_task"]:
-                cache["player_chip_timer_task"].cancel()
+            if cache["player_chip_timer_task"]: cache["player_chip_timer_task"].cancel()
             cache["player_chip_timer_task"] = asyncio.create_task(self._handle_active_chip_timer("player"))
         cache["previous_player_chip_from_server"] = new_player_chip_id
 
         new_enemy_chip_id = screen_data_dict.get("enemy_chip", 0)
         if new_enemy_chip_id != cache["previous_enemy_chip_from_server"] and cache["previous_enemy_chip_from_server"] != 0:
             cache["enemy_active_chip"] = cache["previous_enemy_chip_from_server"]
-            if cache["enemy_chip_timer_task"]:
-                cache["enemy_chip_timer_task"].cancel()
+            if cache["enemy_chip_timer_task"]: cache["enemy_chip_timer_task"].cancel()
             cache["enemy_chip_timer_task"] = asyncio.create_task(self._handle_active_chip_timer("enemy"))
         cache["previous_enemy_chip_from_server"] = new_enemy_chip_id
 
-        player_game_emotion = screen_data_dict.get("player_game_emotion", 0)
-        enemy_game_emotion = screen_data_dict.get("enemy_game_emotion", 0)
-        if player_game_emotion >= 11:
-            cache["is_player_beasted_out"] = True
-        if player_game_emotion >= 23:
-            cache["is_player_beasted_over"] = True
-        if enemy_game_emotion >= 11:
-            cache["is_enemy_beasted_out"] = True
-        if enemy_game_emotion >= 23:
-            cache["is_enemy_beasted_over"] = True
-
-        if not cache["cached_player_folder"] and "player_chip_folder" in screen_data_dict:
-            cache["cached_player_folder"] = screen_data_dict.get("player_chip_folder", [])
-        if not cache["cached_enemy_folder"] and "enemy_chip_folder" in screen_data_dict:
-            cache["cached_enemy_folder"] = screen_data_dict.get("enemy_chip_folder", [])
+        if not cache["cached_player_folder"]: cache["cached_player_folder"] = screen_data_dict.get("player_chip_folder", [])
+        if not cache["cached_enemy_folder"]: cache["cached_enemy_folder"] = screen_data_dict.get("enemy_chip_folder", [])
 
         if bool(float(screen_data_dict.get("inside_window", 0))):
             chip_slots = screen_data_dict.get("chip_slots", [])
             chip_codes = screen_data_dict.get("chip_codes", [])
-            chips_visible_count = screen_data_dict.get("chip_visible_count", 0)
-            visible_chips_in_window = []
-            for i in range(min(len(chip_slots), chips_visible_count)):
-                visible_chips_in_window.append({"slot": chip_slots[i], "code": chip_codes[i], "id_in_window": i})
-            cache["player_chips_in_window"] = visible_chips_in_window
+            count = int(screen_data_dict.get("chip_visible_count", 0))
+            visible_chips = []
+            for i in range(min(len(chip_slots), count)):
+                visible_chips.append({"slot": chip_slots[i], "code": chip_codes[i], "id_in_window": i})
+            cache["player_chips_in_window"] = visible_chips
         else:
-            if cache["player_chips_in_window"]:
-                cache["player_chips_in_window"] = []
-
+            cache["player_chips_in_window"] = []
     # ---------------------------------------------------------------------
-    # Reward & done (unchanged)
+    # Reward & done
     # ---------------------------------------------------------------------
     def _calculate_reward_and_done(self, curr_raw: Dict[str, Any]):
         comps = {
@@ -292,6 +335,15 @@ class ConnectionHandler:
                 f"Port {self.port} ({self.name}): "
                 f"{' | '.join(parts)}  →  r={reward:+.2f}"
             )
+        
+        # 🚀 RESET HISTORY ON MATCH END
+        if done:
+            self.instance_game_data_cache["player_used_crosses_list"] = []
+            self.instance_game_data_cache["enemy_used_crosses_list"] = []
+            self.instance_game_data_cache["is_player_beasted_out"] = False
+            self.instance_game_data_cache["is_player_beasted_over"] = False
+            if self._should_log():
+                self._log(f"Port {self.port}: [Episode End] History Cleared.")
 
         self.ep_last_player_health = hp_p
         self.ep_last_enemy_health = hp_e
@@ -399,6 +451,8 @@ class ConnectionHandler:
                     # Only process screen frames
                     if event not in ("screen_image", "screen", "screen_data"):
                         continue
+                    
+                    self._has_received_first_response = True
 
                     # Parse details robustly
                     if isinstance(detail, dict):
@@ -564,6 +618,10 @@ class ConnectionHandler:
         self._is_running = True
         attempt, delay = 0, retry_base_delay
 
+        # 🚀 RESET HISTORY ON CONNECTION
+        self.instance_game_data_cache["player_used_crosses_list"] = []
+        self.instance_game_data_cache["enemy_used_crosses_list"] = []
+
         while self._is_running:
             try:
                 print(f"Attempting to connect to {self.name} at {self.address}:{self.port} ...")
@@ -601,6 +659,9 @@ class ConnectionHandler:
         self.prev_action_info_for_buffer = None
         self.prev_processed_stacked_frames = None
         self.prev_processed_game_features = None
+        
+        # Reset flag
+        self._has_received_first_response = False
         self._inference_done_event.set()
 
         if self.strategy:
@@ -610,6 +671,29 @@ class ConnectionHandler:
         self._action_task = asyncio.create_task(self._action_playback_loop())
 
         try:
+            # --- WARMUP LOOP: Poll until the game actually replies ---
+            if self._should_log():
+                print(f"Port {self.port}: Polling for first screen response...")
+            
+            while self._is_running and not self._has_received_first_response:
+                # We clear the event so we can actually wait for the incoming message
+                self._inference_done_event.clear()
+                
+                if not await self._request_screen_image():
+                    break # send failed, socket likely dead
+                
+                # Wait for the response, but timeout if the game is still loading/black screen
+                try:
+                    await asyncio.wait_for(self._inference_done_event.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    if self._should_log():
+                        print(f"Port {self.port}: No response yet, retrying handshake...")
+                    continue # Loop wraps around to send request again
+            
+            # Reset event state for the main loop (in case we exited loop exactly on response)
+            self._inference_done_event.set()
+
+            # --- MAIN LOOP: Lock-step inference ---
             while self._is_running:
                 await self._inference_done_event.wait()
                 if not self._is_running:

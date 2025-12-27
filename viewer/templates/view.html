@@ -223,6 +223,36 @@
         const HORIZON = 18;
         const CODE_INDEXES = "ABCDEFGHIJKLMNOPQRSTUVWXYZ*";
 
+        // ---------------------------------------------------------------------
+        // Cross mapping (player_game_emotion / enemy_game_emotion)
+        // Mirrors scripts/create_rl_dataset.py _emotion_to_form_type()
+        // ---------------------------------------------------------------------
+        const CROSS_ROWS = [
+            { type: "Normal", normal: 0,  beast: 11 },
+            { type: "Fire",   normal: 1,  beast: 13 },
+            { type: "Elec",   normal: 2,  beast: 14 },
+            { type: "Slash",  normal: 3,  beast: 15 },
+            { type: "Erase",  normal: 4,  beast: 16 },
+            { type: "Charge", normal: 5,  beast: 17 },
+            { type: "Aqua",   normal: 6,  beast: 18 },
+            { type: "Thawk",  normal: 7,  beast: 19 },
+            { type: "Tengu",  normal: 8,  beast: 20 },
+            { type: "Grnd",   normal: 9,  beast: 21 },
+            { type: "Dust",   normal: 10, beast: 22 },
+        ];
+
+        function gameEmotionToCrossName(v) {
+            // v can be undefined/null/string
+            const id = Number.isFinite(Number(v)) ? Number(v) : 0;
+
+            for (const row of CROSS_ROWS) {
+                if (id === row.normal) return row.type;
+                if (id === row.beast) return `${row.type} Beast`;
+            }
+            return `Unknown(${id})`;
+        }
+
+
         // Init Elements
         for(let i=0; i<18; i++) document.getElementById('grid').innerHTML += `<div class="grid-cell" id="c-${i}"></div>`;
         
@@ -364,8 +394,23 @@
             document.getElementById('e-chip').innerText = d.enemy_chip || "-";
             document.getElementById('p-emo').innerText = d.player_emotion || 0;
             document.getElementById('e-emo').innerText = d.enemy_emotion || 0;
-            document.getElementById('p-game-emo').innerText = d.player_game_emotion || 0;
-            document.getElementById('e-game-emo').innerText = d.enemy_game_emotion || 0;
+            const pGameEmo = (d.player_game_emotion ?? 0);
+            const eGameEmo = (d.enemy_game_emotion ?? 0);
+
+            const pCross = gameEmotionToCrossName(pGameEmo);
+            const eCross = gameEmotionToCrossName(eGameEmo);
+
+            // Show readable cross + preserve numeric for debugging.
+            const pEl = document.getElementById('p-game-emo');
+            const eEl = document.getElementById('e-game-emo');
+
+            pEl.innerText = `${pCross} (${pGameEmo})`;
+            eEl.innerText = `${eCross} (${eGameEmo})`;
+
+            // Optional: tooltip keeps it nice if you want to visually shorten later.
+            pEl.title = `player_game_emotion = ${pGameEmo}`;
+            eEl.title = `enemy_game_emotion = ${eGameEmo}`;
+
             document.getElementById('p-chg').innerText = d.player_charge || 0;
             document.getElementById('e-chg').innerText = d.enemy_charge || 0;
             if(d.player_pos) document.getElementById('p-pos').innerText = `[${d.player_pos}]`;

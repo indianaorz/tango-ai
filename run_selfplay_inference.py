@@ -32,6 +32,53 @@ import logging
 # Silence Werkzeug request logs (the "127.0.0.1 - - ..." lines)
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
+
+from planning.planning_model import PlanningAgentStrategy # <--- IMPORT NEW CLASS
+
+class DualModelStrategy:
+    """
+    Holds two specialized NGAgentStrategy instances (Battle and Planning).
+    Switches between them based on game state.
+    """
+    def __init__(self, battle_strat: Any, plan_strat: Any):
+        self.battle = battle_strat
+        self.plan = plan_strat
+        self.current_mode = "battle" 
+
+    def reset_state(self, port: int):
+        self.battle.reset_state(port)
+        self.plan.reset_state(port)
+        self.current_mode = "battle"
+
+    def decide_action(self, port: int, game_state: dict) -> dict:
+        # 1. State Detection
+        inside_window = bool(float(game_state.get("inside_window", 0)))
+        cust_gauge = int(float(game_state.get("cust_gauge", 0)))
+        
+        # 🚀 REVERTED: Correct check per your instructions.
+        # Only enter Plan Mode if Window is Open AND Gauge is 0 (Start of Turn)
+        if inside_window and cust_gauge == 0:
+            mode = "plan"
+            active_strat = self.plan
+        else:
+            mode = "battle"
+            active_strat = self.battle
+            
+            # 🚀 CRITICAL FIX: Force Reset the Planner while fighting.
+            # Since 'plan.decide_action' isn't being called during battle, 
+            # it never knows the window closed. We manually reset it here
+            # so it is ready (frames_in_window=0, plan_generated=False) for Turn 2.
+            self.plan.reset_state(port)
+
+        # 2. Inference
+        decision = active_strat.decide_action(port, game_state)
+        
+        # 3. Tagging for Debug UI
+        if "debug" not in decision: decision["debug"] = {}
+        decision["debug"]["active_model"] = mode
+        
+        return decision
+
 class SafeHybridStrategy:
     """
     Wraps the heavy NG strategy and the lightweight Bootstrap strategy.
@@ -287,6 +334,7 @@ def _make_strategy(cfg: dict, util_funcs: dict):
     )
 
 
+
 # ----------------------------
 # Main runner
 # ----------------------------
@@ -348,43 +396,67 @@ async def _run() -> None:
             sw = SwappableStrategy(initial=bootstrap)
             strat_obj = sw
 
-            # 3. Update the loader to use the SafeHybridStrategy
-            def _load_and_swap(swappable: SwappableStrategy, cfg: dict, fallback_strat: Any):
+            # Replace the loading logic with this:
+            def _load_dual_models(swappable: SwappableStrategy, cfg: dict, fallback_strat: Any):
                 try:
-                    print("[NG] Background load + warmup starting...")
-                    ng_strat = NGAgentStrategy(
-                        ckpt_path=config.NG_CKPT_PATH,
+                    print(f"[NG] Loading BATTLE model from {config.BATTLE_CKPT_PATH}...")
+                    battle_strat = NGAgentStrategy(
+                        ckpt_path=config.BATTLE_CKPT_PATH,
                         device=torch.device(config.NG_DEVICE),
                         key_bit_positions=config.KEY_BIT_POSITIONS,
                         discrete_actions=config.DISCRETE_ACTIONS,
                         util_fns=util_funcs,
                         frame_h=config.FRAME_HEIGHT,
                         frame_w=config.FRAME_WIDTH,
-                        seq_len_frames=config.SEQ_LEN_FRAMES,
+                        seq_len_frames=config.SEQ_LEN_FRAMES, # Should be 1
                         use_images=True,
-                        allow_actions_in_window=True,
-                        forbid_actions_in_battle=[],
+                        allow_actions_in_window=True, # Battle model shouldn't see window, but keep true for safety
+                        mask_path=None
                     )
+                    print(f"[Dual] Loading PLANNING model from {config.PLAN_CKPT_PATH}...")
+                    # --- CHANGED: Use PlanningAgentStrategy ---
+                    plan_strat = PlanningAgentStrategy(
+                        model_path=config.PLAN_CKPT_PATH,
+                        chips_db_path=config.CHIPS_DB_PATH,
+                        device=torch.device(config.NG_DEVICE),
+                        key_bit_positions=config.KEY_BIT_POSITIONS
+                    )
+                    # mask_file = "chip_window_mask.png"
+                    # if not os.path.exists(mask_file) and os.path.exists(os.path.join("data/assets", mask_file)):
+                    #     mask_file = os.path.join("data/assets", mask_file)
+                    # print(f"[NG] Loading PLANNING model from {config.PLAN_CKPT_PATH}...")
+                    # plan_strat = NGAgentStrategy(
+                    #     ckpt_path=config.PLAN_CKPT_PATH,
+                    #     device=torch.device(config.NG_DEVICE),
+                    #     key_bit_positions=config.KEY_BIT_POSITIONS,
+                    #     discrete_actions=config.DISCRETE_ACTIONS,
+                    #     util_fns=util_funcs,
+                    #     frame_h=config.FRAME_HEIGHT,
+                    #     frame_w=config.FRAME_WIDTH,
+                    #     seq_len_frames=config.SEQ_LEN_FRAMES, # Should be 1
+                    #     use_images=True,
+                    #     allow_actions_in_window=True,
+                    #     mask_path=mask_file
+                    # )
                     
-                    # --- FIX IS HERE ---
-                    # Don't swap directly to ng_strat. Swap to the Hybrid.
-                    # This ensures that if the game is still black-screened, 
-                    # we fall back to 'fallback_strat' (bootstrap) instead of crashing/stalling.
-                    safe_hybrid = SafeHybridStrategy(primary=ng_strat, fallback=fallback_strat)
+                    # Combine into Dual Switcher
+                    dual_strat = DualModelStrategy(battle_strat, plan_strat)
+                    
+                    # Wrap in SafeHybrid (handles black screens)
+                    safe_hybrid = SafeHybridStrategy(primary=dual_strat, fallback=fallback_strat)
                     
                     swappable.swap(safe_hybrid)
-                    print("[NG] Ready. Swapped in Safe Hybrid NG strategy.")
-                    # -------------------
+                    print("[NG] Ready. Swapped in DUAL (Battle/Plan) strategy.")
                     
                 except Exception as e:
-                    print(f"[NG] Failed to load NG strategy: {e!r}")
+                    print(f"[NG] Failed to load models: {e!r}")
                     import traceback
                     traceback.print_exc()
 
             # 4. Pass 'bootstrap' to the thread args
             t = threading.Thread(
-                target=_load_and_swap,
-                args=(sw, inst_cfg, bootstrap), # <-- Added bootstrap here
+                target=_load_dual_models, # Call the new loader
+                args=(sw, inst_cfg, bootstrap),
                 daemon=True,
             )
             t.start()

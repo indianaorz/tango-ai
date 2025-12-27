@@ -11,7 +11,7 @@
         /* TABLE STYLING */
         table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 12px; }
         th { text-align: left; color: #666; border-bottom: 2px solid #444; padding: 10px; text-transform: uppercase; letter-spacing: 1px; }
-        td { border-bottom: 1px solid #222; padding: 12px 10px; vertical-align: middle; }
+        td { border-bottom: 1px solid #222; padding: 12px 10px; vertical-align: top; }
         tr:hover { background: #1a1a1a; }
 
         /* CHIP VISUALIZATION */
@@ -23,13 +23,10 @@
             background: #222; border: 1px solid #444; 
             display: flex; flex-direction: column; 
             align-items: center; justify-content: flex-end; 
-            border-radius: 4px;
-            position: relative;
-            overflow: hidden;
-            transition: transform 0.1s;
+            border-radius: 4px; position: relative; overflow: hidden;
         }
 
-        /* INPUT HAND STYLES */
+        /* Hand Styles */
         .chip-slot.in-hand { opacity: 0.5; filter: grayscale(0.6); }
         .chip-slot.in-hand.selected { 
             opacity: 1.0; filter: grayscale(0);
@@ -38,43 +35,68 @@
             transform: translateY(-2px);
         }
         
+        /* Queue Styles */
+        .chip-slot.in-queue { border-color: #00ff00; box-shadow: 0 0 8px rgba(0, 255, 0, 0.1); }
+        .chip-slot.ai-queue { border-color: #ff00ff; box-shadow: 0 0 8px rgba(255, 0, 255, 0.2); }
+        
+        /* Beast Out Card Style */
+        .chip-slot.beast-card {
+            border-color: #8855ff; background: #220044;
+            box-shadow: 0 0 8px rgba(136, 85, 255, 0.4);
+            justify-content: center;
+        }
+        .beast-text {
+            color: #fff; font-weight: bold; font-size: 9px; 
+            text-align: center; line-height: 1.2; text-shadow: 0 0 4px #aa00ff;
+        }
+
         .order-badge {
             position: absolute; top: 0; right: 0;
             background: #4db8ff; color: #000;
             font-size: 9px; font-weight: bold;
             width: 12px; height: 12px;
-            display: flex; align-items: center; justify-content: center;
-            z-index: 2;
+            display: flex; align-items: center; justify-content: center; z-index: 2;
         }
 
-        /* QUEUE STYLES */
-        .chip-slot.in-queue { border-color: #00ff00; box-shadow: 0 0 8px rgba(0, 255, 0, 0.1); }
-        .chip-slot.ai-queue { border-color: #ff00ff; box-shadow: 0 0 8px rgba(255, 0, 255, 0.2); }
-
-        .chip-img {
-            width: 100%; height: 100%;
-            object-fit: contain; 
-            position: absolute; top: 0; left: 0; z-index: 0;
-        }
-
-        .chip-fallback-id { font-size: 10px; font-weight: bold; color: #555; z-index: 1; margin-bottom: 15px; }
+        .chip-img { width: 100%; height: 100%; object-fit: contain; position: absolute; top: 0; left: 0; z-index: 0; }
         .chip-code { 
             font-size: 10px; color: #fff; font-weight: bold;
-            background: rgba(0,0,0,0.7);
-            width: 100%; text-align: center;
+            background: rgba(0,0,0,0.7); width: 100%; text-align: center;
             padding: 2px 0; z-index: 1; position: relative; 
         }
 
+        /* GRID */
+        .mini-grid {
+            display: grid; grid-template-columns: repeat(6, 12px); grid-template-rows: repeat(3, 12px);
+            gap: 1px; margin-top: 5px; background: #000; border: 1px solid #444; width: fit-content;
+        }
+        .grid-cell { width: 100%; height: 100%; position: relative; }
+        .owner-0 { background: #003366; } 
+        .owner-1 { background: #661111; } 
+        .type-1 { background-image: radial-gradient(#000 20%, transparent 20%); background-size: 2px 2px; } 
+        .type-2 { background: #111; } 
+        .entity-p { width: 6px; height: 6px; background: #00ffff; border-radius: 50%; position: absolute; top:3px; left:3px; box-shadow: 0 0 4px #00ffff; }
+        .entity-e { width: 6px; height: 6px; background: #ff4444; border-radius: 50%; position: absolute; top:3px; left:3px; box-shadow: 0 0 4px #ff0000; }
+
+        /* TAGS */
+        .state-tag { font-size: 9px; padding: 2px 4px; border-radius: 3px; display: inline-block; margin: 1px; font-weight: bold; border: 1px solid transparent; }
+        .tag-fullsynchro { background: #ff00ff; color: #fff; text-shadow: 0 0 2px #fff; }
+        .tag-anger { background: #ff0000; color: #fff; }
+        .tag-beast { background: #4400cc; color: #fff; border-color: #8855ff; }
+        
+        .tag-current-form { background: #224466; color: #aaddff; border-color: #4488aa; }
+        .tag-select-form { background: #ccaa00; color: #000; }
+        .tag-ai-form { background: #440044; color: #ff00ff; border-color: #ff00ff; }
+
+        /* HISTORY */
+        .history-section { font-size: 9px; color: #888; margin-top: 6px; border-top: 1px solid #333; padding-top: 2px; }
+        .history-label { font-weight: bold; color: #555; display: block; margin-bottom: 1px; }
+        .cross-name { margin-right: 4px; }
+        .cross-spent { color: #555; text-decoration: line-through; }
+
         .yield-pos { color: #00ff00; font-weight: bold; }
         .yield-neg { color: #ff4d4d; font-weight: bold; }
-        .yield-neu { color: #666; }
-        .meta-tag { font-size: 10px; padding: 2px 4px; background: #333; border-radius: 3px; color: #bbb; display: inline-block; margin-bottom: 2px; }
-        .cross-tag { color: #ffff00; border: 1px solid #664400; background: #221100; }
-        .ai-cross-tag { color: #ff00ff; border: 1px solid #660066; background: #220022; }
-        
         .arrow-divider { font-size: 18px; color: #444; margin: 0 10px; }
-        .used-cross-list { font-size: 9px; color: #888; margin-top: 4px; line-height: 1.1; }
-        .used-cross-item { color: #aaa; text-decoration: line-through; margin-right: 3px; }
     </style>
 </head>
 <body>
@@ -88,36 +110,70 @@
     <table>
         <thead>
             <tr>
-                <th style="width: 120px;">Source</th>
-                <th style="width: 100px;">Context</th>
+                <th style="width: 90px;">Replay</th>
+                <th style="width: 160px;">Context State</th>
                 <th>Input Hand</th>
                 <th style="width: 20px;"></th> 
                 <th>Human Selection</th>
                 <th>AI Prediction</th>
-                <th style="width: 100px;">Cross</th>
-                <th style="width: 120px;">Outcome</th>
+                <th style="width: 60px;">Net Yield</th>
             </tr>
         </thead>
         <tbody>
             {% for turn in turns %}
+            {% macro cross_name(cid) %}{% if cid==1 %}Spout{% elif cid==2 %}Tengu{% elif cid==3 %}Tomahawk{% elif cid==4 %}Ground{% elif cid==5 %}Dust{% elif cid==0 %}Normal{% else %}C{{cid}}{% endif %}{% endmacro %}
+
             <tr>
                 <td>
-                    <div style="color:#fff">{{ turn.replay_file }}</div>
+                    <div style="color:#fff; font-size:11px; word-break:break-all;">{{ turn.replay_file }}</div>
                     <div style="color:#666; font-size:10px;">Frame: {{ turn.frame_start }}</div>
                 </td>
 
                 <td>
-                    <div style="display:flex; justify-content:space-between; font-size:10px;">
-                        <span style="color:#4db8ff">P: {{ turn.p_hp_start }}</span>
-                        <span style="color:#ff4d4d">E: {{ turn.e_hp_start }}</span>
+                    <div style="display:flex; justify-content:space-between; font-size:10px; margin-bottom:4px;">
+                        <span style="color:#4db8ff; font-weight:bold;">P: {{ turn.p_hp_start }}</span>
+                        <span style="color:#ff4d4d; font-weight:bold;">E: {{ turn.e_hp_start }}</span>
                     </div>
-                    <div class="used-cross-list">
-                        {% if turn.used_crosses %}
-                            {% for c in turn.used_crosses %}
-                                <span class="used-cross-item">C{{ c }}</span>
+
+                    {% if turn.grid_state %}
+                    <div class="mini-grid">
+                        {% for i in range(18) %}
+                            <div class="grid-cell owner-{{ turn.grid_owner_state[i] }} type-{{ turn.grid_state[i] }}">
+                                {% if i == turn.p_grid_idx %} <div class="entity-p"></div> {% endif %}
+                                {% if i == turn.e_grid_idx %} <div class="entity-e"></div> {% endif %}
+                            </div>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+
+                    <div style="margin-top:4px;">
+                        <span class="state-tag tag-current-form">
+                            Now: {{ cross_name(turn.get('current_cross', 0)) }}
+                        </span>
+                        {% if turn.player_emotion == 1 %}<span class="state-tag tag-fullsynchro">FULL SYNC</span>{% endif %}
+                        {% if turn.player_emotion == 2 %}<span class="state-tag tag-anger">ANGER</span>{% endif %}
+                        {% if turn.beast_mode > 0 %}<span class="state-tag tag-beast">BEAST</span>{% endif %}
+                    </div>
+
+                    <div class="history-section">
+                        <span class="history-label">PLAYER HISTORY</span>
+                        {% if turn.player_used_crosses %}
+                            {% for c in turn.player_used_crosses %}
+                                <span class="cross-name cross-spent">{{ cross_name(c) }}</span>
                             {% endfor %}
                         {% else %}
-                            <span>No Crosses Used</span>
+                            <span style="color:#444;">- None -</span>
+                        {% endif %}
+                    </div>
+
+                    <div class="history-section">
+                        <span class="history-label">ENEMY HISTORY</span>
+                        {% if turn.enemy_used_crosses %}
+                            {% for c in turn.enemy_used_crosses %}
+                                <span class="cross-name cross-spent">{{ cross_name(c) }}</span>
+                            {% endfor %}
+                        {% else %}
+                            <span style="color:#444;">- None -</span>
                         {% endif %}
                     </div>
                 </td>
@@ -127,19 +183,21 @@
                         {% for i in range(turn.rich_hand|length) %}
                             {% set chip = turn.rich_hand[i] %}
                             {% set is_selected = i in turn.selected_indices %}
-                            
                             {% set sel_order = -1 %}
                             {% for s_idx in turn.selected_indices %}
                                 {% if s_idx == i %} {% set sel_order = loop.index %} {% endif %}
                             {% endfor %}
 
                             {% if chip %}
-                            <div class="chip-slot in-hand {{ 'selected' if is_selected else '' }}" title="{{ chip.name }}">
+                            <div class="chip-slot in-hand {{ 'selected' if is_selected else '' }}">
                                 {% if sel_order > -1 %} <div class="order-badge">{{ sel_order }}</div> {% endif %}
-                                {% if chip.image_url %} <img src="{{ chip.image_url }}" class="chip-img">
-                                {% else %} <span class="chip-fallback-id">{{ chip.id }}</span> {% endif %}
+                                {% if chip.image_url %} <img src="{{ chip.image_url }}" class="chip-img"> {% endif %}
                                 <span class="chip-code">{{ chip.char_code }}</span>
                             </div>
+                            {% else %}
+                                <div class="chip-slot" style="background:#111; opacity:0.3;">
+                                    <span style="color:#333; font-size:20px;">?</span>
+                                </div>
                             {% endif %}
                         {% endfor %}
                     </div>
@@ -150,48 +208,58 @@
                 <td>
                     <div class="queue-container">
                         {% for idx in turn.selected_indices %}
-                            {% set chip = turn.rich_hand[idx] %}
-                            {% if chip %}
-                            <div class="chip-slot in-queue" title="{{ chip.name }}">
-                                {% if chip.image_url %} <img src="{{ chip.image_url }}" class="chip-img">
-                                {% else %} <span class="chip-fallback-id">{{ chip.id }}</span> {% endif %}
-                                <span class="chip-code">{{ chip.char_code }}</span>
-                            </div>
+                            {% if idx == 11 %}
+                                <div class="chip-slot beast-card">
+                                    <span class="beast-text">BEAST<br>OUT</span>
+                                </div>
+                            {% else %}
+                                {% set chip = turn.rich_hand[idx] %}
+                                {% if chip %}
+                                <div class="chip-slot in-queue">
+                                    {% if chip.image_url %} <img src="{{ chip.image_url }}" class="chip-img"> {% endif %}
+                                    <span class="chip-code">{{ chip.char_code }}</span>
+                                </div>
+                                {% endif %}
                             {% endif %}
-                        {% else %}
-                            <span style="color:#555; font-style:italic; font-size:10px;">Pass</span>
                         {% endfor %}
                     </div>
+                    {% if turn.selected_cross > 0 %}
+                        <div style="margin-top:4px;">
+                            <span class="state-tag tag-select-form">
+                                Select: {{ cross_name(turn.selected_cross) }}
+                            </span>
+                        </div>
+                    {% endif %}
                 </td>
 
                 <td>
                     <div class="queue-container">
                         {% if turn.ai_indices is defined %}
                             {% for idx in turn.ai_indices %}
-                                {% set chip = turn.rich_hand[idx] %}
-                                {% if chip %}
-                                <div class="chip-slot ai-queue" title="{{ chip.name }}">
-                                    {% if chip.image_url %} <img src="{{ chip.image_url }}" class="chip-img">
-                                    {% else %} <span class="chip-fallback-id">{{ chip.id }}</span> {% endif %}
-                                    <span class="chip-code">{{ chip.char_code }}</span>
-                                </div>
+                                {% if idx == 11 %}
+                                    <div class="chip-slot beast-card">
+                                        <span class="beast-text">BEAST<br>OUT</span>
+                                    </div>
+                                {% else %}
+                                    {% set chip = turn.rich_hand[idx] %}
+                                    {% if chip %}
+                                    <div class="chip-slot ai-queue">
+                                        {% if chip.image_url %} <img src="{{ chip.image_url }}" class="chip-img"> {% endif %}
+                                        <span class="chip-code">{{ chip.char_code }}</span>
+                                    </div>
+                                    {% endif %}
                                 {% endif %}
-                            {% else %}
-                                <span style="color:#555; font-size:10px;">Pass</span>
                             {% endfor %}
                         {% else %}
-                            <span style="color:#555;">Loading...</span>
+                            <span style="color:#555;">...</span>
                         {% endif %}
                     </div>
-                </td>
-
-                <td>
-                    {% if turn.selected_cross > 0 %}
-                        <span class="meta-tag cross-tag">HUM: C{{ turn.selected_cross }}</span><br>
-                    {% endif %}
-                    
                     {% if turn.ai_cross is defined and turn.ai_cross > 0 %}
-                        <span class="meta-tag ai-cross-tag">AI: C{{ turn.ai_cross }}</span>
+                        <div style="margin-top:4px;">
+                            <span class="state-tag tag-ai-form">
+                                AI: {{ cross_name(turn.ai_cross) }}
+                            </span>
+                        </div>
                     {% endif %}
                 </td>
 
@@ -199,10 +267,10 @@
                     <div style="font-size:14px;">
                         {% if turn.net_yield > 0 %} <span class="yield-pos">+{{ turn.net_yield }}</span>
                         {% elif turn.net_yield < 0 %} <span class="yield-neg">{{ turn.net_yield }}</span>
-                        {% else %} <span class="yield-neu">0</span> {% endif %}
+                        {% else %} <span style="color:#666;">0</span> {% endif %}
                     </div>
-                    <div style="font-size:10px; color:#666; margin-top:2px;">
-                        D:{{ turn.damage_dealt }} / T:{{ turn.damage_taken }}
+                    <div style="font-size:9px; color:#555; margin-top:2px;">
+                        D:{{ turn.damage_dealt }}<br>T:{{ turn.damage_taken }}
                     </div>
                 </td>
             </tr>

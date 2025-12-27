@@ -1,507 +1,259 @@
-// selfplay_debug_ui/static/app.js
-
+// ── Begin: selfplay_debug_ui/static/app.js ──
 function fmtTs(ts) {
   if (!ts) return "—";
-  const d = new Date(ts * 1000);
-  return d.toLocaleTimeString();
+  return new Date(ts * 1000).toLocaleTimeString();
 }
 
 function fmtHz(x) {
-  if (x === null || x === undefined) return "—";
   const v = Number(x);
   if (!Number.isFinite(v)) return "—";
-  if (v >= 100) return v.toFixed(0);
-  if (v >= 10) return v.toFixed(1);
-  return v.toFixed(2);
+  return v.toFixed(1);
 }
 
-function badgeForAge(ageS) {
-  const a = Number(ageS || 0);
-  if (!Number.isFinite(a)) return { cls: "warn", text: "stale" };
-  if (a < 1.0) return { cls: "ok", text: "live" };
-  if (a < 3.0) return { cls: "warn", text: "lag" };
-  return { cls: "warn", text: "stale" };
+// 🚀 Helper: Cross IDs to Names
+// 🚀 Updated Helper: Maps FORM_MAPPING indices to Names
+function crossName(id) {
+  const FORM_NAMES = [
+    "Normal", "Fire", "Elec", "Slash", "Erase", "Charge",
+    "Aqua", "Thawk", "Tengu", "Grnd", "Dust"
+  ];
+  return FORM_NAMES[id] || `ID:${id}`;
 }
 
-function chipsEl(containerEl, list) {
-  const xs = Array.isArray(list) ? list : [];
-  containerEl.innerHTML = "";
-  if (xs.length === 0) {
-    const sp = document.createElement("span");
-    sp.className = "small";
-    sp.textContent = "—";
-    containerEl.appendChild(sp);
-    return;
-  }
-  const wrap = document.createElement("div");
-  wrap.className = "rowchips";
-  for (const x of xs) {
-    const c = document.createElement("span");
-    c.className = "chip";
-    c.textContent = String(x);
-    wrap.appendChild(c);
-  }
-  containerEl.appendChild(wrap);
+// 🚀 Helper: Code ID to Char
+function codeChar(id) {
+  const codes = "ABCDEFGHIJKLMNOPQRSTUVWXYZ*";
+  if (id >= 0 && id < codes.length) return codes[id];
+  return "?";
 }
 
 // -----------------------------------------------------------------------------
-// Timeline grid (viewer-style) for Mapped vs NG.
-//
-// Conventions:
-// - "Mapped" (sent to game) => GT (green)
-// - "NG" (model intent)     => PR (magenta)
+// Timeline & Controller Helpers
 // -----------------------------------------------------------------------------
-
 const TIMELINE_SLOTS = ["UP","DOWN","LEFT","RIGHT","A","B","L","R","SELECT","START"];
 const TIMELINE_T = 18;
 
-function niceSlotLabel(slot) {
-  if (slot === "SELECT") return "SELECT";
-  if (slot === "START") return "START";
-  return slot;
+function btnNameToSlot(raw) {
+  const k = String(raw).trim().toUpperCase();
+  if (k === "UP" || k === "DPAD_UP") return "UP";
+  if (k === "DOWN" || k === "DPAD_DOWN") return "DOWN";
+  if (k === "LEFT" || k === "DPAD_LEFT") return "LEFT";
+  if (k === "RIGHT" || k === "DPAD_RIGHT") return "RIGHT";
+  if (k === "A" || k === "Z" || k === "EAST") return "A";
+  if (k === "B" || k === "X" || k === "SOUTH") return "B";
+  if (k === "L" || k === "LB") return "L";
+  if (k === "R" || k === "RB") return "R";
+  if (k === "START") return "START";
+  if (k === "SELECT" || k === "BACK") return "SELECT";
+  return null;
 }
 
-function slotsSetFromPressedButtons(pressedButtonsList) {
-  const xs = Array.isArray(pressedButtonsList) ? pressedButtonsList : [];
-  const set = new Set();
-  for (const raw of xs) {
-    const slot = btnNameToSlot(raw);
-    if (slot) set.add(slot);
-  }
-  return set;
-}
-
-/**
- * Render a timeline grid into hostEl using entries.
- *
- * IMPORTANT UI behavior:
- *   Grid width is fixed to TIMELINE_T columns (max 18),
- *   even if entries length changes frame-to-frame.
- *
- * Each entry should have:
- *   - mapped_pressed_buttons: [...]
- *   - ng_pressed_buttons: [...]
- *
- * For history: newest-first.
- * For next buffer: earliest-next first.
- */
-function renderMappedVsNgTimeline(hostEl, entries, titleText) {
+function renderTimeline(hostEl, entries) {
   if (!hostEl) return;
-
-  const xs = Array.isArray(entries) ? entries : [];
-
-  // Fixed width: always 18 columns (prevents resizing/jitter).
-  const T = TIMELINE_T;
-
   hostEl.innerHTML = "";
-
-  // Title row
-  const title = document.createElement("div");
-  title.className = "timeline-title";
-  title.textContent = titleText;
-  hostEl.appendChild(title);
-
+  
   const grid = document.createElement("div");
   grid.className = "timeline";
-  grid.style.gridTemplateColumns = `60px repeat(${T}, 1fr)`;
+  grid.style.gridTemplateColumns = `50px repeat(${TIMELINE_T}, 1fr)`;
 
   for (const slot of TIMELINE_SLOTS) {
     const lbl = document.createElement("div");
     lbl.className = "lane-label";
-    lbl.textContent = niceSlotLabel(slot);
+    lbl.textContent = slot;
     grid.appendChild(lbl);
 
-    for (let t = 0; t < T; t++) {
-      const e = xs[t] || null;
-
-      const mappedSet = e ? slotsSetFromPressedButtons(e.mapped_pressed_buttons) : new Set();
-      const ngSet = e ? slotsSetFromPressedButtons(e.ng_pressed_buttons) : new Set();
-
-      const gt = mappedSet.has(slot);
-      const pr = ngSet.has(slot);
-
-      const c = document.createElement("div");
-      c.className = "cell";
-      if (gt && pr) c.classList.add("both");
-      else if (gt) c.classList.add("gt");
-      else if (pr) c.classList.add("pr");
-      // else: empty cell (keeps grid stable)
-
-      grid.appendChild(c);
+    for (let t = 0; t < TIMELINE_T; t++) {
+        const e = entries[t];
+        const active = e && e.mapped_pressed_buttons && e.mapped_pressed_buttons.some(b => btnNameToSlot(b) === slot);
+        const c = document.createElement("div");
+        c.className = active ? "cell mapped" : "cell";
+        grid.appendChild(c);
     }
   }
-
   hostEl.appendChild(grid);
-
-  // Count line (helps debug quickly)
-  const shown = Math.min(xs.length, T);
-  const count = document.createElement("div");
-  count.className = "small muted";
-  count.style.marginTop = "6px";
-  count.textContent = `steps filled: ${shown} / ${T} (src: ${xs.length})`;
-  hostEl.appendChild(count);
-}
-
-/**
- * History is newest-first (your to_json does reversed(deque)).
- */
-function renderHistoryTimeline(hostEl, history) {
-  renderMappedVsNgTimeline(hostEl, history, "History (fixed 18): Mapped vs NG");
-}
-
-/**
- * Next actions buffer is already "future steps" (we encoded skipping t0 in DebugState),
- * and we want earliest-next first. So render as-is (index 0 = next step).
- */
-function renderNextBufferTimeline(hostEl, nextActions) {
-  renderMappedVsNgTimeline(hostEl, nextActions, "Next buffer (fixed 18): Mapped vs NG");
-}
-
-// -----------------------------------------------------------------------------
-// Controller mapping (scope-safe, no global IDs)
-// -----------------------------------------------------------------------------
-
-function normBtnName(x) {
-  return String(x ?? "")
-    .trim()
-    .toUpperCase()
-    .replaceAll("-", "_")
-    .replaceAll(" ", "_");
-}
-
-function btnNameToSlot(btnNameRaw) {
-  const k = normBtnName(btnNameRaw);
-  if (!k) return null;
-
-  if (k === "DPAD_UP" || k === "UP") return "UP";
-  if (k === "DPAD_DOWN" || k === "DOWN") return "DOWN";
-  if (k === "DPAD_LEFT" || k === "LEFT") return "LEFT";
-  if (k === "DPAD_RIGHT" || k === "RIGHT") return "RIGHT";
-
-  if (k === "EAST" || k === "A" || k === "BTN_A" || k === "BUTTON_A") return "A";
-  if (k === "SOUTH" || k === "B" || k === "BTN_B" || k === "BUTTON_B") return "B";
-
-  if (k === "Z") return "A";
-  if (k === "X") return "B";
-
-  if (k === "LEFT_SHOULDER" || k === "L" || k === "LB" || k === "L1") return "L";
-  if (k === "RIGHT_SHOULDER" || k === "R" || k === "RB" || k === "R1") return "R";
-
-  if (k === "START") return "START";
-  if (k === "BACK" || k === "SELECT") return "SELECT";
-
-  return null;
 }
 
 function mountController(hostEl) {
   hostEl.innerHTML = `
     <div class="controller" data-controller="1">
-      <div class="btn l" data-slot="L"></div>
-      <div class="btn r" data-slot="R"></div>
-
       <div class="dpad">
-        <div class="dpad-center"></div>
         <div class="btn up" data-slot="UP"></div>
         <div class="btn down" data-slot="DOWN"></div>
         <div class="btn left" data-slot="LEFT"></div>
         <div class="btn right" data-slot="RIGHT"></div>
       </div>
-
       <div class="btn b" data-slot="B">B</div>
       <div class="btn a" data-slot="A">A</div>
-
+      <div class="btn l" data-slot="L"></div>
+      <div class="btn r" data-slot="R"></div>
       <div class="btn select" data-slot="SELECT"></div>
       <div class="btn start" data-slot="START"></div>
-    </div>
-  `;
-
-  const ctrlEl = hostEl.querySelector('[data-controller="1"]');
+    </div>`;
+  const ctrlEl = hostEl.querySelector('.controller');
   const els = {};
-  for (const slot of ["UP","DOWN","LEFT","RIGHT","A","B","L","R","START","SELECT"]) {
-    els[slot] = ctrlEl.querySelector(`[data-slot="${slot}"]`);
-  }
-
-  return { ctrlEl, els };
+  TIMELINE_SLOTS.forEach(s => els[s] = ctrlEl.querySelector(`[data-slot="${s}"]`));
+  return { els };
 }
 
-function setActiveVisual(el, active) {
-  if (!el) return;
-
-  el.classList.toggle("active", !!active);
-
-  if (!active) {
-    el.style.background = "";
-    el.style.boxShadow = "";
-    el.style.borderColor = "";
-    el.style.outline = "";
-    return;
-  }
-
-  const slot = (el.getAttribute("data-slot") || "").toUpperCase();
-  const isFace = slot === "A" || slot === "B";
-
-  if (isFace) {
-    el.style.background = "#ff3333";
-    el.style.boxShadow = "0 0 15px #ff0000";
-    el.style.borderColor = "#aa0000";
-    el.style.outline = "2px solid rgba(255,0,0,.35)";
-  } else {
-    el.style.background = "#00ff00";
-    el.style.boxShadow = "0 0 10px #00ff00";
-    el.style.borderColor = "#00cc00";
-    el.style.outline = "2px solid rgba(0,255,0,.25)";
-  }
-}
-
-function clearController(ctrl) {
+function setControllerPressed(ctrl, pressed) {
   if (!ctrl) return;
-  for (const el of Object.values(ctrl.els)) setActiveVisual(el, false);
-}
-
-function setControllerPressed(ctrl, pressedButtonsList) {
-  if (!ctrl) return;
-
-  clearController(ctrl);
-
-  const xs = Array.isArray(pressedButtonsList) ? pressedButtonsList : [];
-  const slots = [];
-
-  for (const raw of xs) {
-    const slot = btnNameToSlot(raw);
-    if (!slot) continue;
-    slots.push(slot);
-    const el = ctrl.els[slot];
-    setActiveVisual(el, true);
-  }
-
-  return slots;
+  Object.values(ctrl.els).forEach(e => e.classList.remove("active"));
+  pressed.forEach(b => {
+      const s = btnNameToSlot(b);
+      if (s && ctrl.els[s]) ctrl.els[s].classList.add("active");
+  });
 }
 
 // -----------------------------------------------------------------------------
 // Cards
 // -----------------------------------------------------------------------------
-const cardsByPort = new Map();
-
 function createPortCard(port) {
   const card = document.createElement("div");
   card.className = "card";
 
   const h2 = document.createElement("h2");
-
-  const left = document.createElement("span");
-  left.textContent = `Port ${port}`;
-
-  const badge = document.createElement("span");
-  badge.className = "badge warn";
-  badge.textContent = "stale";
-
-  const tsEl = document.createElement("span");
-  tsEl.className = "muted";
-  tsEl.textContent = "—";
-
-  h2.appendChild(left);
-  h2.appendChild(badge);
-  h2.appendChild(tsEl);
-
+  h2.innerHTML = `<span>Port ${port}</span> <span class="badge warn" data-role="badge">stale</span>`;
+  
   const meta = document.createElement("div");
   meta.className = "meta";
 
+  // Info Line
   const infLine = document.createElement("div");
-  infLine.innerHTML = `inferences/sec: <b class="kbd" data-role="hz">—</b> <span class="muted">(total <span class="kbd" data-role="total">0</span>)</span>`;
+  infLine.innerHTML = `Hz: <b class="kbd" data-role="hz">0</b>`;
+  meta.appendChild(infLine);
 
-  const imgLine = document.createElement("div");
-  imgLine.innerHTML = `image: <b data-role="dims">—</b>`;
+  // 🚀 Game State Box
+  const boxState = document.createElement("div");
+  boxState.className = "box gamestate";
+  boxState.innerHTML = `
+    <div class="row-hp">
+        <span class="hp-p" data-role="php">P: —</span>
+        <span class="hp-e" data-role="ehp">E: —</span>
+    </div>
+    <div class="row-status" data-role="statusTags"></div>
+    <div class="row-hist">
+        <div class="label">Used Crosses</div>
+        <div class="hist-list" data-role="usedCrosses">—</div>
+    </div>
+    <div class="row-chips" style="display:none;" data-role="chipWindow">
+        <div class="label">Chip Window</div>
+        <div class="chips-list" data-role="chipsList"></div>
+    </div>
+  `;
+  meta.appendChild(boxState);
 
+  // Controller Grid
   const grid2 = document.createElement("div");
   grid2.className = "grid2";
-
-  const boxNg = document.createElement("div");
-  boxNg.className = "box";
-  boxNg.innerHTML = `
-    <div class="label">NG wants to press (raw)</div>
-    <div class="kbd" data-role="ngBin">—</div>
-    <div class="padwrap" data-role="ngPad"></div>
-    <div style="margin-top: 8px;" data-role="ngBtns"></div>
-    <div class="small" style="margin-top:8px; display:none;" data-role="ngHint">(Waiting for decision.ng_key_bin)</div>
-  `;
-
-  const boxMapped = document.createElement("div");
-  boxMapped.className = "box";
-  boxMapped.innerHTML = `
-    <div class="label">We interpret / send to game</div>
-    <div class="kbd" data-role="mappedBin">—</div>
-    <div class="padwrap" data-role="mappedPad"></div>
-    <div style="margin-top: 8px;" data-role="mappedBtns"></div>
-  `;
-
-  grid2.appendChild(boxNg);
-  grid2.appendChild(boxMapped);
-
-  meta.appendChild(infLine);
-  meta.appendChild(imgLine);
+  const boxMap = document.createElement("div");
+  boxMap.className = "box";
+  boxMap.innerHTML = `<div class="label">Output</div><div class="padwrap" data-role="mappedPad"></div>`;
+  grid2.appendChild(boxMap);
   meta.appendChild(grid2);
 
-  // Keep history in meta (optional)
-  const histWrap = document.createElement("div");
-  histWrap.className = "timeline-wrap";
-  histWrap.innerHTML = `<div data-role="histTimeline"></div>`;
-  meta.appendChild(histWrap);
-
+  // Image
   const imgwrap = document.createElement("div");
   imgwrap.className = "imgwrap";
-
   const img = document.createElement("img");
-  img.alt = `port ${port} image`;
-  img.loading = "eager";
-  img.decoding = "async";
-
-  const mjpegUrl = `/api/mjpeg/${port}`;
-  img.src = mjpegUrl;
-
-  img.onerror = () => {
-    img.style.opacity = "0.5";
-    setTimeout(() => {
-      img.src = `${mjpegUrl}?t=${Date.now()}`;
-      img.style.opacity = "1.0";
-    }, 2000);
-  };
-
+  img.src = `/api/mjpeg/${port}`;
   imgwrap.appendChild(img);
-
-  // Next buffer timeline goes *below* the image
-  const nextWrap = document.createElement("div");
-  nextWrap.className = "timeline-wrap";
-  nextWrap.innerHTML = `<div data-role="nextTimeline"></div>`;
-  imgwrap.appendChild(nextWrap);
+  
+  // Future Timeline
+  const timeWrap = document.createElement("div");
+  timeWrap.className = "timeline-wrap";
+  timeWrap.innerHTML = `<div data-role="nextTimeline"></div>`;
+  imgwrap.appendChild(timeWrap);
 
   card.appendChild(h2);
   card.appendChild(meta);
   card.appendChild(imgwrap);
 
-  const refs = {
+  return {
     card,
-    badge,
-    tsEl,
+    badge: h2.querySelector('[data-role="badge"]'),
     hzEl: card.querySelector('[data-role="hz"]'),
-    totalEl: card.querySelector('[data-role="total"]'),
-    dimsEl: card.querySelector('[data-role="dims"]'),
-
-    ngBinEl: card.querySelector('[data-role="ngBin"]'),
-    mappedBinEl: card.querySelector('[data-role="mappedBin"]'),
-    ngBtnsEl: card.querySelector('[data-role="ngBtns"]'),
-    mappedBtnsEl: card.querySelector('[data-role="mappedBtns"]'),
-    ngHintEl: card.querySelector('[data-role="ngHint"]'),
-
+    phpEl: card.querySelector('[data-role="php"]'),
+    ehpEl: card.querySelector('[data-role="ehp"]'),
+    statusEl: card.querySelector('[data-role="statusTags"]'),
+    usedEl: card.querySelector('[data-role="usedCrosses"]'),
+    winEl: card.querySelector('[data-role="chipWindow"]'),
+    chipsEl: card.querySelector('[data-role="chipsList"]'),
     nextTimelineEl: card.querySelector('[data-role="nextTimeline"]'),
-    histTimelineEl: card.querySelector('[data-role="histTimeline"]'),
-
-    ngController: null,
-    mappedController: null,
+    mappedController: mountController(card.querySelector('[data-role="mappedPad"]')),
   };
-
-  const ngPadHost = card.querySelector('[data-role="ngPad"]');
-  const mappedPadHost = card.querySelector('[data-role="mappedPad"]');
-
-  if (ngPadHost) refs.ngController = mountController(ngPadHost);
-  if (mappedPadHost) refs.mappedController = mountController(mappedPadHost);
-
-  return refs;
 }
 
-function ensureCardsForPorts(ports) {
-  const root = document.getElementById("cards");
-  for (const p of ports) {
-    if (!cardsByPort.has(p)) {
-      const refs = createPortCard(p);
-      cardsByPort.set(p, refs);
-      root.appendChild(refs.card);
+function updateGameState(refs, s) {
+    // Update HP
+    refs.phpEl.textContent = `P: ${s.player_hp}`;
+    refs.ehpEl.textContent = `E: ${s.enemy_hp}`;
+
+    // Update Status Tags (Current Form, Beast, Sync)
+    const formName = crossName(s.player_cross_id);
+    let tags = [`<span class="tag form">${formName}</span>`];
+    
+    if (s.beast_mode) tags.push(`<span class="tag beast">BEAST</span>`);
+    if (s.full_synchro) tags.push(`<span class="tag sync">FULL SYNC</span>`);
+    refs.statusEl.innerHTML = tags.join(" ");
+
+    // 🚀 Update Used Crosses History with correct names
+    const p_used = s.player_used_crosses || [];
+    if (p_used.length > 0) {
+        refs.usedEl.innerHTML = p_used
+            .map(id => `<span class="cross-dead">${crossName(id)}</span>`)
+            .join(" ");
+    } else {
+        refs.usedEl.textContent = "None";
     }
-  }
+
+    // Update Chip Window
+    if (s.inside_window && s.chip_window && s.chip_window.length > 0) {
+        refs.winEl.style.display = "block";
+        refs.chipsEl.innerHTML = s.chip_window.map(c => 
+            `<div class="chip-card">ID:${c.id}<br><b>${codeChar(c.code)}</b></div>`
+        ).join("");
+    } else {
+        refs.winEl.style.display = "none";
+    }
 }
+
+const cardsByPort = new Map();
 
 function updateFromPayload(payload) {
-  const meta = payload.meta || {};
-  const portsObj = payload.ports || {};
-  const ports = Object.keys(portsObj)
-    .map((x) => parseInt(x, 10))
-    .filter(Number.isFinite)
-    .sort((a, b) => a - b);
-
-  document.getElementById("overallHz").textContent = fmtHz(meta.overall_infer_hz);
-
-  const win = meta.rate_window_s;
-  document.getElementById("windowInfo").textContent =
-    Number.isFinite(Number(win)) ? `(≈${Number(win)}s window)` : "";
-
+  const ports = payload.ports || {};
   const root = document.getElementById("cards");
 
-  if (ports.length === 0) {
-    if (root.dataset.emptyShown !== "1") {
-      root.innerHTML = `<div class="card"><h2>No ports yet</h2><div class="meta muted">Waiting for first frames/actions…</div></div>`;
-      root.dataset.emptyShown = "1";
-      cardsByPort.clear();
-    }
-    return;
+  for (const pid of Object.keys(ports)) {
+      const p = parseInt(pid);
+      if (!cardsByPort.has(p)) {
+          const refs = createPortCard(p);
+          cardsByPort.set(p, refs);
+          root.appendChild(refs.card);
+      }
   }
 
-  if (root.dataset.emptyShown === "1") {
-    root.innerHTML = "";
-    root.dataset.emptyShown = "0";
-  }
+  for (const [pid, s] of Object.entries(ports)) {
+      const p = parseInt(pid);
+      const refs = cardsByPort.get(p);
+      if (!refs) continue;
 
-  ensureCardsForPorts(ports);
-
-  for (const p of ports) {
-    const s = portsObj[String(p)] || {};
-    const refs = cardsByPort.get(p);
-    if (!refs) continue;
-
-    const age = s.last_update_age_s ?? 0;
-    const badge = badgeForAge(age);
-    refs.badge.className = `badge ${badge.cls}`;
-    refs.badge.textContent = badge.text;
-
-    refs.tsEl.textContent = fmtTs(s.ts);
-
-    refs.hzEl.textContent = fmtHz(s.infer_hz);
-    refs.totalEl.textContent = String(s.infer_count_total ?? 0);
-
-    const dims = s.img_w && s.img_h ? `${s.img_w}×${s.img_h}` : "—";
-    refs.dimsEl.textContent = dims;
-
-    const ngBin = s.ng_key_bin || "—";
-    const mappedBin = s.mapped_key_bin || "—";
-    refs.ngBinEl.textContent = ngBin;
-    refs.mappedBinEl.textContent = mappedBin;
-
-    const ngPressed = s.ng_pressed_buttons || [];
-    const mappedPressed = s.mapped_pressed_buttons || [];
-
-    setControllerPressed(refs.ngController, ngPressed);
-    setControllerPressed(refs.mappedController, mappedPressed);
-
-    // Next actions buffer (fixed width grid)
-    renderNextBufferTimeline(refs.nextTimelineEl, s.next_actions || []);
-
-    // History (fixed width grid)
-    renderHistoryTimeline(refs.histTimelineEl, s.history || []);
-
-    refs.ngHintEl.style.display = (ngBin === "—") ? "block" : "none";
+      refs.hzEl.textContent = fmtHz(s.infer_hz);
+      setControllerPressed(refs.mappedController, s.mapped_pressed_buttons || []);
+      renderTimeline(refs.nextTimelineEl, s.next_actions || []);
+      updateGameState(refs, s);
+      
+      const age = (Date.now()/1000) - s.ts;
+      refs.badge.className = age < 2 ? "badge ok" : "badge warn";
+      refs.badge.textContent = age < 2 ? "LIVE" : "LAG";
   }
 }
 
 async function tick() {
   try {
-    const r = await fetch(`/api/state?t=${Date.now()}`, { cache: "no-store" });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const payload = await r.json();
-    updateFromPayload(payload);
-    document.getElementById("status").textContent = "OK";
-  } catch (e) {
-    document.getElementById("status").textContent = `Error fetching state`;
-    console.error(e);
-  }
+    const r = await fetch(`/api/state?t=${Date.now()}`);
+    const data = await r.json();
+    updateFromPayload(data);
+  } catch(e) { console.error(e); }
 }
-
 setInterval(tick, 100);
-tick();
+// ── End: selfplay_debug_ui/static/app.js ──
