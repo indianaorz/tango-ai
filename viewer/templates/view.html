@@ -8,10 +8,10 @@
         a { color: #888; text-decoration: none; align-self: flex-start; margin-bottom: 20px; font-size: 14px; }
         a:hover { color: #fff; text-decoration: underline; }
         .container { display: flex; gap: 20px; align-items: flex-start; justify-content: center; width: 100%; max-width: 1400px; }
-        
+
         /* VIDEO */
         video { border: 2px solid #444; border-radius: 4px; box-shadow: 0 0 20px rgba(0,0,0,0.5); background: #000; image-rendering: pixelated; width: 100%; max-width: 720px; }
-        
+
         .sidebar { display: flex; flex-direction: column; gap: 15px; width: 340px; flex-shrink: 0; }
         .extra-sidebar { display: flex; flex-direction: column; gap: 15px; width: 220px; flex-shrink: 0; }
 
@@ -37,7 +37,7 @@
         /* PANELS */
         .panel { background: #222; border: 1px solid #444; border-radius: 8px; padding: 10px; width: 100%; box-sizing: border-box; }
         .panel h4 { margin: 0 0 10px 0; font-size: 11px; color: #888; text-align: center; text-transform: uppercase; border-bottom: 1px solid #333; padding-bottom: 3px; }
-        
+
         /* DATA TABLE STYLE */
         .data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
         .data-table th { text-align: left; color: #666; padding-bottom: 4px; font-weight: normal; border-bottom: 1px solid #333; }
@@ -53,32 +53,32 @@
         .cell-p2 { background: rgba(255, 77, 77, 0.3); border: 1px solid #ff4d4d; }
         .broken { border: 1px dashed #555 !important; background: #111 !important; }
 
-        /* HAND & QUEUE (UPDATED) */
+        /* HAND & QUEUE */
         .hand-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
         .queue-list { display: flex; gap: 5px; justify-content: center; flex-wrap: wrap; }
 
-        .chip-slot { 
-            background: #222; border: 1px solid #444; 
+        .chip-slot {
+            background: #222; border: 1px solid #444;
             height: 45px; width: 100%;
-            display: flex; flex-direction: column; 
-            align-items: center; justify-content: flex-end; 
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: flex-end;
             border-radius: 4px; position: relative; overflow: hidden;
             box-sizing: border-box;
         }
 
-        .queue-slot-wrap { width: 35px; height: 45px; } 
-        
+        .queue-slot-wrap { width: 35px; height: 45px; }
+
         .chip-img {
             width: 100%; height: 100%;
-            object-fit: contain; 
+            object-fit: contain;
             position: absolute; top: 0; left: 0; z-index: 0;
         }
 
-        .chip-code { 
+        .chip-code {
             font-size: 9px; color: #fff; font-weight: bold;
             background: rgba(0,0,0,0.7);
             width: 100%; text-align: center;
-            padding: 1px 0; z-index: 1; position: relative; 
+            padding: 1px 0; z-index: 1; position: relative;
         }
 
         .chip-fallback-id { font-size: 10px; font-weight: bold; color: #555; z-index: 1; margin-bottom: 12px; }
@@ -86,7 +86,7 @@
         /* FOLDER */
         .folder-list { height: 400px; overflow-y: auto; font-size: 11px; color: #aaa; }
         .folder-item { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid #333; }
-        
+
         .meta-row { display: flex; justify-content: space-between; font-size: 11px; color: #aaa; margin-bottom: 10px; }
 
         /* TIMELINE */
@@ -94,12 +94,21 @@
         .tl-label { font-size: 9px; color: #888; text-align: right; padding-right: 5px; text-transform: uppercase; }
         .tl-cell { width: 100%; height: 8px; background: #222; border: 1px solid #333; border-radius: 1px; }
         .tl-cell.active { background: #00ff00; box-shadow: 0 0 5px rgba(0, 255, 0, 0.5); border-color: #00cc00; }
+
+        /* SPEED CONTROL */
+        .speed-row {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 10px; width: 100%;
+        }
+        .speed-row label { font-size: 11px; color: #aaa; white-space: nowrap; }
+        .speed-row input[type="range"] { width: 100%; }
+        .speed-val { font-size: 11px; color: #fff; min-width: 46px; text-align: right; }
     </style>
 </head>
 <body>
     <a href="/">&larr; Back to List</a>
     <h2>{{ replay_name }}</h2>
-    
+
     <div class="container">
         <div class="extra-sidebar">
             <div class="panel">
@@ -113,8 +122,19 @@
         </div>
 
         <div style="flex-grow: 1; display:flex; flex-direction:column; align-items:center; gap: 10px;">
-            <video id="vid" controls><source src="/video/{{ replay_name }}" type="video/mp4"></video>
-            
+            <video id="vid" controls>
+                <source src="/video/{{ replay_name }}" type="video/mp4">
+            </video>
+
+            <div class="panel" style="width: 100%; max-width: 720px;">
+                <h4>Playback</h4>
+                <div class="speed-row">
+                    <label for="speed">Speed</label>
+                    <input id="speed" type="range" min="0.10" max="1.00" step="0.05" value="1.00">
+                    <span id="speed-val" class="speed-val">1.00×</span>
+                </div>
+            </div>
+
             <div class="panel" style="width: 100%; max-width: 720px;">
                 <h4>Input Horizon (18f)</h4>
                 <div id="timeline-grid" class="timeline-container"></div>
@@ -191,8 +211,7 @@
 
             <div class="panel">
                 <h4>Selected Queue</h4>
-                <div id="queue" class="queue-list">
-                    </div>
+                <div id="queue" class="queue-list"></div>
             </div>
 
             <div class="panel">
@@ -211,10 +230,10 @@
         const vid = document.getElementById('vid');
         let actions = [];
         let CHIP_LIB = {};
-        const FPS = 60;
+
         const KEYS = {'DPAD_UP':'btn-UP', 'DPAD_DOWN':'btn-DOWN', 'DPAD_LEFT':'btn-LEFT', 'DPAD_RIGHT':'btn-RIGHT',
                       'EAST':'btn-A', 'SOUTH':'btn-B', 'LEFT_SHOULDER':'btn-L', 'RIGHT_SHOULDER':'btn-R', 'START':'btn-START', 'BACK':'btn-SELECT'};
-        
+
         const TIMELINE_KEYS = ['DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'EAST', 'SOUTH', 'LEFT_SHOULDER', 'RIGHT_SHOULDER', 'BACK', 'START'];
         const TIMELINE_LABELS = {
             'DPAD_UP': 'UP', 'DPAD_DOWN': 'DOWN', 'DPAD_LEFT': 'LEFT', 'DPAD_RIGHT': 'RIGHT',
@@ -222,6 +241,33 @@
         };
         const HORIZON = 18;
         const CODE_INDEXES = "ABCDEFGHIJKLMNOPQRSTUVWXYZ*";
+
+        // ---------------------------------------------------------------------
+        // Speed slider (0.10 -> 1.00)
+        // ---------------------------------------------------------------------
+        const speedEl = document.getElementById('speed');
+        const speedValEl = document.getElementById('speed-val');
+
+        function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+        function fmt2(x) { return (Math.round(x * 100) / 100).toFixed(2); }
+
+        function setPlaybackRate(rate) {
+            const r = clamp(Number(rate), 0.10, 1.00);
+            vid.playbackRate = r;
+            speedEl.value = fmt2(r);
+            speedValEl.textContent = `${fmt2(r)}×`;
+        }
+
+        speedEl.addEventListener('input', () => setPlaybackRate(speedEl.value));
+        vid.addEventListener('ratechange', () => {
+            // Keep UI consistent if something else changes playbackRate.
+            const r = clamp(vid.playbackRate, 0.10, 1.00);
+            speedEl.value = fmt2(r);
+            speedValEl.textContent = `${fmt2(r)}×`;
+        });
+
+        // default
+        setPlaybackRate(1.00);
 
         // ---------------------------------------------------------------------
         // Cross mapping (player_game_emotion / enemy_game_emotion)
@@ -242,9 +288,7 @@
         ];
 
         function gameEmotionToCrossName(v) {
-            // v can be undefined/null/string
             const id = Number.isFinite(Number(v)) ? Number(v) : 0;
-
             for (const row of CROSS_ROWS) {
                 if (id === row.normal) return row.type;
                 if (id === row.beast) return `${row.type} Beast`;
@@ -252,24 +296,25 @@
             return `Unknown(${id})`;
         }
 
-
+        // ---------------------------------------------------------------------
         // Init Elements
-        for(let i=0; i<18; i++) document.getElementById('grid').innerHTML += `<div class="grid-cell" id="c-${i}"></div>`;
-        
+        // ---------------------------------------------------------------------
+        for (let i = 0; i < 18; i++) document.getElementById('grid').innerHTML += `<div class="grid-cell" id="c-${i}"></div>`;
+
         // Init Hand Slots
         const handEl = document.getElementById('hand');
         handEl.innerHTML = '';
-        for(let i=0; i<10; i++) {
+        for (let i = 0; i < 10; i++) {
             handEl.innerHTML += `<div class="chip-slot" id="h-${i}"></div>`;
         }
 
         // Init Queue Slots
         const queueEl = document.getElementById('queue');
         queueEl.innerHTML = '';
-        for(let i=0; i<5; i++) {
+        for (let i = 0; i < 5; i++) {
             queueEl.innerHTML += `<div class="queue-slot-wrap"><div class="chip-slot" id="q-${i}"></div></div>`;
         }
-        
+
         // Init Timeline
         const tlGrid = document.getElementById('timeline-grid');
         TIMELINE_KEYS.forEach(key => {
@@ -277,24 +322,92 @@
             lbl.className = 'tl-label';
             lbl.innerText = TIMELINE_LABELS[key];
             tlGrid.appendChild(lbl);
-            for(let t=0; t<HORIZON; t++) {
+            for (let t = 0; t < HORIZON; t++) {
                 const cell = document.createElement('div');
                 cell.className = 'tl-cell';
-                cell.id = `tl-${key}-${t}`; 
+                cell.id = `tl-${key}-${t}`;
                 tlGrid.appendChild(cell);
             }
         });
 
+        // ---------------------------------------------------------------------
+        // Video sync (NO FPS ASSUMPTIONS)
+        // actions.jsonl lines == encoded video frames => drift-free mapping.
+        // ---------------------------------------------------------------------
+        let _videoSyncStarted = false;
+
+        function _clamp01(x) {
+            if (!Number.isFinite(x)) return 0;
+            return Math.max(0, Math.min(1, x));
+        }
+
+        function _idxFromMediaTime(mediaTime) {
+            if (!actions.length) return 0;
+            const dur = vid.duration;
+            if (!Number.isFinite(dur) || dur <= 0) return 0;
+
+            const frac = _clamp01(mediaTime / dur);
+            let idx = Math.round(frac * (actions.length - 1));
+            if (idx < 0) idx = 0;
+            if (idx >= actions.length) idx = actions.length - 1;
+            return idx;
+        }
+
+        function _renderFromVideoTime() {
+            if (!actions.length) return;
+            const idx = _idxFromMediaTime(vid.currentTime);
+            render(actions[idx], idx);
+        }
+
+        function startVideoSync() {
+            if (_videoSyncStarted) return;
+            _videoSyncStarted = true;
+
+            // Render on seek/scrub immediately (even if paused).
+            vid.addEventListener('seeked', _renderFromVideoTime);
+
+            // Ensure we render once metadata is ready.
+            if (vid.readyState >= 1) {
+                _renderFromVideoTime();
+            } else {
+                vid.addEventListener('loadedmetadata', _renderFromVideoTime, { once: true });
+            }
+
+            // Best sync: render on the *presented* video frame callback.
+            if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+                const cb = (_now, meta) => {
+                    if (actions.length) {
+                        const idx = _idxFromMediaTime(meta.mediaTime);
+                        render(actions[idx], idx);
+                    }
+                    vid.requestVideoFrameCallback(cb);
+                };
+                vid.requestVideoFrameCallback(cb);
+            } else {
+                // Fallback: RAF with normalized mapping (still drift-free).
+                const raf = () => {
+                    if (actions.length) {
+                        _renderFromVideoTime();
+                    }
+                    requestAnimationFrame(raf);
+                };
+                requestAnimationFrame(raf);
+            }
+        }
+
+        // ---------------------------------------------------------------------
         // Load Chip Library then Data
-        fetch('/api/chip_library').then(r=>r.json()).then(lib => {
+        // ---------------------------------------------------------------------
+        fetch('/api/chip_library').then(r => r.json()).then(lib => {
             CHIP_LIB = lib;
-            // Now load replay data
             return fetch('/inputs/{{ replay_name }}');
-        }).then(r=>r.json()).then(data => {
+        }).then(r => r.json()).then(data => {
             actions = data.frames || [];
             const staticData = data.static || {};
             renderStatic(staticData);
-            requestAnimationFrame(loop);
+
+            if (actions.length) render(actions[0], 0);
+            startVideoSync();
         });
 
         function resolveChip(id, rawCode) {
@@ -304,7 +417,7 @@
             const charCode = CODE_INDEXES[codeIdx] || "?";
             const key = (isMid ? "M" : "S") + id;
             const data = CHIP_LIB[key];
-            return { 
+            return {
                 img: data && data.Image ? `/assets/images/${data.Image}` : null,
                 name: data ? data.Name : `ID:${id}`,
                 code: charCode,
@@ -318,26 +431,13 @@
                 let html = "";
                 s.player_folder_ids.forEach((id, idx) => {
                     const code = s.player_folder_codes ? s.player_folder_codes[idx] : "?";
-                    html += `<div class="folder-item"><span>${idx+1}. ID:${id}</span><span>Code:${code}</span></div>`;
+                    html += `<div class="folder-item"><span>${idx + 1}. ID:${id}</span><span>Code:${code}</span></div>`;
                 });
                 folderEl.innerHTML = html;
-            } else { folderEl.innerHTML = "No Static Data"; }
-            if(s && s.player_navi_cust) document.getElementById('p-navi').innerText = JSON.stringify(s.player_navi_cust);
-        }
-
-        function loop() {
-            // Strict sync: recalculate index every frame from video time
-            if (actions.length) {
-                // Use vid.currentTime (seconds) * 60 to get exact frame
-                let idx = Math.floor(vid.currentTime * FPS);
-                
-                // Clamp and check safety
-                if (idx < 0) idx = 0;
-                if (idx >= actions.length) idx = actions.length - 1;
-
-                render(actions[idx], idx);
+            } else {
+                folderEl.innerHTML = "No Static Data";
             }
-            requestAnimationFrame(loop);
+            if (s && s.player_navi_cust) document.getElementById('p-navi').innerText = JSON.stringify(s.player_navi_cust);
         }
 
         function renderChipSlot(el, chipInfo, opacity) {
@@ -350,7 +450,7 @@
             el.style.opacity = opacity;
             el.style.border = "1px solid #555";
             el.title = chipInfo.name;
-            
+
             let html = "";
             if (chipInfo.img) {
                 html += `<img src="${chipInfo.img}" class="chip-img">`;
@@ -363,16 +463,16 @@
 
         function render(d, idx) {
             document.getElementById('frame').innerText = d.frame_idx;
-            
+
             // Controller
             document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
-            for(let k in KEYS) {
+            for (let k in KEYS) {
                 const v = d[k];
-                if((Array.isArray(v) ? v[0] : v) > 0.5) document.getElementById(KEYS[k]).classList.add('active');
+                if ((Array.isArray(v) ? v[0] : v) > 0.5) document.getElementById(KEYS[k]).classList.add('active');
             }
 
-            // Timeline
-            for(let t=0; t<HORIZON; t++) {
+            // Timeline (next 18 encoded frames)
+            for (let t = 0; t < HORIZON; t++) {
                 const futureFrame = actions[idx + t];
                 TIMELINE_KEYS.forEach(k => {
                     const cell = document.getElementById(`tl-${k}-${t}`);
@@ -394,57 +494,56 @@
             document.getElementById('e-chip').innerText = d.enemy_chip || "-";
             document.getElementById('p-emo').innerText = d.player_emotion || 0;
             document.getElementById('e-emo').innerText = d.enemy_emotion || 0;
+
             const pGameEmo = (d.player_game_emotion ?? 0);
             const eGameEmo = (d.enemy_game_emotion ?? 0);
 
             const pCross = gameEmotionToCrossName(pGameEmo);
             const eCross = gameEmotionToCrossName(eGameEmo);
 
-            // Show readable cross + preserve numeric for debugging.
             const pEl = document.getElementById('p-game-emo');
             const eEl = document.getElementById('e-game-emo');
 
             pEl.innerText = `${pCross} (${pGameEmo})`;
             eEl.innerText = `${eCross} (${eGameEmo})`;
 
-            // Optional: tooltip keeps it nice if you want to visually shorten later.
             pEl.title = `player_game_emotion = ${pGameEmo}`;
             eEl.title = `enemy_game_emotion = ${eGameEmo}`;
 
             document.getElementById('p-chg').innerText = d.player_charge || 0;
             document.getElementById('e-chg').innerText = d.enemy_charge || 0;
-            if(d.player_pos) document.getElementById('p-pos').innerText = `[${d.player_pos}]`;
-            if(d.enemy_pos) document.getElementById('e-pos').innerText = `[${d.enemy_pos}]`;
+            if (d.player_pos) document.getElementById('p-pos').innerText = `[${d.player_pos}]`;
+            if (d.enemy_pos) document.getElementById('e-pos').innerText = `[${d.enemy_pos}]`;
 
             // Menu/Counters
             const w = document.getElementById('win-state');
-            if(d.inside_window) { w.innerText = "[MENU OPEN]"; w.style.color = "#ffff00"; }
+            if (d.inside_window) { w.innerText = "[MENU OPEN]"; w.style.color = "#ffff00"; }
             else { w.innerText = "[BATTLE]"; w.style.color = "#444"; }
             document.getElementById('cust').innerText = d.cust_gauge || 0;
             document.getElementById('menu-idx').innerText = d.selected_menu_index || 0;
             document.getElementById('cross-idx').innerText = d.selected_cross_index || 0;
 
             // Grid
-            if(d.grid_state && d.grid_owner_state) {
-                for(let i=0; i<18; i++) {
+            if (d.grid_state && d.grid_owner_state) {
+                for (let i = 0; i < 18; i++) {
                     const c = document.getElementById(`c-${i}`);
                     c.className = 'grid-cell';
-                    if(d.grid_owner_state[i] === 0) c.classList.add('cell-p1');
-                    else if(d.grid_owner_state[i] === 1) c.classList.add('cell-p2');
-                    if(d.grid_state[i] === 2) c.classList.add('broken');
+                    if (d.grid_owner_state[i] === 0) c.classList.add('cell-p1');
+                    else if (d.grid_owner_state[i] === 1) c.classList.add('cell-p2');
+                    if (d.grid_state[i] === 2) c.classList.add('broken');
                     c.innerText = d.grid_state[i] !== 0 ? d.grid_state[i] : "";
                 }
             }
 
             // Hand (Visual)
-            if(d.chip_slots) {
-                for(let i=0; i<10; i++) {
+            if (d.chip_slots) {
+                for (let i = 0; i < 10; i++) {
                     const el = document.getElementById(`h-${i}`);
                     if (i < d.chip_slots.length) {
                         const id = d.chip_slots[i];
                         const code = d.chip_codes ? d.chip_codes[i] : 0;
                         const chipInfo = resolveChip(id, code);
-                        
+
                         let maxVis = d.chip_visible_count || 5;
                         const opacity = (i >= maxVis) ? 0.3 : 1.0;
                         renderChipSlot(el, chipInfo, opacity);
@@ -454,29 +553,25 @@
                 }
             }
 
-            // Queue (FIXED: STRICT Check against count)
-            if(d.selected_chip_indices) {
+            // Queue (STRICT check against count)
+            if (d.selected_chip_indices) {
                 let count = d.chip_select_count || 0;
-                
-                for(let i=0; i<5; i++) {
+
+                for (let i = 0; i < 5; i++) {
                     const el = document.getElementById(`q-${i}`);
-                    
-                    // ONLY render if i < count
+
                     if (i < count) {
-                        const handIdx = d.selected_chip_indices[i]; // Index into hand 0-9
-                        
+                        const handIdx = d.selected_chip_indices[i];
+
                         if (handIdx !== 255 && handIdx !== undefined && d.chip_slots && handIdx < d.chip_slots.length) {
                             const id = d.chip_slots[handIdx];
                             const code = d.chip_codes ? d.chip_codes[handIdx] : 0;
                             const chipInfo = resolveChip(id, code);
-                            
-                            // Queue items always fully visible
                             renderChipSlot(el, chipInfo, 1.0);
                         } else {
                             renderChipSlot(el, null, 0.2);
                         }
                     } else {
-                        // Strictly empty
                         renderChipSlot(el, null, 0.2);
                     }
                 }

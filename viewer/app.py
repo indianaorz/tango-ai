@@ -7,13 +7,21 @@ import json
 import math
 import io
 import base64
+import subprocess
 from dataclasses import dataclass
+from functools import lru_cache
+from fractions import Fraction
+from pathlib import Path
 from typing import Any, Optional, Dict, List, Tuple
 
 import torch
 from PIL import Image
 from flask import Flask, render_template, send_from_directory, jsonify, request
 import torchvision.transforms.functional as TF
+
+from action_schema import get_button_tokens
+
+UI_BUTTONS = get_button_tokens()
 
 # -----------------------------------------------------------------------------
 # PATH SETUP
@@ -136,6 +144,111 @@ def _clamp_index(i: int, n: int) -> int:
 
 
 # -----------------------------------------------------------------------------
+# VIDEO METADATA (FPS) – authoritative for UI time<->frame mapping
+# -----------------------------------------------------------------------------
+def _find_video_path_for_replay(replay_name: str) -> Optional[str]:
+    folder = os.path.join(DATASET_DIR, replay_name)
+    candidates = ["video.mp4", "video.webm", "video.mkv", "video.mov"]
+    for name in candidates:
+        p = os.path.join(folder, name)
+        if os.path.exists(p):
+            return p
+
+    if os.path.isdir(folder):
+        for name in os.listdir(folder):
+            lower = name.lower()
+            if lower.endswith((".mp4", ".webm", ".mkv", ".mov")):
+                return os.path.join(folder, name)
+
+    return None
+
+
+@lru_cache(maxsize=4096)
+def _ffprobe_video_info(video_path: str) -> Dict[str, Any]:
+    """
+    Returns:
+      - fps: float
+      - duration: float|None
+      - nb_frames: int|None
+      - r_frame_rate: str|None
+      - avg_frame_rate: str|None
+
+    Never raises (falls back to fps=60.0).
+    """
+    s0: Dict[str, Any] = {}
+    try:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=r_frame_rate,avg_frame_rate,nb_frames,duration",
+            "-of",
+            "json",
+            video_path,
+        ]
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode("utf-8", errors="replace")
+        j = json.loads(out)
+        streams = j.get("streams") or []
+        s0 = streams[0] if streams else {}
+    except Exception:
+        s0 = {}
+
+    def _parse_float(x: Any) -> Optional[float]:
+        try:
+            if x is None:
+                return None
+            return float(x)
+        except Exception:
+            return None
+
+    def _parse_int(x: Any) -> Optional[int]:
+        try:
+            if x is None:
+                return None
+            return int(x)
+        except Exception:
+            return None
+
+    def _parse_rate(r: Any) -> Optional[float]:
+        if not r:
+            return None
+        try:
+            return float(Fraction(str(r)))
+        except Exception:
+            return None
+
+    duration = _parse_float(s0.get("duration"))
+    nb_frames = _parse_int(s0.get("nb_frames"))
+    r_rate = s0.get("r_frame_rate")
+    avg_rate = s0.get("avg_frame_rate")
+
+    fps: Optional[float] = None
+
+    # Prefer nb_frames/duration when present (often best for "almost VFR" encodes)
+    if duration and duration > 0 and nb_frames and nb_frames > 0:
+        fps = float(nb_frames) / float(duration)
+
+    # Fall back to explicit rate strings
+    if not fps or fps <= 0:
+        fps = _parse_rate(r_rate) or _parse_rate(avg_rate)
+
+    # Hard fallback
+    if not fps or fps <= 0:
+        fps = 60.0
+
+    return {
+        "fps": float(fps),
+        "duration": duration,
+        "nb_frames": nb_frames,
+        "r_frame_rate": str(r_rate) if r_rate is not None else None,
+        "avg_frame_rate": str(avg_rate) if avg_rate is not None else None,
+    }
+
+
+# -----------------------------------------------------------------------------
 # MASK LOADING (for cache inspector masking)
 # -----------------------------------------------------------------------------
 _CACHED_MASK_TENSOR: Optional[torch.Tensor] = None
@@ -168,6 +281,7 @@ class DualModelEngine:
 
         try:
             from ng_policy import NgNitroGenPolicy, load_ng_checkpoint  # type: ignore
+
             self.PolicyClass = NgNitroGenPolicy
             self.loader_func = load_ng_checkpoint
         except ImportError:
@@ -233,6 +347,46 @@ class DualModelEngine:
 
 
 engine = DualModelEngine()
+
+
+def _coerce_scalar_float(v: object, default: float = 0.0) -> float:
+    """
+    Accept values that may be scalars or 1-element lists (common in telemetry dumps).
+    Return a float, never raising.
+    """
+    try:
+        if isinstance(v, (list, tuple)):
+            if len(v) == 0:
+                return float(default)
+            v = v[0]
+        return float(v)  # type: ignore[arg-type]
+    except Exception:
+        return float(default)
+
+
+def _json_action_row_to_display(row: dict, ui_buttons: list[str]) -> dict:
+    """
+    Base dataset -> RL inspector row.
+
+    Contract:
+      - always include frame_idx (int, if present)
+      - buttons_raw uses the SAME token list the UI uses (GBA_UI_BUTTONS)
+    """
+    buttons: Dict[str, float] = {}
+    for k in ui_buttons:
+        buttons[k] = _coerce_scalar_float(row.get(k, 0.0), 0.0)
+
+    fi = row.get("frame_idx", None)
+    try:
+        fi_i = int(fi) if fi is not None else None
+    except Exception:
+        fi_i = None
+
+    out: Dict[str, Any] = {"buttons_raw": buttons}
+    if fi_i is not None:
+        out["frame_idx"] = fi_i
+    return out
+
 
 # -----------------------------------------------------------------------------
 # CHIP DATABASE
@@ -471,11 +625,9 @@ except ImportError as e:
     print(f"⚠️ Strategy modules not found: {e}")
 
 # =============================================================================
-# RL INSPECTOR CONSTANTS (MUST MATCH scripts/create_rl_dataset.py)
+# RL INSPECTOR CONSTANTS
 # =============================================================================
-RL_FPS = 60
-RL_PRE_EVENT_FRAMES = 18
-RL_LOOKAHEAD_FRAMES = 4 * RL_FPS  # 4.0 seconds
+RL_PRE_EVENT_FRAMES = 18  # horizon lead-in (for actions window sizing; event_frame is not used for video loop)
 
 
 def _parse_chip_id_from_label(label: str) -> Optional[int]:
@@ -488,6 +640,7 @@ def _parse_chip_id_from_label(label: str) -> Optional[int]:
         return int(label.split(":", 1)[1])
     except Exception:
         return None
+
 
 def _chip_id_to_name_image(chip_id: int) -> tuple[Optional[str], Optional[str]]:
     """
@@ -504,12 +657,8 @@ def _chip_id_to_name_image(chip_id: int) -> tuple[Optional[str], Optional[str]]:
     name = chip.get("Name")
     image_file = chip.get("Image")
     image_url = f"/assets/images/{image_file}" if image_file else None
-    return name, image_url  
+    return name, image_url
 
-def _clamp_index_safe(i: int, n: int) -> int:
-    if n <= 0:
-        return 0
-    return max(0, min(int(i), int(n) - 1))
 
 def _display_label(label: str) -> str:
     # nicer label in UI
@@ -522,24 +671,33 @@ def _display_label(label: str) -> str:
         return label.replace("CROSS:", "CROSS: ")
     return label
 
-def _event_time_window(evt: Dict[str, Any]) -> tuple[int, int, int, float, float]:
+
+def _event_frame_window(evt: Dict[str, Any]) -> tuple[int, int, int]:
     """
     Returns:
-      start_frame, event_frame, end_frame, start_ts, end_ts
+      start_frame, event_frame, end_frame
 
     Semantics:
-      - start is 18 frames before the press
-      - end is 4 seconds after the press
+      - video loops from start_frame..end_frame (inclusive)
+      - event_frame is metadata only (DO NOT drive the loop)
     """
-    event_frame = int(evt.get("event_frame", 0))
-    start_frame = int(evt.get("start_frame", max(0, event_frame - RL_PRE_EVENT_FRAMES)))
+    def _as_int(x: Any, default: int) -> int:
+        try:
+            return int(x)
+        except Exception:
+            return default
 
-    # IMPORTANT: stop 4s after the press
-    end_frame = int(evt.get("end_frame", event_frame + RL_LOOKAHEAD_FRAMES - 1))
+    event_frame = _as_int(evt.get("event_frame", 0), 0)
+    start_frame = _as_int(evt.get("start_frame", 0), 0)
+    end_frame = _as_int(evt.get("end_frame", start_frame), start_frame)
 
-    start_ts = float(start_frame) / float(RL_FPS)
-    end_ts = float(event_frame + RL_LOOKAHEAD_FRAMES) / float(RL_FPS)
-    return start_frame, event_frame, end_frame, start_ts, end_ts
+    if start_frame < 0:
+        start_frame = 0
+    if end_frame < start_frame:
+        end_frame = start_frame
+
+    return start_frame, event_frame, end_frame
+
 
 def _chip_info_for_numeric_id(chip_id: int) -> Optional[Dict[str, Any]]:
     """
@@ -568,59 +726,6 @@ def _chip_info_for_numeric_id(chip_id: int) -> Optional[Dict[str, Any]]:
     }
 
 
-def _decorate_event_label(e: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Returns extra fields for UI:
-      - display_label
-      - chip_name / chip_image_url (only for CHIP events)
-    """
-    label = str(e.get("label", ""))
-    chip_id = _parse_chip_id_from_label(label)
-    if chip_id is None:
-        return {"display_label": label, "chip_name": None, "chip_image_url": None}
-
-    info = _chip_info_for_numeric_id(chip_id)
-    if not info:
-        return {"display_label": label, "chip_name": f"ID:{chip_id}", "chip_image_url": None}
-
-    return {
-        "display_label": f"CHIP:{info['name']}",
-        "chip_name": info["name"],
-        "chip_image_url": info["image_url"],
-    }
-
-
-def _filter_events_with_indices(actor: str, kind: str, outcome: str, label: str):
-    """
-    Returns list of (idx, event) where idx is index in RL_EVENTS_CACHE
-    after applying filters.
-    """
-    out: List[Tuple[int, Dict[str, Any]]] = []
-
-    want_actor = actor if actor in ("player", "enemy") else None
-    want_kind = kind if kind in ("chip", "charge") else None
-    want_outcome = outcome if outcome in ("good", "bad") else None
-    want_label = label if isinstance(label, str) and label else None
-
-    for idx, e in enumerate(RL_EVENTS_CACHE):
-        try:
-            if want_actor and e.get("actor") != want_actor:
-                continue
-            if want_kind and e.get("kind") != want_kind:
-                continue
-            if want_outcome and e.get("outcome") != want_outcome:
-                continue
-            if want_label and e.get("label") != want_label:
-                continue
-            out.append((idx, e))
-        except Exception:
-            continue
-
-    return out
-
-# =============================================================================
-# RL FILTERS (for /api/rl_list and /api/rl_groups)
-# =============================================================================
 def _filter_events(actor: str, kind: str, outcome: str, label: str) -> list[Dict[str, Any]]:
     data = RL_EVENTS_CACHE
 
@@ -635,65 +740,152 @@ def _filter_events(actor: str, kind: str, outcome: str, label: str) -> list[Dict
 
     return data
 
-def _load_actions_sequence_for_event(replay_name: str, *, event_frame: int, horizon: int = 18) -> tuple[list, str]:
+
+# -----------------------------------------------------------------------------
+# RL ACTIONS LOADING (actions.jsonl indexed by frame_idx)
+# -----------------------------------------------------------------------------
+def _btn_scalar(v: Any) -> float:
     """
-    Load ground-truth controller states for [event_frame .. event_frame+horizon-1].
-    Prefers PT cache if available, else falls back to actions.jsonl.
-    Returns (actions_display_list, source_type)
+    Base dataset values can be:
+      - number (0/1/float)
+      - list like [0.0]
+      - missing / None
+    Return a clean float.
     """
-    # --- Prefer cache .pt if present ---
-    pt_path, _ = find_cache_info(f"{replay_name}.pt")
-    if pt_path:
-        try:
-            data = torch.load(pt_path, map_location="cpu")
-            acts = data.get("actions")
-            if acts is None:
-                raise RuntimeError("PT missing 'actions'")
+    if v is None:
+        return 0.0
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, list) and v:
+        x = v[0]
+        return float(x) if isinstance(x, (int, float)) else 0.0
+    return 0.0
 
-            seq = []
-            if acts.ndim == 3:
-                # baked: acts[frame] is [T,dim]
-                if 0 <= event_frame < acts.shape[0]:
-                    baked = acts[event_frame]
-                    limit = min(horizon, baked.shape[0])
-                    for t in range(limit):
-                        seq.append(_policy_vec_to_display(baked[t].tolist(), old_layout=False))
-            else:
-                # legacy: acts[frame] is [dim]
-                n = int(acts.shape[0])
-                for t in range(horizon):
-                    idx = min(event_frame + t, n - 1)
-                    seq.append(_policy_vec_to_display(acts[idx].tolist(), old_layout=False))
 
-            return seq, "pt"
-        except Exception as e:
-            print(f"⚠️ RL: PT actions load failed for {replay_name}: {e}")
+def _load_actions_by_frame_idx(actions_jsonl_path: Path) -> Dict[int, Dict[str, Any]]:
+    """
+    Read base dataset actions.jsonl and index by row["frame_idx"].
+    This avoids any mismatch if lines are missing or duplicated.
+    """
+    by_frame: Dict[int, Dict[str, Any]] = {}
+    if not actions_jsonl_path.exists():
+        return by_frame
 
-    # --- Fallback: actions.jsonl ---
-    jsonl_path = os.path.join(DATASET_DIR, replay_name, "actions.jsonl")
-    if os.path.exists(jsonl_path):
-        try:
-            seq = []
-            with open(jsonl_path, "r") as f:
-                lines = f.readlines()
-            n = len(lines)
-            for t in range(horizon):
-                idx = min(event_frame + t, n - 1)
-                try:
-                    row = json.loads(lines[idx])
-                    seq.append(_json_action_to_display(row))
-                except Exception:
-                    seq.append(_json_action_to_display({}))
-            return seq, "jsonl"
-        except Exception as e:
-            print(f"⚠️ RL: JSONL actions load failed for {replay_name}: {e}")
+    with actions_jsonl_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict):
+                continue
+            fi = row.get("frame_idx")
+            if fi is None:
+                continue
+            try:
+                fi_i = int(fi)
+            except Exception:
+                continue
+            by_frame[fi_i] = row
 
-    return [], "none"
+    return by_frame
+
+
+def _window_actions(
+    *,
+    actions_by_frame: Dict[int, Dict[str, Any]],
+    ui_buttons: List[str],
+    start_frame: int,
+    end_frame: int,
+) -> List[Dict[str, Any]]:
+    """
+    Return a dense list for [start_frame..end_frame] inclusive.
+    Each entry contains:
+      - frame_idx
+      - buttons_raw: {token: float}
+    Missing frames become all-zeros.
+    """
+    out: List[Dict[str, Any]] = []
+    s = int(start_frame)
+    e = int(end_frame)
+    if e < s:
+        e = s
+
+    for fi in range(s, e + 1):
+        row = actions_by_frame.get(fi, {})
+        buttons = {k: _btn_scalar(row.get(k)) for k in ui_buttons}
+        out.append({"frame_idx": fi, "buttons_raw": buttons})
+
+    return out
+
+
+def _load_actions_sequence_for_event(
+    replay_name: str,
+    *,
+    event_frame: int,
+    horizon: int = 18,
+) -> tuple[list, str]:
+    """
+    RL inspector ground-truth MUST come from base actions.jsonl, indexed by row["frame_idx"].
+    """
+    jsonl_path = Path(DATASET_DIR) / replay_name / "actions.jsonl"
+    if not jsonl_path.exists():
+        return [], "none"
+
+    try:
+        actions_by_frame = _load_actions_by_frame_idx(jsonl_path)
+        seq: List[Dict[str, Any]] = []
+
+        s = int(max(0, event_frame))
+        for fi in range(s, s + int(max(0, horizon))):
+            row = actions_by_frame.get(fi, {})
+            seq.append(_json_action_row_to_display(row, list(GBA_UI_BUTTONS)))
+
+        return seq, "jsonl"
+    except Exception as e:
+        print(f"⚠️ RL: JSONL actions seq load failed for {replay_name}: {e}")
+        return [], "none"
+
+
+def _load_actions_window_for_replay(
+    replay_name: str,
+    *,
+    start_frame: int,
+    end_frame: int,
+    horizon: int = 18,
+) -> tuple[list, str]:
+    """
+    RL inspector window actions MUST come from base actions.jsonl, using frame_idx indexing.
+    Returns rows for [start_frame .. end_frame + horizon - 1] inclusive.
+    """
+    start_frame = int(max(0, start_frame))
+    end_frame = int(max(start_frame, end_frame))
+    tail_end = int(end_frame + max(0, int(horizon) - 1))
+
+    jsonl_path = Path(DATASET_DIR) / replay_name / "actions.jsonl"
+    if not jsonl_path.exists():
+        return [], "none"
+
+    try:
+        actions_by_frame = _load_actions_by_frame_idx(jsonl_path)
+        out = _window_actions(
+            actions_by_frame=actions_by_frame,
+            ui_buttons=list(GBA_UI_BUTTONS),
+            start_frame=start_frame,
+            end_frame=tail_end,
+        )
+        return out, "jsonl"
+    except Exception as e:
+        print(f"⚠️ RL: JSONL window actions load failed for {replay_name}: {e}")
+        return [], "none"
 
 
 def _load_image_for_event(replay_name: str, *, start_frame: int) -> tuple[Optional[str], str]:
     """
-    The "Model Input (start = event-18)" image should come from start_frame.
+    The "Model Input (start)" image should come from start_frame.
     Prefer cached PT frames; no JSONL fallback image.
     """
     pt_path, _ = find_cache_info(f"{replay_name}.pt")
@@ -717,7 +909,8 @@ def _load_image_for_event(replay_name: str, *, start_frame: int) -> tuple[Option
     except Exception as e:
         print(f"⚠️ RL: PT image load failed for {replay_name}: {e}")
         return None, "none"
-    
+
+
 # -----------------------------------------------------------------------------
 # ROUTES
 # -----------------------------------------------------------------------------
@@ -1054,14 +1247,15 @@ def view_rl_inspector():
         "good": len([x for x in RL_EVENTS_CACHE if x.get("outcome") == "good"]),
         "bad": len([x for x in RL_EVENTS_CACHE if x.get("outcome") == "bad"]),
     }
-    return render_template("rl_inspector.html", stats=stats, ui_buttons=GBA_UI_BUTTONS)
+
+    # RL inspector MUST use the same token list the base dataset uses.
+    rl_ui_buttons = list(GBA_UI_BUTTONS)
+    return render_template("rl_inspector.html", stats=stats, ui_buttons=rl_ui_buttons)
 
 
 # -----------------------------------------------------------------------------
-# RL API (fixed contract: list/detail use RL_EVENTS_CACHE indices)
+# RL API
 # -----------------------------------------------------------------------------
-
-
 @app.route("/api/rl_list")
 def api_rl_list():
     """
@@ -1073,11 +1267,8 @@ def api_rl_list():
     outcome = request.args.get("outcome", "all")
     label = request.args.get("label", "")
 
-    data = _filter_events(actor=actor, kind=kind, outcome=outcome, label=label)
-
-    out = []
+    out: List[Dict[str, Any]] = []
     for idx, e in enumerate(RL_EVENTS_CACHE):
-        # apply same filter but keep idx stable
         if actor in ("player", "enemy") and e.get("actor") != actor:
             continue
         if kind in ("chip", "charge") and e.get("kind") != kind:
@@ -1093,28 +1284,27 @@ def api_rl_list():
         if chip_id is not None:
             chip_name, chip_image_url = _chip_id_to_name_image(chip_id)
 
-        out.append({
-            "idx": idx,
-            "replay": e.get("replay", ""),
-            "weight": float(e.get("weight", 1.0)),
-            "start_frame": int(e.get("start_frame", 0)),
-            "event_frame": int(e.get("event_frame", 0)),
-            "end_frame": int(e.get("end_frame", 0)),
-            "actor": e.get("actor", ""),
-            "kind": e.get("kind", ""),
-            "outcome": e.get("outcome", ""),
-            "label": lbl,
-            "display_label": _display_label(lbl),
-            "chip_id": chip_id,
-            "chip_name": chip_name,
-            "chip_image_url": chip_image_url,
-        })
+        out.append(
+            {
+                "idx": idx,
+                "replay": e.get("replay", ""),
+                "weight": float(e.get("weight", 1.0)),
+                "start_frame": int(e.get("start_frame", 0)),
+                "event_frame": int(e.get("event_frame", 0)),
+                "end_frame": int(e.get("end_frame", 0)),
+                "actor": e.get("actor", ""),
+                "kind": e.get("kind", ""),
+                "outcome": e.get("outcome", ""),
+                "label": lbl,
+                "display_label": _display_label(lbl),
+                "chip_id": chip_id,
+                "chip_name": chip_name,
+                "chip_image_url": chip_image_url,
+            }
+        )
 
     # keep UI responsive
     return jsonify(out[:3000])
-
-
-
 
 
 @app.route("/api/rl_groups")
@@ -1157,16 +1347,16 @@ def api_rl_groups():
     return jsonify(out[:500])
 
 
-
 @app.route("/api/rl_detail/<int:idx>")
 def api_rl_detail(idx: int):
     """
     Detail view for ONE RL event (by RL_EVENTS_CACHE index).
-    Provides:
-      - start/event/end frames
-      - start/end timestamps for video looping
-      - image at start_frame (model input)
-      - action sequence starting at event_frame (so buttons correspond to the press moment)
+
+    Contract:
+      - video loops from start_frame..end_frame (inclusive)
+      - IGNORE event_frame for loop math (event_frame is metadata only)
+      - UI time->frame mapping uses the REAL video fps (ffprobe)
+      - window_actions covers [start_frame .. end_frame + 18 - 1]
     """
     if idx < 0 or idx >= len(RL_EVENTS_CACHE):
         return jsonify({"error": "Index out of bounds"}), 404
@@ -1174,13 +1364,50 @@ def api_rl_detail(idx: int):
     evt = RL_EVENTS_CACHE[idx]
     replay_name = str(evt.get("replay", ""))
 
-    start_frame, event_frame, end_frame, start_ts, end_ts = _event_time_window(evt)
+    start_frame, event_frame, end_frame = _event_frame_window(evt)
 
-    # image at start_frame (event-18)
+    # video info (authoritative fps for timeline mapping)
+    video_path = _find_video_path_for_replay(replay_name)
+    vinfo = _ffprobe_video_info(video_path) if video_path else {"fps": 60.0, "nb_frames": None, "duration": None}
+    video_fps = float(vinfo.get("fps") or 60.0)
+
+    # clamp frames against actual video length if known
+    nb_frames = vinfo.get("nb_frames")
+    if isinstance(nb_frames, int) and nb_frames > 0:
+        start_frame = min(start_frame, nb_frames - 1)
+        event_frame = min(event_frame, nb_frames - 1)
+        end_frame = min(end_frame, nb_frames - 1)
+        if end_frame < start_frame:
+            end_frame = start_frame
+
+    # loop timestamps (end is exclusive)
+    start_ts = float(start_frame) / video_fps
+    end_ts_excl = float(end_frame + 1) / video_fps
+
+    # also clamp timestamps to duration if known
+    dur = vinfo.get("duration")
+    if isinstance(dur, (int, float)) and float(dur) > 0:
+        d = float(dur)
+        start_ts = max(0.0, min(start_ts, d - 0.001))
+        end_ts_excl = max(start_ts + 0.001, min(end_ts_excl, d))
+
+    # image at start_frame
     image_b64, img_src_type = _load_image_for_event(replay_name, start_frame=start_frame)
 
-    # actions starting at event_frame
-    actions, act_src_type = _load_actions_sequence_for_event(replay_name, event_frame=event_frame, horizon=18)
+    # first 18 frames starting at start_frame
+    actions, act_src_type = _load_actions_sequence_for_event(
+        replay_name,
+        event_frame=start_frame,
+        horizon=18,
+    )
+
+    # window actions: [start .. end + 18 - 1]
+    window_actions, win_src_type = _load_actions_window_for_replay(
+        replay_name,
+        start_frame=start_frame,
+        end_frame=end_frame,
+        horizon=18,
+    )
 
     lbl = str(evt.get("label", ""))
     chip_id = _parse_chip_id_from_label(lbl)
@@ -1188,39 +1415,48 @@ def api_rl_detail(idx: int):
     if chip_id is not None:
         chip_name, chip_image_url = _chip_id_to_name_image(chip_id)
 
-    return jsonify({
-        "replay": replay_name,
-        "actor": evt.get("actor", ""),
-        "kind": evt.get("kind", ""),
-        "outcome": evt.get("outcome", ""),
-        "reason": evt.get("reason", ""),
-        "label": lbl,
-        "display_label": _display_label(lbl),
-        "weight": float(evt.get("weight", 1.0)),
-
-        "start_frame": int(start_frame),
-        "event_frame": int(event_frame),
-        "end_frame": int(end_frame),
-
-        # VIDEO LOOP CONTROL
-        "start_timestamp": float(start_ts),   # = start_frame / 60
-        "end_timestamp": float(end_ts),       # = (event_frame + 4s) / 60
-
-        # chip decoration
-        "chip_id": chip_id,
-        "chip_name": chip_name,
-        "chip_image_url": chip_image_url,
-
-        # damage stats carried through from rl_events.jsonl
-        "damage_dealt": int(evt.get("damage_dealt", 0)),
-        "damage_taken": int(evt.get("damage_taken", 0)),
-
-        # visuals
-        "image": image_b64,  # already data:image/png;base64,...
-        "actions": actions,
-
-        "source_type": act_src_type if act_src_type != "none" else img_src_type,
-    })
+    return jsonify(
+        {
+            "replay": replay_name,
+            "actor": evt.get("actor", ""),
+            "kind": evt.get("kind", ""),
+            "outcome": evt.get("outcome", ""),
+            "reason": evt.get("reason", ""),
+            "label": lbl,
+            "display_label": _display_label(lbl),
+            "weight": float(evt.get("weight", 1.0)),
+            "start_frame": int(start_frame),
+            "event_frame": int(event_frame),
+            "end_frame": int(end_frame),
+            # VIDEO LOOP CONTROL (authoritative: derived from real video fps)
+            "start_timestamp": start_ts,
+            "end_timestamp": end_ts_excl,
+            "fps": video_fps,
+            # Optional debug fields (handy if anything is still off)
+            "video_nb_frames": nb_frames,
+            "video_duration": dur,
+            "video_r_frame_rate": vinfo.get("r_frame_rate"),
+            "video_avg_frame_rate": vinfo.get("avg_frame_rate"),
+            # chip decoration
+            "chip_id": chip_id,
+            "chip_name": chip_name,
+            "chip_image_url": chip_image_url,
+            # damage stats carried through from rl_events.jsonl
+            "damage_dealt": int(evt.get("damage_dealt", 0)),
+            "damage_taken": int(evt.get("damage_taken", 0)),
+            # window actions stream
+            "window_base_frame": int(start_frame),
+            "window_actions": window_actions,
+            # visuals
+            "image": image_b64,
+            # initial render compatibility
+            "actions": actions,
+            # preserve your source typing
+            "source_type": (win_src_type if win_src_type != "none" else act_src_type)
+            if act_src_type != "none"
+            else img_src_type,
+        }
+    )
 
 
 # -----------------------------------------------------------------------------

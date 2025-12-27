@@ -2,739 +2,1024 @@
 <html>
 
 <head>
-    <title>RL Dataset Inspector</title>
-    <style>
-        body {
-            background: #0d0d0d;
-            color: #eee;
-            font-family: Consolas, monospace;
-            margin: 0;
-            display: flex;
-            height: 100vh;
-            overflow: hidden;
-        }
+  <title>RL Dataset Inspector</title>
+  <style>
+    body {
+      background: #0d0d0d;
+      color: #eee;
+      font-family: Consolas, monospace;
+      margin: 0;
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
 
-        .sidebar {
-            width: 360px;
-            background: #1a1a1a;
-            border-right: 1px solid #333;
-            display: flex;
-            flex-direction: column;
-            flex-shrink: 0;
-        }
+    .sidebar {
+      width: 360px;
+      background: #1a1a1a;
+      border-right: 1px solid #333;
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
 
-        .list-header {
-            padding: 15px;
-            background: #222;
-            border-bottom: 1px solid #333;
-        }
+    .list-header {
+      padding: 15px;
+      background: #222;
+      border-bottom: 1px solid #333;
+    }
 
-        .row {
-            display: flex;
-            gap: 8px;
-            margin-top: 8px;
-            flex-wrap: wrap;
-        }
+    .row {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+      flex-wrap: wrap;
+    }
 
-        .pill {
-            background: #333;
-            border: 1px solid #444;
-            color: #bbb;
-            cursor: pointer;
-            padding: 6px 8px;
-            font-size: 11px;
-            border-radius: 999px;
-        }
+    .pill {
+      background: #333;
+      border: 1px solid #444;
+      color: #bbb;
+      cursor: pointer;
+      padding: 6px 8px;
+      font-size: 11px;
+      border-radius: 999px;
+    }
 
-        .pill.active {
-            background: #4db8ff;
-            color: #000;
-            border-color: #4db8ff;
-        }
+    .pill.active {
+      background: #4db8ff;
+      color: #000;
+      border-color: #4db8ff;
+    }
 
-        select {
-            width: 100%;
-            background: #111;
-            border: 1px solid #444;
-            color: #ddd;
-            padding: 6px;
-            border-radius: 6px;
-            font-family: inherit;
-            font-size: 12px;
-            margin-top: 10px;
-        }
+    select {
+      width: 100%;
+      background: #111;
+      border: 1px solid #444;
+      color: #ddd;
+      padding: 6px;
+      border-radius: 6px;
+      font-family: inherit;
+      font-size: 12px;
+      margin-top: 10px;
+    }
 
-        .sample-list {
-            flex: 1;
-            overflow-y: auto;
-        }
+    .sample-list {
+      flex: 1;
+      overflow-y: auto;
+    }
 
-        .sample-item {
-            padding: 10px 12px;
-            border-bottom: 1px solid #222;
-            cursor: pointer;
-            display: flex;
-            justify-content: space-between;
-            gap: 10px;
-        }
+    .sample-item {
+      padding: 10px 12px;
+      border-bottom: 1px solid #222;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+    }
 
-        .sample-item:hover {
-            background: #2a2a2a;
-        }
+    .sample-item:hover {
+      background: #2a2a2a;
+    }
 
-        .sample-item.active {
-            background: #2c3e50;
-            border-left: 3px solid #4db8ff;
-        }
+    .sample-item.active {
+      background: #2c3e50;
+      border-left: 3px solid #4db8ff;
+    }
 
-        .w-badge {
-            font-weight: bold;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 11px;
-            width: 56px;
-            text-align: center;
-            flex-shrink: 0;
-        }
+    .w-badge {
+      font-weight: bold;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      width: 56px;
+      text-align: center;
+      flex-shrink: 0;
+    }
 
-        .w-good {
-            background: rgba(0, 255, 0, 0.18);
-            color: #00ff00;
-            border: 1px solid #005500;
-        }
+    .w-good {
+      background: rgba(0, 255, 0, 0.18);
+      color: #00ff00;
+      border: 1px solid #005500;
+    }
 
-        .w-bad {
-            background: rgba(255, 0, 0, 0.18);
-            color: #ff4444;
-            border: 1px solid #550000;
-        }
+    .w-bad {
+      background: rgba(255, 0, 0, 0.18);
+      color: #ff4444;
+      border: 1px solid #550000;
+    }
 
-        .stage {
-            flex: 1;
-            padding: 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-            overflow-y: auto;
-            align-items: center;
-        }
+    .stage {
+      flex: 1;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      overflow-y: auto;
+      align-items: center;
+    }
 
-        .visuals-row {
-            display: flex;
-            gap: 20px;
-            width: 100%;
-            max-width: 1200px;
-            height: 360px;
-        }
+    .visuals-row {
+      display: flex;
+      gap: 20px;
+      width: 100%;
+      max-width: 1200px;
+      height: 360px;
+    }
 
-        .view-box {
-            flex: 1;
-            background: #151515;
-            border: 1px solid #333;
-            border-radius: 8px;
-            padding: 10px;
-            display: flex;
-            flex-direction: column;
-            position: relative;
-        }
+    .view-box {
+      flex: 1;
+      background: #151515;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      overflow: hidden;
+    }
 
-        .view-header {
-            font-size: 12px;
-            color: #888;
-            text-transform: uppercase;
-            margin-bottom: 10px;
-            border-bottom: 1px solid #333;
-            padding-bottom: 5px;
-            display: flex;
-            justify-content: space-between;
-            gap: 12px;
-        }
+    .view-header {
+      font-size: 12px;
+      color: #888;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+      border-bottom: 1px solid #333;
+      padding-bottom: 5px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+    }
 
-        .model-view {
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-            image-rendering: pixelated;
-            background: #000;
-        }
+    .model-view {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      image-rendering: pixelated;
+      background: #000;
+    }
 
-        video {
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-            background: #000;
-        }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #000;
+    }
 
-        .weight-floater {
-            bottom: 10px;
-            right: 10px;
-            padding: 8px 12px;
-            min-width: 140px;
-            max-width: 260px;
-            opacity: 0.92;
-            pointer-events: none;
-            position: absolute;
-            background: rgba(0,0,0,0.35);
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 10px;
-            backdrop-filter: blur(4px);
-        }
+    .weight-floater {
+      bottom: 10px;
+      right: 10px;
+      padding: 8px 12px;
+      min-width: 140px;
+      max-width: 260px;
+      opacity: 0.92;
+      pointer-events: none;
+      position: absolute;
+      background: rgba(0, 0, 0, 0.35);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      backdrop-filter: blur(4px);
+    }
 
-        .big-stat {
-            font-size: 22px;
-        }
+    .big-stat {
+      font-size: 22px;
+    }
 
-        .stat-label {
-            font-size: 10px;
-            color: #aaa;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
+    .stat-label {
+      font-size: 10px;
+      color: #aaa;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
 
-        .meta-info {
-            font-size: 12px;
-            color: #666;
-            margin-top: 5px;
-            width: 100%;
-            max-width: 1200px;
-        }
+    .meta-info {
+      font-size: 12px;
+      color: #666;
+      margin-top: 0px;
+      width: 100%;
+      max-width: 1200px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
 
-        .controls-area {
-            display: flex;
-            gap: 40px;
-            margin-top: 10px;
-            width: 100%;
-            max-width: 1200px;
-        }
+    .meta-info span.k { color: #888; }
+    .meta-info span.v { color: #fff; }
 
-        .controller {
-            background: #e0e0e0;
-            width: 240px;
-            height: 140px;
-            border-radius: 15px 15px 30px 30px;
-            position: relative;
-            border: 2px solid #999;
-            margin: 0 auto;
-        }
+    .scrub-row {
+      width: 100%;
+      max-width: 1200px;
+      background: #141414;
+      border: 1px solid #2a2a2a;
+      border-radius: 10px;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
 
-        .btn {
-            position: absolute;
-            background: #555;
-            border: 1px solid #333;
-            transition: background 0.05s;
-        }
+    .scrub-line {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
 
-        .btn.active {
-            background: #00ff00 !important;
-            box-shadow: 0 0 10px #00ff00;
-        }
+    .scrub-line label {
+      font-size: 11px;
+      color: #aaa;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      width: 92px;
+    }
 
-        .dpad {
-            position: absolute;
-            top: 45px;
-            left: 20px;
-            width: 70px;
-            height: 70px;
-        }
+    .scrub-line input[type="range"] {
+      flex: 1;
+      min-width: 320px;
+      accent-color: #4db8ff;
+    }
 
-        .btn.up { top: 0; left: 23px; width: 24px; height: 24px; }
-        .btn.down { bottom: 0; left: 23px; width: 24px; height: 24px; }
-        .btn.left { top: 23px; left: 0; width: 24px; height: 24px; }
-        .btn.right { top: 23px; right: 0; width: 24px; height: 24px; }
+    .scrub-val {
+      font-size: 12px;
+      color: #ddd;
+      min-width: 160px;
+      text-align: right;
+    }
 
-        .btn.a {
-            top: 55px;
-            right: 15px;
-            width: 28px;
-            height: 28px;
-            border-radius: 50%;
-            background: #a00;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            font-size: 10px;
-            color: rgba(255, 255, 255, 0.5);
-        }
+    .controls-area {
+      display: flex;
+      gap: 40px;
+      margin-top: 0px;
+      width: 100%;
+      max-width: 1200px;
+      align-items: flex-start;
+    }
 
-        .btn.b {
-            top: 70px;
-            right: 50px;
-            width: 28px;
-            height: 28px;
-            border-radius: 50%;
-            background: #a00;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            font-size: 10px;
-            color: rgba(255, 255, 255, 0.5);
-        }
+    .controller {
+      background: #e0e0e0;
+      width: 240px;
+      height: 140px;
+      border-radius: 15px 15px 30px 30px;
+      position: relative;
+      border: 2px solid #999;
+      margin: 0 auto;
+    }
 
-        .btn.l {
-            top: -8px;
-            left: 10px;
-            width: 60px;
-            height: 15px;
-            border-radius: 5px 5px 0 0;
-            background: #ccc;
-            z-index: -1;
-        }
+    .btn {
+      position: absolute;
+      background: #555;
+      border: 1px solid #333;
+      transition: background 0.05s;
+    }
 
-        .btn.r {
-            top: -8px;
-            right: 10px;
-            width: 60px;
-            height: 15px;
-            border-radius: 5px 5px 0 0;
-            background: #ccc;
-            z-index: -1;
-        }
+    .btn.active {
+      background: #00ff00 !important;
+      box-shadow: 0 0 10px #00ff00;
+    }
 
-        .btn.start {
-            bottom: 15px;
-            left: 100px;
-            width: 25px;
-            height: 8px;
-            transform: rotate(-25deg);
-            background: #999;
-        }
+    .dpad {
+      position: absolute;
+      top: 45px;
+      left: 20px;
+      width: 70px;
+      height: 70px;
+    }
 
-        .btn.select {
-            bottom: 15px;
-            left: 70px;
-            width: 25px;
-            height: 8px;
-            transform: rotate(-25deg);
-            background: #999;
-        }
+    .btn.up { top: 0; left: 23px; width: 24px; height: 24px; }
+    .btn.down { bottom: 0; left: 23px; width: 24px; height: 24px; }
+    .btn.left { top: 23px; left: 0; width: 24px; height: 24px; }
+    .btn.right { top: 23px; right: 0; width: 24px; height: 24px; }
 
-        .timeline-wrap { flex: 1; }
+    .btn.a {
+      top: 55px;
+      right: 15px;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: #a00;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      font-size: 10px;
+      color: rgba(255, 255, 255, 0.5);
+    }
 
-        .timeline {
-            display: grid;
-            grid-template-columns: 60px repeat(18, 1fr);
-            gap: 2px;
-            align-items: center;
-        }
+    .btn.b {
+      top: 70px;
+      right: 50px;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: #a00;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      font-size: 10px;
+      color: rgba(255, 255, 255, 0.5);
+    }
 
-        .lane-label {
-            font-size: 10px;
-            color: #aaa;
-            text-align: right;
-            padding-right: 6px;
-        }
+    .btn.l {
+      top: -8px;
+      left: 10px;
+      width: 60px;
+      height: 15px;
+      border-radius: 5px 5px 0 0;
+      background: #ccc;
+      z-index: -1;
+    }
 
-        .cell {
-            width: 100%;
-            height: 10px;
-            background: #222;
-            border: 1px solid #333;
-            border-radius: 2px;
-        }
+    .btn.r {
+      top: -8px;
+      right: 10px;
+      width: 60px;
+      height: 15px;
+      border-radius: 5px 5px 0 0;
+      background: #ccc;
+      z-index: -1;
+    }
 
-        .cell.active {
-            background: #00ff00;
-            box-shadow: 0 0 4px rgba(0, 255, 0, 0.5);
-            border-color: #00cc00;
-        }
+    .btn.start {
+      bottom: 15px;
+      left: 100px;
+      width: 25px;
+      height: 8px;
+      transform: rotate(-25deg);
+      background: #999;
+    }
 
-        /* chip header bits */
-        .chip-head {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-        }
-        .chip-img {
-            width: 28px;
-            height: 28px;
-            object-fit: contain;
-            image-rendering: pixelated;
-            background: #000;
-            border: 1px solid #333;
-            border-radius: 6px;
-        }
-        .chip-title {
-            font-size: 11px;
-            color: #fff;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            max-width: 190px;
-        }
-        .chip-sub {
-            font-size: 10px;
-            color: #888;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            max-width: 190px;
-        }
-    </style>
+    .btn.select {
+      bottom: 15px;
+      left: 70px;
+      width: 25px;
+      height: 8px;
+      transform: rotate(-25deg);
+      background: #999;
+    }
+
+    .timeline-wrap {
+      flex: 1;
+      min-width: 520px;
+    }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: 60px repeat(18, 1fr);
+      gap: 2px;
+      align-items: center;
+      user-select: none;
+    }
+
+    .lane-label {
+      font-size: 10px;
+      color: #aaa;
+      text-align: right;
+      padding-right: 6px;
+    }
+
+    .cell {
+      width: 100%;
+      height: 10px;
+      background: #222;
+      border: 1px solid #333;
+      border-radius: 2px;
+    }
+
+    .cell.active {
+      background: #00ff00;
+      box-shadow: 0 0 4px rgba(0, 255, 0, 0.5);
+      border-color: #00cc00;
+    }
+
+    .chip-head {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .chip-img {
+      width: 28px;
+      height: 28px;
+      object-fit: contain;
+      image-rendering: pixelated;
+      background: #000;
+      border: 1px solid #333;
+      border-radius: 6px;
+    }
+
+    .chip-title {
+      font-size: 11px;
+      color: #fff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 190px;
+    }
+
+    .chip-sub {
+      font-size: 10px;
+      color: #888;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 190px;
+    }
+
+    .hint {
+      font-size: 11px;
+      color: #666;
+      margin-top: 6px;
+      line-height: 1.25;
+    }
+  </style>
 </head>
 
 <body>
+  <div class="sidebar">
+    <div class="list-header">
+      <h3 style="margin:0">RL Events</h3>
+      <div style="font-size:11px; color:#666; margin-top:6px;">
+        Total: {{ stats.total }}<br>
+        <span style="color:#00ff00">Good: {{ stats.good }}</span> |
+        <span style="color:#ff4d4d">Bad: {{ stats.bad }}</span>
+      </div>
 
-    <div class="sidebar">
-        <div class="list-header">
-            <h3 style="margin:0">RL Events</h3>
-            <div style="font-size:11px; color:#666; margin-top:6px;">
-                Total: {{ stats.total }}<br>
-                <span style="color:#00ff00">Good: {{ stats.good }}</span> |
-                <span style="color:#ff4d4d">Bad: {{ stats.bad }}</span>
-            </div>
+      <div class="row">
+        <div class="pill active" id="actor-player" onclick="setActor('player')">PLAYER</div>
+        <div class="pill" id="actor-enemy" onclick="setActor('enemy')">ENEMY</div>
+      </div>
 
-            <div class="row">
-                <div class="pill active" id="actor-player" onclick="setActor('player')">PLAYER</div>
-                <div class="pill" id="actor-enemy" onclick="setActor('enemy')">ENEMY</div>
-            </div>
+      <div class="row">
+        <div class="pill active" id="kind-chip" onclick="setKind('chip')">CHIP</div>
+        <div class="pill" id="kind-charge" onclick="setKind('charge')">CHARGE</div>
+      </div>
 
-            <div class="row">
-                <div class="pill active" id="kind-chip" onclick="setKind('chip')">CHIP</div>
-                <div class="pill" id="kind-charge" onclick="setKind('charge')">CHARGE</div>
-            </div>
+      <div class="row">
+        <div class="pill active" id="outcome-all" onclick="setOutcome('all')">ALL</div>
+        <div class="pill" id="outcome-good" onclick="setOutcome('good')">GOOD</div>
+        <div class="pill" id="outcome-bad" onclick="setOutcome('bad')">BAD</div>
+      </div>
 
-            <div class="row">
-                <div class="pill active" id="outcome-all" onclick="setOutcome('all')">ALL</div>
-                <div class="pill" id="outcome-good" onclick="setOutcome('good')">GOOD</div>
-                <div class="pill" id="outcome-bad" onclick="setOutcome('bad')">BAD</div>
-            </div>
+      <select id="labelSelect" onchange="setLabel(this.value)">
+        <option value="">Loading labels...</option>
+      </select>
 
-            <select id="labelSelect" onchange="setLabel(this.value)">
-                <option value="">Loading labels...</option>
-            </select>
-        </div>
-
-        <div class="sample-list" id="sampleList"></div>
+      <div class="hint">
+        Contract: t=0 is <b>start_frame</b> (event-18). Video loops <b>start..end</b>.
+        Controller + timeline come from <b>window_actions</b> for <b>start..end+18</b>.
+      </div>
     </div>
 
-    <div class="stage">
-        <div class="visuals-row">
-            <div class="view-box">
-                <div class="view-header">
-                    <span>Model Input (start = event-18)</span>
-                    <span style="color:#4db8ff" id="srcType">--</span>
-                </div>
-                <img id="imgInput" class="model-view" src="" onerror="this.style.display='none'">
-                <div id="noImg"
-                    style="display:none; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#555;">
-                    No Tensor Cache</div>
-            </div>
+    <div class="sample-list" id="sampleList"></div>
+  </div>
 
-            <div class="view-box">
-                <div class="view-header">
-                    <span>Context Window (4s)</span>
-                    <span style="color:#aaa">Video</span>
-                </div>
-                <video id="vidContext" muted></video>
-                <div class="weight-floater">
-                    <div class="stat-label">Weight</div>
-                    <div id="metaWeight" class="big-stat">--</div>
-
-                    <div style="margin-top:10px" id="metaChipHead"></div>
-
-                    <div style="margin-top:6px; font-size:11px; color:#bbb" id="metaLabel">--</div>
-                    <div style="margin-top:4px; font-size:11px; color:#777" id="metaDmg">--</div>
-                </div>
-            </div>
+  <div class="stage">
+    <div class="visuals-row">
+      <div class="view-box">
+        <div class="view-header">
+          <span>Model Input (frame = start)</span>
+          <span style="color:#4db8ff" id="srcType">--</span>
         </div>
-
-        <div class="meta-info">
-            <span id="metaReplay" style="color:#fff">Select an event...</span>
-            | Start: <span id="metaFrame">0</span>
-            | Exec: <span id="metaExec">0</span>
-            | Actor: <span id="metaActor">--</span>
-            | Kind: <span id="metaKind">--</span>
-            | Outcome: <span id="metaOutcome">--</span>
+        <img id="imgInput" class="model-view" src="" onerror="this.style.display='none'">
+        <div id="noImg" style="display:none; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#555;">
+          No Tensor Cache
         </div>
+      </div>
 
-        <div class="controls-area">
-            <div>
-                <div class="view-header" style="text-align:center">Action at t=0</div>
-                <div class="controller" id="ctrl-truth">
-                    <div class="btn l" id="btn-LEFT_SHOULDER"></div>
-                    <div class="btn r" id="btn-RIGHT_SHOULDER"></div>
-                    <div class="dpad">
-                        <div class="btn up" id="btn-DPAD_UP"></div>
-                        <div class="btn down" id="btn-DPAD_DOWN"></div>
-                        <div class="btn left" id="btn-DPAD_LEFT"></div>
-                        <div class="btn right" id="btn-DPAD_RIGHT"></div>
-                    </div>
-                    <div class="btn a" id="btn-EAST">A</div>
-                    <div class="btn b" id="btn-SOUTH">B</div>
-                    <div class="btn select" id="btn-BACK"></div>
-                    <div class="btn start" id="btn-START"></div>
-                </div>
-            </div>
-
-            <div class="timeline-wrap">
-                <div class="view-header">Ground Truth Sequence (Next 18 Frames)</div>
-                <div id="timeline"></div>
-            </div>
+      <div class="view-box">
+        <div class="view-header">
+          <span>Context Window (loop)</span>
+          <span style="color:#aaa">Video</span>
         </div>
+        <video id="vidContext" muted playsinline></video>
+
+        <div class="weight-floater">
+          <div class="stat-label">Weight</div>
+          <div id="metaWeight" class="big-stat">--</div>
+
+          <div style="margin-top:10px" id="metaChipHead"></div>
+
+          <div style="margin-top:6px; font-size:11px; color:#bbb" id="metaLabel">--</div>
+          <div style="margin-top:4px; font-size:11px; color:#777" id="metaDmg">--</div>
+        </div>
+      </div>
     </div>
 
-    <script>
-        const UI_BTNS = {{ ui_buttons | tojson }};
+    <div class="meta-info">
+      <span class="k">Replay:</span> <span class="v" id="metaReplay">Select an event...</span>
+      <span class="k">| Window:</span> <span class="v" id="metaWindow">--</span>
+      <span class="k">| Now:</span> <span class="v" id="metaNowFrame">--</span>
+      <span class="k">| Exec:</span> <span class="v" id="metaExec">--</span>
+      <span class="k">| Actor:</span> <span class="v" id="metaActor">--</span>
+      <span class="k">| Kind:</span> <span class="v" id="metaKind">--</span>
+      <span class="k">| Outcome:</span> <span class="v" id="metaOutcome">--</span>
+      <span class="k">| FPS:</span> <span class="v" id="metaFps">--</span>
+    </div>
 
-        const state = {
-            actor: 'player',
-            kind: 'chip',
-            outcome: 'all',
-            label: '',
-            currentList: []
+    <div class="scrub-row">
+      <div class="scrub-line">
+        <label>Speed</label>
+        <input id="speedSlider" type="range" min="0.1" max="1.0" step="0.05" value="1.0">
+        <div class="scrub-val" id="speedVal">1.00×</div>
+      </div>
+
+      <div class="scrub-line">
+        <label>Time</label>
+        <input id="timeSlider" type="range" min="0" max="0" step="1" value="0">
+        <div class="scrub-val" id="timeVal">--</div>
+      </div>
+    </div>
+
+    <div class="controls-area">
+      <div>
+        <div class="view-header" style="text-align:center">Controller (current frame)</div>
+        <div class="controller" id="ctrl-truth">
+          <div class="btn l" id="btn-LEFT_SHOULDER"></div>
+          <div class="btn r" id="btn-RIGHT_SHOULDER"></div>
+          <div class="dpad">
+            <div class="btn up" id="btn-DPAD_UP"></div>
+            <div class="btn down" id="btn-DPAD_DOWN"></div>
+            <div class="btn left" id="btn-DPAD_LEFT"></div>
+            <div class="btn right" id="btn-DPAD_RIGHT"></div>
+          </div>
+          <div class="btn a" id="btn-EAST">A</div>
+          <div class="btn b" id="btn-SOUTH">B</div>
+          <div class="btn select" id="btn-BACK"></div>
+          <div class="btn start" id="btn-START"></div>
+        </div>
+      </div>
+
+      <div class="timeline-wrap">
+        <div class="view-header">Future Inputs (next 18 frames)</div>
+        <div id="timeline"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const UI_BTNS = {{ ui_buttons | tojson }};
+    const HORIZON = 18;
+
+    const state = {
+      actor: 'player',
+      kind: 'chip',
+      outcome: 'all',
+      label: '',
+      currentList: [],
+
+      detail: null,
+
+      fps: 60.0,
+      loopStartT: 0.0,
+      loopEndT: 0.0, // exclusive
+      windowBaseFrame: 0,
+      windowActions: [],
+
+      rafId: null,
+      lastRenderedWinIdx: -99999,
+
+      desiredPlaybackRate: 1.0,
+      isScrubbing: false,
+      loopFrames: 0
+    };
+
+    function niceLabel(k) {
+      const map = {
+        'BACK': 'SEL', 'EAST': 'A', 'SOUTH': 'B', 'START': 'STRT',
+        'DPAD_UP': 'UP', 'DPAD_DOWN': 'DN', 'DPAD_LEFT': 'LF', 'DPAD_RIGHT': 'RT',
+        'LEFT_SHOULDER': 'L', 'RIGHT_SHOULDER': 'R'
+      };
+      return map[k] || k;
+    }
+
+    function setActor(a) {
+      state.actor = a;
+      document.getElementById('actor-player').classList.toggle('active', a === 'player');
+      document.getElementById('actor-enemy').classList.toggle('active', a === 'enemy');
+      refreshLabels();
+    }
+    function setKind(k) {
+      state.kind = k;
+      document.getElementById('kind-chip').classList.toggle('active', k === 'chip');
+      document.getElementById('kind-charge').classList.toggle('active', k === 'charge');
+      refreshLabels();
+    }
+    function setOutcome(o) {
+      state.outcome = o;
+      document.getElementById('outcome-all').classList.toggle('active', o === 'all');
+      document.getElementById('outcome-good').classList.toggle('active', o === 'good');
+      document.getElementById('outcome-bad').classList.toggle('active', o === 'bad');
+      loadList();
+    }
+    function setLabel(lbl) {
+      state.label = lbl;
+      loadList();
+    }
+
+    function refreshLabels() {
+      const sel = document.getElementById('labelSelect');
+      sel.innerHTML = `<option value="">Loading labels...</option>`;
+      fetch(`/api/rl_groups?actor=${state.actor}&kind=${state.kind}`)
+        .then(r => r.json())
+        .then(groups => {
+          sel.innerHTML = `<option value="">(All labels)</option>`;
+          groups.forEach(g => {
+            const opt = document.createElement('option');
+            opt.value = g.label;
+            const name = g.chip_name ? ` — ${g.chip_name}` : '';
+            opt.textContent = `${g.display_label || g.label}${name}  (good:${g.good} / bad:${g.bad})`;
+            sel.appendChild(opt);
+          });
+          state.label = '';
+          loadList();
+        });
+    }
+
+    function loadList() {
+      const listEl = document.getElementById('sampleList');
+      listEl.innerHTML = '<div style="padding:20px; color:#666; text-align:center">Loading...</div>';
+
+      const qs = new URLSearchParams({
+        actor: state.actor,
+        kind: state.kind,
+        outcome: state.outcome,
+        label: state.label
+      });
+
+      fetch(`/api/rl_list?${qs.toString()}`)
+        .then(r => r.json())
+        .then(data => {
+          state.currentList = data;
+          listEl.innerHTML = '';
+          data.forEach((item, idx) => {
+            const el = document.createElement('div');
+            el.className = 'sample-item';
+            const good = (item.outcome === 'good');
+
+            const title = item.chip_name ? item.chip_name : (item.display_label || item.label);
+            const sub = item.chip_name ? (item.display_label || item.label) : item.label;
+
+            const chipImg = item.chip_image_url
+              ? `<img class="chip-img" src="${item.chip_image_url}">`
+              : `<div class="chip-img" style="display:flex;align-items:center;justify-content:center;color:#444;">—</div>`;
+
+            el.innerHTML = `
+              <div style="font-size:11px; overflow:hidden;">
+                <div style="color:#fff; white-space:nowrap;">${item.replay}</div>
+                <div class="chip-head" style="margin-top:6px;">
+                  ${chipImg}
+                  <div style="min-width:0;">
+                    <div class="chip-title">${title}</div>
+                    <div class="chip-sub">${sub}</div>
+                  </div>
+                </div>
+                <div style="color:#666; margin-top:6px;">start:${item.start_frame} exec:${item.event_frame}</div>
+              </div>
+              <div class="w-badge ${good ? 'w-good' : 'w-bad'}">${Number(item.weight).toFixed(2)}</div>
+            `;
+            el.onclick = () => loadDetail(idx, el);
+            listEl.appendChild(el);
+          });
+        });
+    }
+
+    function ensureTimelineGrid() {
+      const el = document.getElementById('timeline');
+      if (el._built) return;
+      el._built = true;
+
+      const grid = document.createElement('div');
+      grid.className = 'timeline';
+      grid.style.gridTemplateColumns = `60px repeat(${HORIZON}, 1fr)`;
+
+      UI_BTNS.forEach(key => {
+        const lbl = document.createElement('div');
+        lbl.className = 'lane-label';
+        lbl.innerText = niceLabel(key);
+        grid.appendChild(lbl);
+
+        for (let t = 0; t < HORIZON; t++) {
+          const cell = document.createElement('div');
+          cell.className = 'cell';
+          cell.id = `tl-${key}-${t}`;
+          grid.appendChild(cell);
+        }
+      });
+
+      el.appendChild(grid);
+    }
+
+    function normalizeBtnVal(v) {
+      if (Array.isArray(v)) return Number(v[0] ?? 0);
+      return Number(v ?? 0);
+    }
+
+    function getButtonsObject(actionFrame) {
+      if (!actionFrame || typeof actionFrame !== 'object') return null;
+      if (actionFrame.buttons_raw && typeof actionFrame.buttons_raw === 'object') return actionFrame.buttons_raw;
+      return actionFrame;
+    }
+
+    function isPressed(actionFrame, key) {
+      const btns = getButtonsObject(actionFrame);
+      if (!btns) return false;
+      const v = normalizeBtnVal(btns[key]);
+      return v > 0.5;
+    }
+
+    function armLoop(videoEl, loopStart, loopEndExclusive) {
+      if (videoEl._loop) videoEl.removeEventListener('timeupdate', videoEl._loop);
+
+      const apply = () => {
+        const dur = Number(videoEl.duration);
+        let s = Number.isFinite(loopStart) ? Number(loopStart) : 0;
+        let e = Number.isFinite(loopEndExclusive) ? Number(loopEndExclusive) : (s + 4.0);
+
+        if (Number.isFinite(dur) && dur > 0) {
+          s = Math.max(0, Math.min(s, dur - 0.001));
+          e = Math.max(s + 0.001, Math.min(e, dur));
+        }
+
+        videoEl._loop = () => {
+          if (videoEl.currentTime >= e) {
+            videoEl.currentTime = s;
+            videoEl.play().catch(() => { });
+          }
+        };
+        videoEl.addEventListener('timeupdate', videoEl._loop);
+
+        const seekAndPlay = () => {
+          try { videoEl.currentTime = s; } catch (_) { }
+          videoEl.playbackRate = state.desiredPlaybackRate;
+          videoEl.play().catch(() => { });
+
+          setTimeout(() => {
+            if (Math.abs(videoEl.currentTime - s) > 0.25) {
+              try { videoEl.currentTime = s; } catch (_) { }
+              videoEl.playbackRate = state.desiredPlaybackRate;
+              videoEl.play().catch(() => { });
+            }
+          }, 150);
         };
 
-        function niceLabel(k) {
-            const map = {
-                'BACK': 'SEL', 'EAST': 'A', 'SOUTH': 'B', 'START': 'STRT',
-                'DPAD_UP': 'UP', 'DPAD_DOWN': 'DN', 'DPAD_LEFT': 'LF', 'DPAD_RIGHT': 'RT',
-                'LEFT_SHOULDER': 'L', 'RIGHT_SHOULDER': 'R'
-            };
-            return map[k] || k;
+        seekAndPlay();
+      };
+
+      if (videoEl.readyState >= 1) apply();
+      else videoEl.onloadedmetadata = () => apply();
+    }
+
+    function computeWindowIndexFromVideo(videoEl) {
+      const t = Number(videoEl.currentTime);
+      const relT = t - state.loopStartT;
+      const loopLen = Number(state.loopEndT) - Number(state.loopStartT);
+
+      const fps = (Number.isFinite(state.fps) && state.fps > 0) ? state.fps : 60.0;
+      const safeLoopLen = (Number.isFinite(loopLen) && loopLen > 0) ? loopLen : 4.0;
+
+      let clampedRelT = Number.isFinite(relT) ? relT : 0;
+      clampedRelT = Math.max(0, Math.min(clampedRelT, safeLoopLen - (1 / fps)));
+
+      // KEY: Use the real fps the server computed from ffprobe.
+      const relFrame = Math.floor(clampedRelT * fps + 1e-6);
+
+      const maxStart = Math.max(0, state.windowActions.length - 1);
+      const winIdx = Math.max(0, Math.min(relFrame, maxStart));
+
+      const expectedFrameIdx = Number(state.windowBaseFrame ?? 0) + relFrame;
+      return { winIdx, expectedFrameIdx, relFrame };
+    }
+
+    function renderAtWindowIndex(winIdx, expectedFrameIdx, relFrame) {
+      const a = state.windowActions[winIdx];
+      const actualFrameIdx = Number(a?.frame_idx);
+
+      const fiText = Number.isFinite(actualFrameIdx) ? `${actualFrameIdx}` : '?';
+      document.getElementById('metaNowFrame').innerText = `frame ${expectedFrameIdx} (rel ${relFrame}) | action.frame_idx ${fiText}`;
+
+      // Update controller
+      UI_BTNS.forEach(k => {
+        const btn = document.getElementById(`btn-${k}`);
+        if (!btn) return;
+        btn.classList.toggle('active', isPressed(a, k));
+      });
+
+      // Update future horizon
+      for (let t = 0; t < HORIZON; t++) {
+        const f = state.windowActions[winIdx + t];
+        UI_BTNS.forEach(k => {
+          const cell = document.getElementById(`tl-${k}-${t}`);
+          if (!cell) return;
+          cell.classList.toggle('active', isPressed(f, k));
+        });
+      }
+
+      // Update scrubber (unless user is currently scrubbing)
+      if (!state.isScrubbing) {
+        const ts = document.getElementById('timeSlider');
+        if (ts && Number(ts.max) > 0) {
+          const v = Math.max(0, Math.min(relFrame, Number(ts.max)));
+          ts.value = String(v);
+          document.getElementById('timeVal').innerText = `rel ${v} / ${ts.max}  (abs ${state.windowBaseFrame + v})`;
         }
+      }
+    }
 
-        function setActor(a) {
-            state.actor = a;
-            document.getElementById('actor-player').classList.toggle('active', a === 'player');
-            document.getElementById('actor-enemy').classList.toggle('active', a === 'enemy');
-            refreshLabels();
+    function stopRenderLoop() {
+      const vid = document.getElementById('vidContext');
+      if (state.rafId != null) {
+        if (typeof vid.cancelVideoFrameCallback === 'function') vid.cancelVideoFrameCallback(state.rafId);
+        else cancelAnimationFrame(state.rafId);
+        state.rafId = null;
+      }
+    }
+
+    function startRenderLoop() {
+      const vid = document.getElementById('vidContext');
+      stopRenderLoop();
+
+      const renderOnce = () => {
+        if (!state.detail || !state.windowActions || state.windowActions.length === 0) return;
+        if (vid.readyState < 2) return;
+
+        const { winIdx, expectedFrameIdx, relFrame } = computeWindowIndexFromVideo(vid);
+        if (winIdx !== state.lastRenderedWinIdx) {
+          state.lastRenderedWinIdx = winIdx;
+          renderAtWindowIndex(winIdx, expectedFrameIdx, relFrame);
         }
-        function setKind(k) {
-            state.kind = k;
-            document.getElementById('kind-chip').classList.toggle('active', k === 'chip');
-            document.getElementById('kind-charge').classList.toggle('active', k === 'charge');
-            refreshLabels();
-        }
-        function setOutcome(o) {
-            state.outcome = o;
-            document.getElementById('outcome-all').classList.toggle('active', o === 'all');
-            document.getElementById('outcome-good').classList.toggle('active', o === 'good');
-            document.getElementById('outcome-bad').classList.toggle('active', o === 'bad');
-            loadList();
-        }
-        function setLabel(lbl) {
-            state.label = lbl;
-            loadList();
-        }
+      };
 
-        function refreshLabels() {
-            const sel = document.getElementById('labelSelect');
-            sel.innerHTML = `<option value="">Loading labels...</option>`;
-            fetch(`/api/rl_groups?actor=${state.actor}&kind=${state.kind}`)
-                .then(r => r.json())
-                .then(groups => {
-                    sel.innerHTML = `<option value="">(All labels)</option>`;
-                    groups.forEach(g => {
-                        const opt = document.createElement('option');
-                        opt.value = g.label;
-                        // show chip name if available
-                        const name = g.chip_name ? ` — ${g.chip_name}` : '';
-                        opt.textContent = `${g.display_label || g.label}${name}  (good:${g.good} / bad:${g.bad})`;
-                        sel.appendChild(opt);
-                    });
-                    state.label = '';
-                    loadList();
-                });
-        }
+      if (typeof vid.requestVideoFrameCallback === 'function') {
+        const onFrame = () => {
+          renderOnce();
+          state.rafId = vid.requestVideoFrameCallback(onFrame);
+        };
+        state.rafId = vid.requestVideoFrameCallback(onFrame);
+      } else {
+        const tick = () => {
+          renderOnce();
+          state.rafId = requestAnimationFrame(tick);
+        };
+        state.rafId = requestAnimationFrame(tick);
+      }
+    }
 
-        function loadList() {
-            const listEl = document.getElementById('sampleList');
-            listEl.innerHTML = '<div style="padding:20px; color:#666; text-align:center">Loading...</div>';
+    function setupSpeedAndTimeUI() {
+      const vid = document.getElementById('vidContext');
 
-            const qs = new URLSearchParams({
-                actor: state.actor,
-                kind: state.kind,
-                outcome: state.outcome,
-                label: state.label
-            });
+      const speed = document.getElementById('speedSlider');
+      const speedVal = document.getElementById('speedVal');
 
-            fetch(`/api/rl_list?${qs.toString()}`)
-                .then(r => r.json())
-                .then(data => {
-                    state.currentList = data;
-                    listEl.innerHTML = '';
-                    data.forEach((item, idx) => {
-                        const el = document.createElement('div');
-                        el.className = 'sample-item';
-                        const good = (item.outcome === 'good');
+      const time = document.getElementById('timeSlider');
+      const timeVal = document.getElementById('timeVal');
 
-                        const title = item.chip_name ? item.chip_name : (item.display_label || item.label);
-                        const sub = item.chip_name ? (item.display_label || item.label) : item.label;
+      speed.oninput = () => {
+        const v = Number(speed.value);
+        state.desiredPlaybackRate = v;
+        speedVal.innerText = `${v.toFixed(2)}×`;
+        vid.playbackRate = v;
+      };
 
-                        const chipImg = item.chip_image_url
-                            ? `<img class="chip-img" src="${item.chip_image_url}">`
-                            : `<div class="chip-img" style="display:flex;align-items:center;justify-content:center;color:#444;">—</div>`;
+      // Scrubbing behavior (pause while dragging; seek frame-accurately)
+      const beginScrub = () => { state.isScrubbing = true; try { vid.pause(); } catch (_) { } };
+      const endScrub = () => {
+        state.isScrubbing = false;
+        vid.playbackRate = state.desiredPlaybackRate;
+        vid.play().catch(() => { });
+      };
 
-                        el.innerHTML = `
-                            <div style="font-size:11px; overflow:hidden;">
-                                <div style="color:#fff; white-space:nowrap;">${item.replay}</div>
-                                <div class="chip-head" style="margin-top:6px;">
-                                    ${chipImg}
-                                    <div style="min-width:0;">
-                                        <div class="chip-title">${title}</div>
-                                        <div class="chip-sub">${sub}</div>
-                                    </div>
-                                </div>
-                                <div style="color:#666; margin-top:6px;">start:${item.start_frame} exec:${item.event_frame}</div>
-                            </div>
-                            <div class="w-badge ${good ? 'w-good' : 'w-bad'}">${Number(item.weight).toFixed(2)}</div>
-                        `;
-                        el.onclick = () => loadDetail(idx, el);
-                        listEl.appendChild(el);
-                    });
-                });
-        }
+      time.addEventListener('pointerdown', beginScrub);
+      time.addEventListener('pointerup', endScrub);
+      time.addEventListener('touchstart', beginScrub, { passive: true });
+      time.addEventListener('touchend', endScrub, { passive: true });
 
-        function loadDetail(idx, el) {
-            document.querySelectorAll('.sample-item').forEach(i => i.classList.remove('active'));
-            if (el) el.classList.add('active');
+      time.oninput = () => {
+        const rel = Number(time.value);
+        if (!Number.isFinite(rel)) return;
+        const fps = (Number.isFinite(state.fps) && state.fps > 0) ? state.fps : 60.0;
 
-            const item = state.currentList[idx];
-            if (!item) return;
+        // Seek to loopStart + relFrames/fps
+        const targetT = state.loopStartT + (rel / fps);
+        try { vid.currentTime = targetT; } catch (_) { }
+        timeVal.innerText = `rel ${rel} / ${time.max}  (abs ${state.windowBaseFrame + rel})`;
+      };
+    }
 
-            const serverIdx = item.idx;
-            if (serverIdx === undefined) {
-                console.error("Missing item.idx from /api/rl_list");
-                return;
-            }
+    function loadDetail(idx, el) {
+      document.querySelectorAll('.sample-item').forEach(i => i.classList.remove('active'));
+      if (el) el.classList.add('active');
 
-            fetch(`/api/rl_detail/${serverIdx}`).then(r => r.json()).then(data => {
-                if (data.error) { console.error(data.error); return; }
+      const item = state.currentList[idx];
+      if (!item) return;
 
-                document.getElementById('metaReplay').innerText = data.replay;
-                document.getElementById('metaFrame').innerText = data.start_frame;
-                document.getElementById('metaExec').innerText = data.event_frame;
-                document.getElementById('metaActor').innerText = data.actor;
-                document.getElementById('metaKind').innerText = data.kind;
-                document.getElementById('metaOutcome').innerText = data.outcome;
+      const serverIdx = item.idx;
+      if (serverIdx === undefined) {
+        console.error("Missing item.idx from /api/rl_list");
+        return;
+      }
 
-                const wEl = document.getElementById('metaWeight');
-                wEl.innerText = Number(data.weight).toFixed(2);
-                wEl.style.color = (data.outcome === 'good') ? '#00ff00' : '#ff4d4d';
+      fetch(`/api/rl_detail/${serverIdx}`)
+        .then(r => r.json())
+        .then(data => {
+          if (data.error) { console.error(data.error); return; }
 
-                // chip header in floater
-                const head = document.getElementById('metaChipHead');
-                if (data.chip_name || data.chip_image_url) {
-                    const img = data.chip_image_url
-                        ? `<img class="chip-img" src="${data.chip_image_url}">`
-                        : `<div class="chip-img" style="display:flex;align-items:center;justify-content:center;color:#444;">—</div>`;
-                    const nm = data.chip_name ? data.chip_name : '';
-                    head.innerHTML = `
-                        <div class="chip-head">
-                            ${img}
-                            <div style="min-width:0;">
-                                <div class="chip-title">${nm}</div>
-                                <div class="chip-sub">${data.label}</div>
-                            </div>
-                        </div>
-                    `;
-                } else {
-                    head.innerHTML = '';
-                }
+          state.detail = data;
 
-                document.getElementById('metaLabel').innerText = data.label;
-                document.getElementById('metaDmg').innerText = `dealt:${data.damage_dealt} taken:${data.damage_taken}`;
+          // AUTHORITATIVE per-replay fps/timestamps from server (ffprobe-derived)
+          state.fps = Number(data.fps || 60.0);
+          state.loopStartT = Number(data.start_timestamp ?? 0);
+          state.loopEndT = Number(data.end_timestamp ?? (state.loopStartT + 4.0));
 
-                document.getElementById('srcType').innerText = String(data.source_type || '--').toUpperCase();
+          state.windowBaseFrame = Number(data.window_base_frame ?? data.start_frame ?? 0);
+          state.windowActions = Array.isArray(data.window_actions) ? data.window_actions : [];
 
-                const imgEl = document.getElementById('imgInput');
-                const noImg = document.getElementById('noImg');
-                if (data.image) {
-                    imgEl.src = data.image;
-                    imgEl.style.display = 'block';
-                    noImg.style.display = 'none';
-                } else {
-                    imgEl.style.display = 'none';
-                    noImg.style.display = 'block';
-                }
+          // meta
+          document.getElementById('metaReplay').innerText = data.replay;
+          document.getElementById('metaWindow').innerText = `${data.start_frame}..${data.end_frame}`;
+          document.getElementById('metaExec').innerText = data.event_frame;
+          document.getElementById('metaActor').innerText = data.actor;
+          document.getElementById('metaKind').innerText = data.kind;
+          document.getElementById('metaOutcome').innerText = data.outcome;
+          document.getElementById('metaFps').innerText = `${Number(state.fps).toFixed(4)}`;
 
-                const vid = document.getElementById('vidContext');
-                const src = `/video/${data.replay}`;
-                if (!vid.currentSrc.includes(src)) vid.src = src;
+          // weight
+          const wEl = document.getElementById('metaWeight');
+          wEl.innerText = Number(data.weight).toFixed(2);
+          wEl.style.color = (data.outcome === 'good') ? '#00ff00' : '#ff4d4d';
 
-                const startT = Number(data.start_timestamp ?? data.timestamp ?? 0);
-                const endT = Number(data.end_timestamp ?? (Number.isFinite(startT) ? (startT + 4.0) : 4.0));
+          // chip header
+          const head = document.getElementById('metaChipHead');
+          if (data.chip_name || data.chip_image_url) {
+            const img = data.chip_image_url
+              ? `<img class="chip-img" src="${data.chip_image_url}">`
+              : `<div class="chip-img" style="display:flex;align-items:center;justify-content:center;color:#444;">—</div>`;
+            const nm = data.chip_name ? data.chip_name : '';
+            head.innerHTML = `
+              <div class="chip-head">
+                ${img}
+                <div style="min-width:0;">
+                  <div class="chip-title">${nm}</div>
+                  <div class="chip-sub">${data.label}</div>
+                </div>
+              </div>
+            `;
+          } else {
+            head.innerHTML = '';
+          }
 
-                if (!Number.isFinite(startT) || !Number.isFinite(endT) || endT <= startT) {
-                    console.error("Bad timestamps from server:", { startT, endT, data });
-                    armLoop(vid, 0, 4.0);
-                } else {
-                    armLoop(vid, startT, endT);
-                }
+          document.getElementById('metaLabel').innerText = data.label;
+          document.getElementById('metaDmg').innerText = `dealt:${data.damage_dealt} taken:${data.damage_taken}`;
+          document.getElementById('srcType').innerText = String(data.source_type || '--').toUpperCase();
 
-                function armLoop(videoEl, loopStart, loopEnd) {
-                    if (videoEl._loop) videoEl.removeEventListener('timeupdate', videoEl._loop);
+          // image
+          const imgEl = document.getElementById('imgInput');
+          const noImg = document.getElementById('noImg');
+          if (data.image) {
+            imgEl.src = data.image;
+            imgEl.style.display = 'block';
+            noImg.style.display = 'none';
+          } else {
+            imgEl.style.display = 'none';
+            noImg.style.display = 'block';
+          }
 
-                    videoEl._loop = () => {
-                        if (videoEl.currentTime >= loopEnd) {
-                            videoEl.currentTime = loopStart;
-                            videoEl.play().catch(() => { });
-                        }
-                    };
-                    videoEl.addEventListener('timeupdate', videoEl._loop);
+          // scrub range (loop frames inclusive)
+          const loopFrames = Math.max(0, Number(data.end_frame) - Number(data.start_frame) );
+          state.loopFrames = loopFrames;
 
-                    const seekAndPlay = () => {
-                        try {
-                            videoEl.currentTime = loopStart;
-                            videoEl.play().catch(() => { });
-                        } catch (e) {
-                            console.warn("Seek failed", e);
-                        }
-                    };
+          const time = document.getElementById('timeSlider');
+          time.min = "0";
+          time.max = String(loopFrames);
+          time.step = "1";
+          time.value = "0";
+          document.getElementById('timeVal').innerText = `rel 0 / ${time.max}  (abs ${state.windowBaseFrame})`;
 
-                    if (videoEl.readyState >= 1) {
-                        seekAndPlay();
-                    } else {
-                        videoEl.onloadedmetadata = () => seekAndPlay();
-                    }
-                }
+          // video src
+          const vid = document.getElementById('vidContext');
+          const src = `/video/${data.replay}`;
+          if (!vid.currentSrc || !vid.currentSrc.includes(src)) {
+            vid.src = src;
+            vid.load();
+          }
 
-                if (data.actions && data.actions.length > 0) {
-                    const act0 = data.actions[0].buttons_raw;
-                    UI_BTNS.forEach(k => {
-                        const btn = document.getElementById(`btn-${k}`);
-                        if (!btn) return;
-                        btn.classList.remove('active');
-                        const val = act0[k];
-                        const v = (Array.isArray(val) ? val[0] : val);
-                        if (v > 0.5) btn.classList.add('active');
-                    });
-                    renderTimeline(data.actions);
-                }
-            });
-        }
+          // apply speed immediately
+          vid.playbackRate = state.desiredPlaybackRate;
 
-        function renderTimeline(actions) {
-            const el = document.getElementById('timeline');
-            el.innerHTML = '';
+          // arm loop using authoritative timestamps (start..end, ignore event_frame)
+          armLoop(vid, state.loopStartT, state.loopEndT);
 
-            const T = actions.length;
-            const grid = document.createElement('div');
-            grid.className = 'timeline';
-            grid.style.gridTemplateColumns = `60px repeat(${T}, 1fr)`;
+          state.lastRenderedWinIdx = -99999;
 
-            UI_BTNS.forEach(key => {
-                const lbl = document.createElement('div');
-                lbl.className = 'lane-label';
-                lbl.innerText = niceLabel(key);
-                grid.appendChild(lbl);
+          ensureTimelineGrid();
+          startRenderLoop();
+        });
+    }
 
-                actions.forEach(act => {
-                    const cell = document.createElement('div');
-                    cell.className = 'cell';
-                    const val = act.buttons_raw[key];
-                    const v = (Array.isArray(val) ? val[0] : val);
-                    if (v > 0.5) cell.classList.add('active');
-                    grid.appendChild(cell);
-                });
-            });
-
-            el.appendChild(grid);
-        }
-
-        // Boot
-        refreshLabels();
-    </script>
+    // Boot
+    ensureTimelineGrid();
+    refreshLabels();
+    setupSpeedAndTimeUI();
+  </script>
 </body>
 
 </html>
