@@ -1097,12 +1097,14 @@ def view_strategy():
     return render_template("view_strategy.html", turns=turns[::-1])
 
 
+from derived_state import compute_derived  # NEW
+
 @app.route("/inputs/<path:replay_name>")
 def serve_inputs(replay_name):
     replay_path = os.path.join(DATASET_DIR, replay_name)
     jsonl_path = os.path.join(replay_path, "actions.jsonl")
     static_path = os.path.join(replay_path, "static_data.json")
-    response: Dict[str, Any] = {"frames": [], "static": None}
+    response: Dict[str, Any] = {"frames": [], "static": None, "derived": []}  # NEW
 
     if os.path.exists(jsonl_path):
         try:
@@ -1123,7 +1125,18 @@ def serve_inputs(replay_name):
         except Exception:
             pass
 
+    # Derived state (kept out of app.py; computed in a dedicated module)
+    try:
+        from derived_state import compute_derived  # viewer/derived_state.py
+        response["derived"] = compute_derived(response["frames"], response["static"])
+    except Exception as e:
+        # Never break the viewer if derived computation fails.
+        response["derived"] = []
+        print(f"⚠️ derived_state compute failed: {e}")
+
     return jsonify(response)
+
+
 
 
 @app.route("/api/cache_meta/<path:filename>")

@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -30,7 +30,6 @@ OUTPUT_DIR = "data/nitrogen_rl_cache"
 
 RESOLUTION = (256, 256)
 NATIVE_RES = (160, 240)
-CHUNK_SIZE = 64
 
 # Bake future horizon into each timestep
 ACTION_HORIZON = 18
@@ -122,7 +121,6 @@ def _build_action_and_vid_maps(actions_rows: List[Dict[str, Any]]) -> Tuple[torc
         for btn in BUTTON_TOKENS:
             vec.append(_btn01(_scalar(row.get(btn))))
 
-        # Validate dimensionality early
         if len(vec) != ACTION_DIM:
             raise ValueError(f"Action dim mismatch at idx={action_idx}: got {len(vec)} expected {ACTION_DIM}")
 
@@ -147,7 +145,6 @@ def _bake_action_windows(indices: List[int], raw_actions_tensor: torch.Tensor) -
     for t in indices:
         t = int(t)
         if t < 0 or t >= total_time:
-            # Out-of-range -> all zeros window (fail-safe)
             windows.append(torch.zeros((ACTION_HORIZON, ACTION_DIM), dtype=torch.float32))
             continue
 
@@ -163,29 +160,39 @@ def _bake_action_windows(indices: List[int], raw_actions_tensor: torch.Tensor) -
     return torch.stack(windows, dim=0)
 
 
-def _extract_frames_for_vid_indices(vr: VideoReader, vid_indices: List[int]) -> torch.Tensor:
+def _decode_unique_video_frames(
+    vr: VideoReader,
+    vid_list_sorted_unique: List[int],
+    *,
+    decode_chunk: int,
+) -> torch.Tensor:
     """
-    Extract frames for the provided video indices (already validated/clipped by caller).
-    Output: (T, 3, RESOLUTION[1], RESOLUTION[0]) uint8
+    Decode all needed frames ONCE for this replay.
+
+    Args:
+      vid_list_sorted_unique: sorted unique video frame indices
+      decode_chunk: batch size for vr.get_batch()
+
+    Returns:
+      decoded: (M, 3, RESOLUTION[1], RESOLUTION[0]) uint8 aligned to vid_list_sorted_unique
     """
-    T = len(vid_indices)
-    out = torch.empty((T, 3, RESOLUTION[1], RESOLUTION[0]), dtype=torch.uint8)
+    M = len(vid_list_sorted_unique)
+    decoded = torch.empty((M, 3, RESOLUTION[1], RESOLUTION[0]), dtype=torch.uint8)
 
-    for i in range(0, T, CHUNK_SIZE):
-        chunk_range = range(i, min(i + CHUNK_SIZE, T))
-        batch_vid_indices = [vid_indices[k] for k in chunk_range]
-
+    # Decode in large batches to reduce per-call overhead.
+    for i in range(0, M, decode_chunk):
+        batch_vid = vid_list_sorted_unique[i : i + decode_chunk]
         try:
-            batch_frames = vr.get_batch(batch_vid_indices).asnumpy()  # (B, H, W, 3)
+            batch_frames = vr.get_batch(batch_vid).asnumpy()  # (B, H, W, 3)
             batch_torch = torch.from_numpy(batch_frames).permute(0, 3, 1, 2)  # (B, 3, H, W)
             batch_padded = process_batch_gba(batch_torch, RESOLUTION[1], RESOLUTION[0]).to(torch.uint8)
-            out[i : i + len(batch_vid_indices)] = batch_padded
+            decoded[i : i + len(batch_vid)] = batch_padded
         except Exception as e:
-            # Leave zeros for failed chunk; continue
-            print(f"⚠️ Video read error at chunk {i}: {e}")
+            # Leave zeros for failed chunk; continue.
+            print(f"⚠️ Video read error at decode chunk starting {i}: {e}")
             continue
 
-    return out
+    return decoded
 
 
 # -----------------------------------------------------------------------------
@@ -225,9 +232,6 @@ class RLEvent:
 
 
 def _load_rl_events_grouped(rl_events_path: Path) -> Dict[str, List[RLEvent]]:
-    """
-    Group events by replay folder name (matches dataset folder names).
-    """
     grouped: Dict[str, List[RLEvent]] = {}
     rows = _read_jsonl(rl_events_path)
     for r in rows:
@@ -239,7 +243,6 @@ def _load_rl_events_grouped(rl_events_path: Path) -> Dict[str, List[RLEvent]]:
             continue
         grouped.setdefault(evt.replay, []).append(evt)
 
-    # Stable order within each replay: start_frame, event_frame, end_frame
     for k in list(grouped.keys()):
         grouped[k].sort(key=lambda e: (e.start_frame, e.event_frame, e.end_frame, e.actor, e.kind, e.label))
     return grouped
@@ -250,7 +253,7 @@ def _load_rl_events_grouped(rl_events_path: Path) -> Dict[str, List[RLEvent]]:
 # -----------------------------------------------------------------------------
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Precache RL event segments: frames [start_frame..end_frame] with baked action windows."
+        description="Precache RL event segments: frames [start_frame..end_frame] with baked action windows (union video decode per replay)."
     )
     parser.add_argument("--source-dir", default=SOURCE_DIR, help="Dataset root containing replay folders.")
     parser.add_argument("--rl-dir", default=RL_DIR, help="Directory containing rl_events.jsonl (from create_rl_dataset.py).")
@@ -272,6 +275,12 @@ def main() -> None:
         default=0,
         help="Optional cap per replay (0 = no cap). Uses sorted event order.",
     )
+    parser.add_argument(
+        "--decode-chunk",
+        type=int,
+        default=1024,
+        help="Batch size for vr.get_batch() when decoding union frames (bigger is usually faster).",
+    )
     args = parser.parse_args()
 
     src_path = Path(args.source_dir)
@@ -286,12 +295,14 @@ def main() -> None:
     events_by_replay = _load_rl_events_grouped(rl_events_path)
 
     replays = sorted([d for d in src_path.iterdir() if d.is_dir()])
-    print("📦 Precaching RL segments")
+
+    print("📦 Precaching RL segments (Union Decode)")
     print(f"   Source: {src_path}")
     print(f"   RL events: {rl_events_path} (replays with events: {len(events_by_replay)})")
     print(f"   Output: {out_path}")
     print(f"   Actor filter: {args.actor}")
     print(f"   Overwrite: {bool(args.overwrite)}")
+    print(f"   decode_chunk: {int(args.decode_chunk)}")
 
     stats = {
         "segments_written": 0,
@@ -300,6 +311,7 @@ def main() -> None:
         "segments_skipped_empty": 0,
         "replays_missing_files": 0,
         "replays_processed": 0,
+        "unique_video_frames_decoded": 0,
     }
 
     for folder in tqdm(replays, desc="Replays"):
@@ -334,7 +346,14 @@ def main() -> None:
             vid_len = len(vr)
             T = len(vid_idx_map)
 
-            # Cache each RL segment as an independent file (one file per event)
+            # -----------------------------------------------------------------
+            # Prepare all events for this replay:
+            #   - compute kept action indices and corresponding video indices
+            #   - collect union of ALL required video indices across events
+            # -----------------------------------------------------------------
+            prepared: List[Tuple[int, RLEvent, int, int, List[int], List[int], Path]] = []
+            needed_vid_set: set[int] = set()
+
             for j, evt in enumerate(events):
                 # Clamp to action timeline length
                 sf = max(0, int(evt.start_frame))
@@ -345,22 +364,20 @@ def main() -> None:
                     continue
                 ef = min(ef, T - 1)
 
-                # Build action indices for the segment (inclusive)
-                seg_action_indices = list(range(sf, ef + 1))
+                seg_action_indices = range(sf, ef + 1)
 
-                # Map to video indices; drop frames that point past end of video
                 seg_vid_indices: List[int] = []
                 seg_action_indices_kept: List[int] = []
+
                 for t in seg_action_indices:
                     vid_idx = int(vid_idx_map[t])
                     if 0 <= vid_idx < vid_len:
                         seg_vid_indices.append(vid_idx)
-                        seg_action_indices_kept.append(t)
+                        seg_action_indices_kept.append(int(t))
 
                 if not seg_action_indices_kept:
                     continue
 
-                # Deterministic filename
                 tag = _sanitize_filename(f"{evt.actor}_{evt.kind}_{evt.label}")
                 out_file = out_path / f"{name}__{tag}__sf{sf}_ef{int(evt.event_frame)}_en{ef}__{j:04d}.pt"
 
@@ -368,13 +385,46 @@ def main() -> None:
                     stats["segments_skipped_exists"] += 1
                     continue
 
-                frames_tensor = _extract_frames_for_vid_indices(vr, seg_vid_indices)
+                prepared.append((j, evt, sf, ef, seg_action_indices_kept, seg_vid_indices, out_file))
+                for v in seg_vid_indices:
+                    needed_vid_set.add(int(v))
+
+            if not prepared:
+                # All events skipped due to existing files (or empty), but replay counted as processed.
+                stats["replays_processed"] += 1
+                continue
+
+            # -----------------------------------------------------------------
+            # UNION DECODE: decode each unique needed video frame once
+            # -----------------------------------------------------------------
+            needed_vid_list = sorted(needed_vid_set)
+            decoded_all = _decode_unique_video_frames(
+                vr,
+                needed_vid_list,
+                decode_chunk=max(1, int(args.decode_chunk)),
+            )
+            stats["unique_video_frames_decoded"] += int(decoded_all.shape[0])
+
+            # Map vid_idx -> row in decoded_all
+            vid_pos: Dict[int, int] = {int(v): i for i, v in enumerate(needed_vid_list)}
+
+            # -----------------------------------------------------------------
+            # Write each event segment by slicing decoded frames + baking actions
+            # -----------------------------------------------------------------
+            for j, evt, sf, ef, seg_action_indices_kept, seg_vid_indices, out_file in prepared:
+                # Translate segment's vid indices into decoded_all indices
+                idxs = [vid_pos[int(v)] for v in seg_vid_indices]
+                idxs_t = torch.tensor(idxs, dtype=torch.long)
+
+                # frames: (N, 3, H, W)
+                frames_tensor = decoded_all.index_select(0, idxs_t)
+
+                # actions: (N, ACTION_HORIZON, ACTION_DIM)
                 baked_actions = _bake_action_windows(seg_action_indices_kept, raw_actions_tensor)
 
-                # Note: frames_tensor length == baked_actions length == len(seg_action_indices_kept)
                 payload = {
-                    "frames": frames_tensor,                   # (N, 3, H, W) uint8
-                    "actions": baked_actions,                  # (N, ACTION_HORIZON, ACTION_DIM) float32
+                    "frames": frames_tensor,  # (N, 3, H, W) uint8
+                    "actions": baked_actions,  # (N, ACTION_HORIZON, ACTION_DIM) float32
                     "meta": {
                         "replay": name,
                         "actor": evt.actor,
@@ -392,6 +442,7 @@ def main() -> None:
                         "video_indices": [int(x) for x in seg_vid_indices],
                         "action_horizon": int(ACTION_HORIZON),
                         "resolution": [int(RESOLUTION[0]), int(RESOLUTION[1])],
+                        "union_decode": True,
                     },
                 }
 

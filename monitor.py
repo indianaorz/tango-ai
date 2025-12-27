@@ -15,7 +15,8 @@ app = Flask(__name__)
 # Map display names to folder paths
 LOG_DIRS = {
     "Battle": "logs/battle",
-    "Planning": "logs/planning"
+    "Planning": "logs/planning",
+    "RL": "logs/rl_battle",  # <- NEW
 }
 
 HOST = "0.0.0.0"
@@ -67,8 +68,7 @@ HTML_TEMPLATE = """
 <body>
 <div class="container">
     
-    <div class="tabs" id="tab-container">
-        </div>
+    <div class="tabs" id="tab-container"></div>
 
     <div class="stat-box">
         <div class="stat">
@@ -112,15 +112,15 @@ HTML_TEMPLATE = """
 </div>
 
 <script>
-    let currentMode = "Battle"; // Default
+    const MODES = {{ modes | tojson }};
+    let currentMode = (MODES && MODES.length > 0) ? MODES[0] : "Battle"; // safer default
     let rawData = { steps: [], values: [] };
     let lastStep = null;
     let inFlight = false;
 
     // --- Tab Setup ---
-    const MODES = {{ modes | tojson }};
     const tabContainer = document.getElementById('tab-container');
-    
+
     MODES.forEach(mode => {
         const btn = document.createElement('div');
         btn.className = `tab ${mode === currentMode ? 'active' : ''}`;
@@ -132,17 +132,17 @@ HTML_TEMPLATE = """
     function switchMode(mode, btnEl) {
         if(mode === currentMode) return;
         currentMode = mode;
-        
+
         // Update UI Tabs
         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
         btnEl.classList.add('active');
-        
+
         // Hard Reset
         rawData = { steps: [], values: [] };
         lastStep = null;
         document.getElementById('curr-step').innerText = "---";
         document.getElementById('curr-loss').innerText = "---";
-        
+
         fetchData(true);
     }
 
@@ -190,7 +190,7 @@ HTML_TEMPLATE = """
         }
         const range = maxVal - minVal;
         const padding = (range === 0) ? 0.1 : range * 0.05;
-        
+
         const traceRaw = {
             x: rawData.steps, y: rawData.values,
             mode: 'lines', name: 'Raw',
@@ -209,7 +209,8 @@ HTML_TEMPLATE = """
             paper_bgcolor: '#000', plot_bgcolor: '#000',
             font: { color: '#eee' },
             xaxis: { title: 'Global Step', gridcolor: '#333', zerolinecolor: '#444' },
-            yaxis: { title: 'Loss', gridcolor: '#333', zerolinecolor: '#444', range: [Math.max(0, minVal-padding), maxVal+padding] },
+            yaxis: { title: 'Loss', gridcolor: '#333', zerolinecolor: '#444',
+                     range: [Math.max(0, minVal-padding), maxVal+padding] },
             margin: { t: 40, l: 60, r: 20, b: 60 },
             showlegend: false
         };
@@ -233,9 +234,9 @@ HTML_TEMPLATE = """
 
         try {
             const sinceParam = (forceFull || lastStep === null) ? "" : String(lastStep);
-            // Pass currentMode to backend
-            const url = `/api/data?mode=${currentMode}&skip=${skip}&max_points=${maxPoints}` + (sinceParam ? `&since=${sinceParam}` : "");
-            
+            const url = `/api/data?mode=${encodeURIComponent(currentMode)}&skip=${skip}&max_points=${maxPoints}`
+                      + (sinceParam ? `&since=${encodeURIComponent(sinceParam)}` : "");
+
             const res = await fetch(url);
             const data = await res.json();
 
@@ -270,6 +271,7 @@ HTML_TEMPLATE = """
                 status.innerText = `Last updated: ${new Date().toLocaleTimeString()} (${rawData.steps.length} pts)`;
             } else {
                 status.innerText = "No data points found yet.";
+                Plotly.purge('chart');
             }
 
         } catch (e) {
@@ -283,35 +285,43 @@ HTML_TEMPLATE = """
     setInterval(() => {
         if (document.getElementById('refresh').checked) fetchData(false);
     }, 1000);
-    // Initial fetch handled by switchMode logic or manual call if needed
+
     fetchData(true);
 </script>
 </body>
 </html>
 """
 
+
 def get_latest_log(log_dir: str) -> Optional[str]:
     files = glob.glob(os.path.join(log_dir, "events.out.tfevents.*"))
-    if not files: return None
+    if not files:
+        return None
     return max(files, key=os.path.getctime)
 
+
 def _safe_int(v: str, default: int) -> int:
-    try: return int(v)
-    except: return default
+    try:
+        return int(v)
+    except Exception:
+        return default
+
 
 def _downsample_stride(steps: List[int], values: List[float], max_points: int) -> Tuple[List[int], List[float]]:
     n = len(steps)
-    if max_points <= 0 or n <= max_points: return steps, values
+    if max_points <= 0 or n <= max_points:
+        return steps, values
     stride = max(1, n // max_points)
     ds_steps = steps[::stride]
     ds_vals = values[::stride]
-    if ds_steps[-1] != steps[-1]:
+    if ds_steps and ds_steps[-1] != steps[-1]:
         ds_steps.append(steps[-1])
         ds_vals.append(values[-1])
     if len(ds_steps) > max_points:
         ds_steps = ds_steps[-max_points:]
         ds_vals = ds_vals[-max_points:]
     return ds_steps, ds_vals
+
 
 @dataclass
 class _ScalarCacheState:
@@ -324,9 +334,18 @@ class _ScalarCacheState:
     last_reload_monotonic: float = 0.0
     ea: Optional[EventAccumulator] = None
 
+
 class TensorboardScalarCache:
-    def __init__(self, log_dir: str):
+    """
+    Caches ONE scalar series from the newest TB event file in a directory.
+
+    We pick a tag using preferred substring matches, then fall back to
+    generic "Loss/loss" heuristics.
+    """
+
+    def __init__(self, log_dir: str, *, prefer_tag_substrings: List[str]):
         self._log_dir = log_dir
+        self._prefer = [str(x) for x in (prefer_tag_substrings or [])]
         self._lock = threading.Lock()
         self._st = _ScalarCacheState(steps=[], values=[])
 
@@ -338,8 +357,10 @@ class TensorboardScalarCache:
                 return True
             return False
 
-        try: mtime_ns = os.stat(latest).st_mtime_ns
-        except: mtime_ns = 0
+        try:
+            mtime_ns = os.stat(latest).st_mtime_ns
+        except Exception:
+            mtime_ns = 0
 
         if self._st.log_file != latest:
             self._reset_state()
@@ -354,35 +375,63 @@ class TensorboardScalarCache:
     def _reset_state(self) -> None:
         self._st = _ScalarCacheState(steps=[], values=[])
 
+    def _choose_tag(self, tags: List[str]) -> Optional[str]:
+        if not tags:
+            return None
+
+        # 1) Prefer explicit substrings (first match wins, in priority order)
+        for pat in self._prefer:
+            for t in tags:
+                if pat in t:
+                    return t
+
+        # 2) Otherwise, pick something that looks like a loss
+        for t in tags:
+            if "WeightedLoss" in t:
+                return t
+        for t in tags:
+            if "Loss" in t or "loss" in t:
+                return t
+
+        # 3) Last resort
+        return tags[0]
+
     def _maybe_reload_and_append(self) -> None:
-        if self._st.log_file is None or self._st.ea is None: return
+        if self._st.log_file is None or self._st.ea is None:
+            return
+
         now = time.monotonic()
-        if (now - self._st.last_reload_monotonic) < MIN_RELOAD_INTERVAL_S: return
+        if (now - self._st.last_reload_monotonic) < MIN_RELOAD_INTERVAL_S:
+            return
         self._st.last_reload_monotonic = now
-        
+
         try:
             self._st.ea.Reload()
-        except Exception: return # File access race?
+        except Exception:
+            return  # file access race
 
         tags = self._st.ea.Tags().get("scalars", [])
-        if not tags: return
+        if not tags:
+            return
 
         if self._st.tag is None:
-            # Prefer loss, fallback to first tag
-            self._st.tag = next((t for t in tags if "Loss" in t or "loss" in t), None)
-        
-        if self._st.tag is None: return
+            self._st.tag = self._choose_tag(tags)
+
+        if self._st.tag is None:
+            return
 
         events = self._st.ea.Scalars(self._st.tag)
-        if not events: return
+        if not events:
+            return
 
         last = self._st.last_seen_step
         for e in events:
-            if e.step <= last: continue
+            if e.step <= last:
+                continue
             self._st.steps.append(int(e.step))
             self._st.values.append(float(e.value))
             last = e.step
-        
+
         self._st.last_seen_step = last
 
         if len(self._st.steps) > MAX_CACHE_POINTS:
@@ -390,7 +439,13 @@ class TensorboardScalarCache:
             self._st.steps = self._st.steps[cut:]
             self._st.values = self._st.values[cut:]
 
-    def get_series(self, *, skip: int, since_step: Optional[int], max_points: int) -> Tuple[bool, List[int], List[float], Optional[int], Optional[str]]:
+    def get_series(
+        self,
+        *,
+        skip: int,
+        since_step: Optional[int],
+        max_points: int,
+    ) -> Tuple[bool, List[int], List[float], Optional[int], Optional[str]]:
         skip = max(0, int(skip))
         max_points = max(500, int(max_points))
 
@@ -403,7 +458,8 @@ class TensorboardScalarCache:
 
             steps = self._st.steps
             vals = self._st.values
-            if not steps: return reset, [], [], None, self._st.tag
+            if not steps:
+                return reset, [], [], None, self._st.tag
 
             import bisect
             i0 = bisect.bisect_left(steps, skip)
@@ -419,58 +475,82 @@ class TensorboardScalarCache:
                 return reset, steps2[j0:], vals2[j0:], steps2[-1], self._st.tag
 
             ds_steps, ds_vals = _downsample_stride(steps2, vals2, max_points)
-            return True if reset else True, ds_steps, ds_vals, (ds_steps[-1] if ds_steps else None), self._st.tag
+            return True, ds_steps, ds_vals, (ds_steps[-1] if ds_steps else None), self._st.tag
+
 
 # --- INIT CACHES ---
-_caches = {k: TensorboardScalarCache(v) for k, v in LOG_DIRS.items()}
+# Prefer tags per mode:
+# - Battle/Planning: Train/Loss first
+# - RL: Train/WeightedLoss first
+_PREFER_BY_MODE: Dict[str, List[str]] = {
+    "Battle": ["Train/Loss", "Loss", "loss"],
+    "Planning": ["Train/Loss", "Loss", "loss"],
+    "RL": ["Train/WeightedLoss", "WeightedLoss", "Train/Loss", "Loss", "loss"],
+}
+
+_caches: Dict[str, TensorboardScalarCache] = {
+    mode: TensorboardScalarCache(path, prefer_tag_substrings=_PREFER_BY_MODE.get(mode, ["Loss", "loss"]))
+    for mode, path in LOG_DIRS.items()
+}
+
 
 @app.route("/")
 def index():
-    # Pass available modes to the template
     return render_template_string(HTML_TEMPLATE, modes=list(LOG_DIRS.keys()))
+
 
 @app.route("/api/data")
 def get_data():
-    mode = request.args.get("mode", "Battle") # Default to Battle
+    mode = request.args.get("mode", "Battle")
     if mode not in _caches:
         return jsonify({"error": f"Unknown mode: {mode}"})
-    
+
     skip_n = _safe_int(request.args.get("skip", "100"), 100)
     max_points = _safe_int(request.args.get("max_points", "5000"), 5000)
     since_raw = request.args.get("since", None)
-    
+
     since_step = None
     if since_raw is not None and since_raw != "":
         s = _safe_int(since_raw, -1)
-        if s >= 0: since_step = s
+        if s >= 0:
+            since_step = s
 
     try:
         reset, steps, values, last_step, tag = _caches[mode].get_series(
-            skip=skip_n, since_step=since_step, max_points=max_points
+            skip=skip_n,
+            since_step=since_step,
+            max_points=max_points,
         )
 
         if tag is None:
             return jsonify({"error": f"Waiting for {mode} logs..."})
 
-        return jsonify({
-            "reset": bool(reset),
-            "steps": steps,
-            "values": values,
-            "last_step": last_step,
-            "tag": tag,
-        })
+        return jsonify(
+            {
+                "reset": bool(reset),
+                "steps": steps,
+                "values": values,
+                "last_step": last_step,
+                "tag": tag,
+            }
+        )
 
     except Exception as e:
         return jsonify({"error": str(e)})
 
+
 if __name__ == "__main__":
     hostname = socket.gethostname()
-    try: local_ip = socket.gethostbyname(hostname)
-    except: local_ip = "127.0.0.1"
+    try:
+        local_ip = socket.gethostbyname(hostname)
+    except Exception:
+        local_ip = "127.0.0.1"
 
     print(f"\n📊 Monitor running at:")
     print(f"   👉 http://127.0.0.1:{PORT}")
     print(f"   👉 http://{local_ip}:{PORT} (Local Network)\n")
     print(f"   Watching: {list(LOG_DIRS.keys())}")
+    for k, v in LOG_DIRS.items():
+        print(f"   - {k}: {v}")
 
     app.run(host=HOST, port=PORT, debug=False, threaded=True)
