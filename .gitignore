@@ -12,3 +12,5 @@
 *.gba
 /data
 /replays
+#pyc
+*.pyc

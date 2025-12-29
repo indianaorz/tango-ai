@@ -580,6 +580,16 @@
             color: #fff;
             font-weight: normal;
         }
+
+        /* CRITIC GRAPH */
+        #critic-canvas {
+            width: 100%;
+            height: 80px;
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 2px;
+            display: block;
+        }
     </style>
 </head>
 
@@ -626,6 +636,11 @@
             <div class="panel" style="width: 100%; max-width: 720px;">
                 <h4>Input Horizon (18f)</h4>
                 <div id="timeline-grid" class="timeline-container"></div>
+            </div>
+
+            <div class="panel" style="width: 100%; max-width: 720px;">
+                <h4>Critic Signal</h4>
+                <canvas id="critic-canvas" height="80"></canvas>
             </div>
         </div>
 
@@ -774,10 +789,15 @@
         const vid = document.getElementById('vid');
         let actions = [];
         let derived = [];
+        let criticValues = [];
+        let criticMin = -100;
+        let criticMax = 100;
         let CHIP_LIB = {};
         let criticMeta = null;
 
-
+        // Canvas for critic
+        const criticCanvas = document.getElementById('critic-canvas');
+        const ctxCritic = criticCanvas.getContext('2d');
 
 
         const KEYS = {
@@ -1095,6 +1115,57 @@
             const staticData = data.static || {};
             renderStatic(staticData);
 
+            // Prepare critic graph data
+            if (derived.length > 0) {
+                // 1. Extract values
+                const vals = [];
+                let allSmall = true; // Flag to detect if we need to scale up
+
+                for (let i = 0; i < derived.length; i++) {
+                    const v = derived[i].critic_v;
+                    const val = (v !== null && v !== undefined) ? v : 0;
+                    vals.push(val);
+
+                    // If any value is > 5.0, assume it's OLD model (Raw HP)
+                    if (Math.abs(val) > 5.0) allSmall = false;
+                }
+
+                // 2. Normalize to HP if needed (New Model -> Scale x100)
+                if (allSmall && vals.length > 0) {
+                    for (let i = 0; i < vals.length; i++) {
+                        vals[i] = vals[i] * 100;
+                    }
+                }
+
+                criticValues = vals;
+
+                // 3. Calc Range
+                let min = Infinity, max = -Infinity;
+                for (const v of vals) {
+                    if (v < min) min = v;
+                    if (v > max) max = v;
+                }
+
+                // Fallback for empty/flat
+                if (min === Infinity) { min = -10; max = 10; }
+
+                let span = max - min;
+
+                // Only pad if it's truly a flatline (span 0), not just "small"
+                if (span === 0) {
+                    max += 10;
+                    min -= 10;
+                } else {
+                    // Add 10% breathing room top/bottom
+                    const pad = span * 0.1;
+                    min -= pad;
+                    max += pad;
+                }
+
+                criticMin = min;
+                criticMax = max;
+            }
+
             if (actions.length) render(actions[0], 0);
             startVideoSync();
         });
@@ -1179,7 +1250,13 @@
 
             if (cvEl) {
                 if (typeof cv === "number" && Number.isFinite(cv)) {
-                    cvEl.textContent = cv.toFixed(2);
+                    // NEW: Check magnitude. If it looks scaled (small), multiply back to HP.
+                    // If it looks like raw HP (big), leave it alone (backwards compatibility).
+                    let val = cv;
+                    if (Math.abs(val) <= 5.0) {
+                        val = val * 100;
+                    }
+                    cvEl.textContent = val.toFixed(1); // Show 1 decimal place (e.g. "23.5")
                 } else {
                     cvEl.textContent = "—";
                 }
@@ -1284,6 +1361,68 @@
 
         }
 
+        function drawCriticGraph(currentIdx) {
+            const w = criticCanvas.width = criticCanvas.offsetWidth;
+            const h = criticCanvas.height = criticCanvas.offsetHeight;
+            const ctx = ctxCritic;
+
+            ctx.clearRect(0, 0, w, h);
+
+            if (!criticValues || criticValues.length === 0) return;
+
+            const n = criticValues.length;
+            const range = criticMax - criticMin;
+
+            // Helper: value -> y coordinate
+            // invert y so max is top
+            function getY(val) {
+                // normalize 0..1
+                const norm = (val - criticMin) / range;
+                // flip for canvas y (0 is top)
+                return h - (norm * h);
+            }
+
+            // 1. Draw Zero Line (Neutral)
+            const y0 = getY(0);
+            ctx.beginPath();
+            ctx.strokeStyle = "#444";
+            ctx.lineWidth = 1;
+            ctx.moveTo(0, y0);
+            ctx.lineTo(w, y0);
+            ctx.stroke();
+
+            // 2. Draw Graph Path
+            ctx.beginPath();
+            ctx.strokeStyle = "#00e5ff"; // Cyan neon
+            ctx.lineWidth = 2;
+
+            // We step through X pixels to save draw calls if N is huge
+            // but just drawing lineTo for every point is usually fine for <10k on modern gpu
+            ctx.moveTo(0, getY(criticValues[0]));
+
+            for (let i = 1; i < n; i++) {
+                const x = (i / (n - 1)) * w;
+                const y = getY(criticValues[i]);
+                ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            // Fill under curve? Optional but nice
+            ctx.fillStyle = "rgba(0, 229, 255, 0.1)";
+            ctx.lineTo(w, getY(0)); // go to zero level at right
+            ctx.lineTo(0, getY(0)); // go to zero level at left
+            ctx.closePath();
+            ctx.fill();
+
+            // 3. Draw Playhead
+            const xHead = (currentIdx / (n - 1)) * w;
+            ctx.beginPath();
+            ctx.strokeStyle = "#fff";
+            ctx.lineWidth = 2;
+            ctx.moveTo(xHead, 0);
+            ctx.lineTo(xHead, h);
+            ctx.stroke();
+        }
 
 
         function renderChipSlot(el, chipInfo, opacity) {
@@ -1427,6 +1566,7 @@
                 }
             }
             applyDerived(idx);
+            drawCriticGraph(idx);
         }
     </script>
 </body>

@@ -70,7 +70,7 @@ PLANNING_CKPT_DIR = ""  # e.g. os.path.join(CKPT_ROOT, "planning")
 BATTLE_CKPT_DIR = ""  # e.g. os.path.join(CKPT_ROOT, "battle")
 
 # Strategy & RL Paths
-STRATEGY_DB_PATH = os.path.join(parent_dir, "data/chipwindows/strategy.jsonl")
+STRATEGY_DB_PATH = os.path.join(parent_dir, "data/chipwindows_v2/strategy_v2.jsonl")
 STRATEGY_MODEL_PATH = os.path.join(parent_dir, "checkpoints_strategy/strategy_model.pt")
 RL_WEIGHTS_PATH = os.path.join(parent_dir, "data/nitrogen_rl/frame_weights.jsonl")
 RL_EVENTS_PATH = os.path.join(parent_dir, "data/nitrogen_rl/rl_events.jsonl")
@@ -96,11 +96,62 @@ STRATEGY_CONFIG = {
 # -----------------------------------------------------------------------------
 # HELPERS
 # -----------------------------------------------------------------------------
+# --- COORDINATE MATH ---
 def pos_to_grid_idx(x: float, y: float) -> int:
-    # Rough approximation of BN6 grid
-    col = max(0, min(5, int((x - 40) / 40)))
-    row = max(0, min(2, int((y - 75) / 30)))
-    return row * 6 + col
+    """
+    Data-driven mapping of (x,y) to 0-17 grid index.
+    Based on dataset analysis:
+      X clusters: 20, 60, 100, 140, 180, 220 (Standard 40px spacing)
+      Y clusters: 260, 515, 770 (Internal fixed-point coords?)
+    """
+    # X: 40px spacing is confirmed by data.
+    # Simple int division snaps 20->0, 60->1, 100->2 safely.
+    col = int(x // 40)
+    col = max(0, min(5, col))
+
+    # Y: Use midpoints between the clusters seen in data.
+    # Row 0 (260)  <-- boundary 387 --> Row 1 (515)
+    # Row 1 (515)  <-- boundary 642 --> Row 2 (770)
+    row = 1
+    if y < 387:
+        row = 0
+    elif y > 642:
+        row = 2
+    
+    return (row * 6) + col
+def resolve_chip_info_from_id_code(raw_id: int, raw_code: int) -> Optional[Dict[str, Any]]:
+    """
+    Accepts numeric chip id + raw code parity format (same as resolve_chip_info),
+    but works even when the source is derived-state (id/code dicts).
+    """
+    try:
+        rid = int(raw_id)
+    except Exception:
+        return None
+    if rid in (255, 65535) or rid <= 0:
+        return None
+    try:
+        rc = int(raw_code)
+    except Exception:
+        rc = 0
+    return resolve_chip_info(rid, rc)
+
+
+def _rich_from_chip_dict_list(chips: Any) -> List[Dict[str, Any]]:
+    """
+    chips: [{"id": int, "code": int}, ...] (derived_state format)
+    Returns a list of resolved chip info objects (no Nones).
+    """
+    out: List[Dict[str, Any]] = []
+    if not isinstance(chips, list):
+        return out
+    for ch in chips:
+        if not isinstance(ch, dict):
+            continue
+        info = resolve_chip_info_from_id_code(ch.get("id", 0), ch.get("code", 0))
+        if info:
+            out.append(info)
+    return out
 
 
 def find_cache_info(filename: str, hint_label: str | None = None) -> Tuple[Optional[str], str]:
@@ -414,7 +465,25 @@ def load_chip_db() -> None:
 load_chip_db()
 
 CODE_INDEXES = "ABCDEFGHIJKLMNOPQRSTUVWXYZ*"
+def _as_int(x: Any, default: int = 0) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
 
+
+def _as_bool(x: Any) -> bool:
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, (int, float)):
+        return float(x) != 0.0
+    if isinstance(x, str):
+        return x.strip().lower() in ("1", "true", "yes", "y", "t")
+    return False
+
+
+def _to_list(x: Any) -> List[Any]:
+    return list(x) if isinstance(x, (list, tuple)) else []
 
 def resolve_chip_info(raw_id: int, raw_code: int) -> Optional[Dict[str, Any]]:
     """
@@ -966,138 +1035,411 @@ def api_chip_library():
     return jsonify(CHIP_DB)
 
 
+
+
+
+def _pad_list(x: Any, n: int, fill: Any) -> List[Any]:
+    xs = list(x) if isinstance(x, (list, tuple)) else []
+    xs = xs[:n]
+    if len(xs) < n:
+        xs = xs + [fill] * (n - len(xs))
+    return xs
+
+
+def _rich_from_id_code_arrays(ids: Any, codes: Any, mask: Any, *, n: int) -> List[Dict[str, Any]]:
+    ids_l = _pad_list(ids, n, 0)
+    codes_l = _pad_list(codes, n, 0)
+    mask_l = _pad_list(mask, n, False)
+    out: List[Dict[str, Any]] = []
+    for i in range(n):
+        if not _as_bool(mask_l[i]):
+            continue
+        info = resolve_chip_info_from_id_code(ids_l[i], codes_l[i])
+        if info:
+            out.append(info)
+    return out
+
+
+def _compute_selected_indices_v2(
+    *,
+    hand_ids: List[int],
+    hand_codes: List[int],
+    hand_vis: List[float],
+    sel_ids: List[int],
+    sel_codes: List[int],
+    sel_mask: List[bool],
+) -> List[int]:
+    """
+    Map selected chips back onto hand indices for highlighting.
+    Uses first unused matching visible slot per selected chip.
+    """
+    used = set()
+    out: List[int] = []
+
+    n_hand = min(10, len(hand_ids), len(hand_codes), len(hand_vis))
+    for k in range(min(5, len(sel_ids), len(sel_codes), len(sel_mask))):
+        if not bool(sel_mask[k]):
+            continue
+        sid = int(sel_ids[k] or 0)
+        sc = int(sel_codes[k] or 0)
+        if sid <= 0:
+            continue
+
+        found = None
+        for i in range(n_hand):
+            if i in used:
+                continue
+            if float(hand_vis[i] or 0.0) <= 0.0:
+                continue
+            if int(hand_ids[i] or 0) == sid and int(hand_codes[i] or 0) == sc:
+                found = i
+                break
+
+        if found is None:
+            # fallback: match by id only (codes can be noisy)
+            for i in range(n_hand):
+                if i in used:
+                    continue
+                if float(hand_vis[i] or 0.0) <= 0.0:
+                    continue
+                if int(hand_ids[i] or 0) == sid:
+                    found = i
+                    break
+
+        if found is not None:
+            used.add(found)
+            out.append(found)
+
+    return out
+
+
+
+
+
+def _decorate_strategy_v2_row(raw_turn: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convert chip_window_strategy_v2 row into the legacy-ish shape the template expects.
+    This lets view_strategy.html render without needing template edits.
+    """
+    # ---- enforce v2 ----
+    if str(raw_turn.get("format", "")) != "chip_window_strategy_v2":
+        raise ValueError("not v2")
+
+    # -------------------------------------------------------------------------
+    # DISPLAY-ONLY mapping: raw player_game_emotion -> {idx, beast, raw}
+    #
+    # IMPORTANT:
+    # - Dataset semantics stay: selected_cross is the RAW emotion id.
+    # - This mapping is ONLY for UI pretty labels.
+    # - Built from the same table used in derived_state.py.
+    # -------------------------------------------------------------------------
+    _CROSS_ROWS = [
+        {"idx": 0, "name": "Normal", "normal": 0,  "beast": 11},
+        {"idx": 1, "name": "Fire",   "normal": 1,  "beast": 13},
+        {"idx": 2, "name": "Elec",   "normal": 2,  "beast": 14},
+        {"idx": 3, "name": "Slash",  "normal": 3,  "beast": 15},
+        {"idx": 4, "name": "Erase",  "normal": 4,  "beast": 16},
+        {"idx": 5, "name": "Charge", "normal": 5,  "beast": 17},
+        {"idx": 6, "name": "Aqua",   "normal": 6,  "beast": 18},
+        {"idx": 7, "name": "Thawk",  "normal": 7,  "beast": 19},
+        {"idx": 8, "name": "Tengu",  "normal": 8,  "beast": 20},
+        {"idx": 9, "name": "Grnd",   "normal": 9,  "beast": 21},
+        {"idx": 10, "name": "Dust",  "normal": 10, "beast": 22},
+    ]
+
+    _EMOTION_TO_STATE: Dict[int, Tuple[int, bool]] = {}
+    for row in _CROSS_ROWS:
+        idx = int(row["idx"])
+        n = int(row["normal"])
+        b = int(row["beast"])
+        _EMOTION_TO_STATE[n] = (idx, False)
+        _EMOTION_TO_STATE[b] = (idx, True)
+
+    def _emotion_state(raw_emotion: Any) -> Optional[Dict[str, Any]]:
+        try:
+            r = int(raw_emotion)
+        except Exception:
+            return None
+        if r < 0:
+            return None
+        if r in _EMOTION_TO_STATE:
+            idx, beast = _EMOTION_TO_STATE[r]
+            return {"idx": int(idx), "beast": bool(beast), "raw": int(r)}
+        # Unknown emotion id: keep stable
+        return {"idx": int(r), "beast": False, "raw": int(r)}
+
+    # ---- canonical v2 fields ----
+    replay = str(raw_turn.get("replay", ""))
+    open_idx = _as_int(raw_turn.get("open_idx", 0), 0)
+
+    # Hand arrays (always 10)
+    hand_ids = [int(x) for x in _pad_list(raw_turn.get("window_hand_id", []), 10, 0)]
+    hand_codes = [int(x) for x in _pad_list(raw_turn.get("window_hand_code", []), 10, 0)]
+    hand_vis = [float(x) for x in _pad_list(raw_turn.get("window_hand_vis", []), 10, 0.0)]
+    visible_count = _as_int(raw_turn.get("chip_visible_count", 5), 5)
+
+    # Selected arrays (5)
+    sel_ids = [int(x) for x in _pad_list(raw_turn.get("selected_chips_id", []), 5, 0)]
+    sel_codes = [int(x) for x in _pad_list(raw_turn.get("selected_chips_code", []), 5, 0)]
+    sel_mask = [bool(x) for x in _pad_list(raw_turn.get("selected_chips_mask", []), 5, False)]
+
+    # Held-before arrays (5)
+    held_before_ids = [int(x) for x in _pad_list(raw_turn.get("held_before_id", []), 5, 0)]
+    held_before_codes = [int(x) for x in _pad_list(raw_turn.get("held_before_code", []), 5, 0)]
+    held_before_mask = [bool(x) for x in _pad_list(raw_turn.get("held_before_mask", []), 5, False)]
+
+    # Held-after arrays (5) (enter battle)
+    held_after_ids = [int(x) for x in _pad_list(raw_turn.get("held_after_id", []), 5, 0)]
+    held_after_codes = [int(x) for x in _pad_list(raw_turn.get("held_after_code", []), 5, 0)]
+    held_after_mask = [bool(x) for x in _pad_list(raw_turn.get("held_after_mask", []), 5, False)]
+
+    # ---- build rich hand (always length 10) ----
+    rich_hand: List[Optional[Dict[str, Any]]] = []
+    for i in range(10):
+        if float(hand_vis[i]) <= 0.0:
+            rich_hand.append(None)
+            continue
+        cid = int(hand_ids[i] or 0)
+        ccode = int(hand_codes[i] or 0)
+        if cid <= 0 or cid in (255, 65535):
+            rich_hand.append(None)
+            continue
+        rich_hand.append(resolve_chip_info(cid, ccode))
+
+    # ---- selected_indices for highlighting ----
+    selected_indices = _compute_selected_indices_v2(
+        hand_ids=hand_ids,
+        hand_codes=hand_codes,
+        hand_vis=hand_vis,
+        sel_ids=sel_ids,
+        sel_codes=sel_codes,
+        sel_mask=sel_mask,
+    )
+
+    # ---- rich selected / held ----
+    rich_selected = _rich_from_id_code_arrays(sel_ids, sel_codes, sel_mask, n=5)
+
+    hb_list = raw_turn.get("held_before", None)
+    if isinstance(hb_list, list) and len(hb_list) > 0:
+        rich_held_before = _rich_from_chip_dict_list(hb_list)
+    else:
+        rich_held_before = _rich_from_id_code_arrays(held_before_ids, held_before_codes, held_before_mask, n=5)
+
+    ha_list = raw_turn.get("held_after", None)
+    if isinstance(ha_list, list) and len(ha_list) > 0:
+        rich_held_after = _rich_from_chip_dict_list(ha_list)
+    else:
+        rich_held_after = _rich_from_id_code_arrays(held_after_ids, held_after_codes, held_after_mask, n=5)
+
+    # ---- normalize context keys the template uses ----
+    raw_turn["replay_file"] = replay
+    raw_turn["frame_open"] = open_idx
+    raw_turn["frame_start"] = open_idx
+
+    raw_turn["p_hp_start"] = _as_int(raw_turn.get("p_hp_open", 0), 0)
+    raw_turn["e_hp_start"] = _as_int(raw_turn.get("e_hp_open", 0), 0)
+    raw_turn["player_emotion"] = _as_int(raw_turn.get("player_emotion_open", 0), 0)
+    raw_turn["enemy_emotion"] = _as_int(raw_turn.get("enemy_emotion_open", 0), 0)
+    raw_turn["beast_mode"] = _as_int(raw_turn.get("beast_mode_open", 0), 0)
+    raw_turn["cust_gauge"] = _as_int(raw_turn.get("cust_open", 0), 0)
+    raw_turn["player_charge"] = _as_int(raw_turn.get("player_charge_open", 0), 0)
+    raw_turn["enemy_charge"] = _as_int(raw_turn.get("enemy_charge_open", 0), 0)
+
+    raw_turn["player_pos"] = raw_turn.get("player_pos_open", [0, 0])
+    raw_turn["enemy_pos"] = raw_turn.get("enemy_pos_open", [0, 0])
+
+    raw_turn["grid_state"] = raw_turn.get("grid_tile_open", [0] * 18)
+    raw_turn["grid_owner_state"] = raw_turn.get("grid_owner_open", [2] * 18)
+    if not isinstance(raw_turn["grid_state"], list):
+        raw_turn["grid_state"] = [0] * 18
+    if not isinstance(raw_turn["grid_owner_state"], list):
+        raw_turn["grid_owner_state"] = [2] * 18
+    raw_turn["grid_state"] = _pad_list(raw_turn["grid_state"], 18, 0)
+    raw_turn["grid_owner_state"] = _pad_list(raw_turn["grid_owner_state"], 18, 2)
+
+    raw_turn["hand_slots"] = hand_ids
+    raw_turn["hand_codes"] = hand_codes
+    raw_turn["chip_visible_count"] = visible_count
+
+    raw_turn["rich_hand"] = rich_hand
+    raw_turn["selected_indices"] = selected_indices
+    raw_turn["rich_selected"] = rich_selected
+
+    raw_turn["rich_held_before"] = rich_held_before
+    raw_turn["rich_held_after"] = rich_held_after
+    raw_turn["rich_held"] = rich_held_after  # legacy alias
+
+    # ---- build a top-level window_commit (template convenience) ----
+    raw_turn["window_commit"] = {
+        "happened": True,
+        "selected_any": bool(raw_turn.get("selected_any", False)),
+        "beast_selected": bool(raw_turn.get("beast_selected", False)),
+        "close_chip_select_count": _as_int(raw_turn.get("close_chip_select_count", 0), 0),
+        "source": str(raw_turn.get("commit_source", "") or ""),
+        "selected_chips": [
+            {"id": int(sel_ids[i]), "code": int(sel_codes[i])}
+            for i in range(5)
+            if bool(sel_mask[i]) and int(sel_ids[i]) > 0
+        ],
+    }
+
+    # -------------------------------------------------------------------------
+    # Selected cross (RAW emotion id) -> pretty UI states
+    # -------------------------------------------------------------------------
+    sel_raw = raw_turn.get("selected_cross", None)
+    if sel_raw is None:
+        sel_raw = raw_turn.get("selected_cross_emotion", None)
+
+    pre_raw = raw_turn.get("selected_cross_pre_emotion", None)
+    post_raw = raw_turn.get("selected_cross_post_emotion", None)
+    commit_raw = raw_turn.get("selected_cross_commit_emotion", None)  # legacy/debug
+
+    # Preserve raw integer (including 0) when present
+    try:
+        if sel_raw is not None:
+            raw_turn["selected_cross"] = int(sel_raw)
+            raw_turn["window_commit"]["selected_cross"] = int(sel_raw)
+    except Exception:
+        pass
+
+    raw_turn["selected_cross_state"] = _emotion_state(sel_raw) if sel_raw is not None else None
+    raw_turn["selected_cross_pre_state"] = _emotion_state(pre_raw) if pre_raw is not None else None
+    raw_turn["selected_cross_post_state"] = _emotion_state(post_raw) if post_raw is not None else None
+    raw_turn["selected_cross_commit_state"] = _emotion_state(commit_raw) if commit_raw is not None else None
+
+    # ---- build a minimal derived object so the template's dp/de/wc works ----
+    raw_turn["derived"] = {
+        "player": {
+            "active_cross": raw_turn.get("active_cross_p_open", None),
+            "used_cross_mask": raw_turn.get("used_cross_mask_p_open", []),
+            "folder_used_mask": raw_turn.get("folder_used_mask_p_open", []),
+            "beast": raw_turn.get("beast_p_open", None),
+            "window_commit": dict(raw_turn["window_commit"]),
+        },
+        "enemy": {
+            "active_cross": raw_turn.get("active_cross_e_open", None),
+            "used_cross_mask": raw_turn.get("used_cross_mask_e_open", []),
+            "folder_used_mask": raw_turn.get("folder_used_mask_e_open", []),
+            "beast": raw_turn.get("beast_e_open", None),
+        },
+    }
+
+    return raw_turn
+
+
+
+_PLANNING_CRITIC = None
+
+# Config
+_DEFAULT_PLANNING_CKPT = "checkpoints/planning_critic.pt"
+
+def _init_planning_critic():
+    global _PLANNING_CRITIC
+    try:
+        from viewer.critic_planner_infer import PlanningCriticRunner
+        
+        ckpt = os.environ.get("PLANNING_CRITIC_CKPT", _DEFAULT_PLANNING_CKPT)
+        if os.path.exists(ckpt):
+            _PLANNING_CRITIC = PlanningCriticRunner(ckpt)
+        else:
+            print(f"[PlanningCritic] Checkpoint not found at {ckpt}")
+    except Exception as e:
+        print(f"[PlanningCritic] Failed to load: {e}")
+
+# Call init at startup
+_init_planning_critic()
+
+
+@app.route("/api/predict_strategy", methods=["POST"])
+def api_predict_strategy():
+    """
+    Run the Planning Critic on a hypothetical turn state provided by the UI.
+    """
+    if not _PLANNING_CRITIC:
+        return jsonify({"error": "Critic not loaded", "value": 0.0})
+
+    try:
+        # The UI sends a single dictionary representing the modified turn
+        # We wrap it in a list because infer_rows expects a batch
+        modified_turn = request.json
+        
+        # The infer_rows method expects raw keys like 'p_hp_open', 'window_hand_id', etc.
+        # The JS will ensure these are present and updated based on user selection.
+        preds = _PLANNING_CRITIC.infer_rows([modified_turn])
+        
+        val = preds[0] if preds else 0.0
+        return jsonify({"value": val})
+        
+    except Exception as e:
+        print(f"[API] Prediction failed: {e}")
+        return jsonify({"error": str(e), "value": 0.0}), 500
+
 @app.route("/strategy")
 def view_strategy():
     turns: List[Dict[str, Any]] = []
 
-    if os.path.exists(STRATEGY_DB_PATH):
-        try:
-            with open(STRATEGY_DB_PATH, "r") as f:
-                for line in f:
-                    if not line.strip():
-                        continue
+    if not os.path.exists(STRATEGY_DB_PATH):
+        return render_template("view_strategy.html", turns=[])
+
+    try:
+        with open(STRATEGY_DB_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip(): continue
+                try:
                     raw_turn = json.loads(line)
+                except Exception: continue
+                if not isinstance(raw_turn, dict): continue
 
-                    # Net yield fallback
-                    if "net_yield" not in raw_turn:
-                        d = raw_turn.get("damage_dealt", 0)
-                        t = raw_turn.get("damage_taken", 0)
-                        raw_turn["net_yield"] = d - t
+                # v2 only
+                if str(raw_turn.get("format", "")) != "chip_window_strategy_v2":
+                    continue
 
-                    # Hand processing
-                    processed_hand: List[Optional[Dict[str, Any]]] = []
-                    hand_slots = raw_turn.get("hand_slots", [])
-                    hand_codes = raw_turn.get("hand_codes", [])
-                    visible_count = raw_turn.get("chip_visible_count", 5)
+                # net_yield fallback
+                if "net_yield" not in raw_turn:
+                    d = raw_turn.get("damage_dealt", 0) or 0
+                    t = raw_turn.get("damage_taken", 0) or 0
+                    try: raw_turn["net_yield"] = int(d) - int(t)
+                    except: raw_turn["net_yield"] = 0
 
-                    for i, chip_id in enumerate(hand_slots):
-                        if i >= visible_count:
-                            processed_hand.append(None)
-                        else:
-                            chip_code = hand_codes[i]
-                            info = resolve_chip_info(chip_id, chip_code)
-                            processed_hand.append(info)
-                    raw_turn["rich_hand"] = processed_hand
+                try:
+                    raw_turn = _decorate_strategy_v2_row(raw_turn)
+                except Exception as e:
+                    continue
 
-                    # Grid indices
-                    p_pos = raw_turn.get("player_pos", [0, 0])
-                    e_pos = raw_turn.get("enemy_pos", [0, 0])
-                    raw_turn["p_grid_idx"] = pos_to_grid_idx(p_pos[0], p_pos[1])
-                    raw_turn["e_grid_idx"] = pos_to_grid_idx(e_pos[0], e_pos[1])
+                # Grid indices for visualization
+                p_pos = raw_turn.get("player_pos") or [0, 0]
+                e_pos = raw_turn.get("enemy_pos") or [0, 0]
+                try: raw_turn["p_grid_idx"] = pos_to_grid_idx(float(p_pos[0]), float(p_pos[1]))
+                except: raw_turn["p_grid_idx"] = 0
+                try: raw_turn["e_grid_idx"] = pos_to_grid_idx(float(e_pos[0]), float(e_pos[1]))
+                except: raw_turn["e_grid_idx"] = 0
 
-                    # AI inference
-                    if strategy_model and meta_proc:
-                        try:
-                            with torch.no_grad():
-                                h_ids_list = list(hand_slots)
-                                h_codes_list = list(hand_codes)
-                                for i in range(visible_count, 10):
-                                    if i < len(h_ids_list):
-                                        h_ids_list[i] = 255
-                                    if i < len(h_codes_list):
-                                        h_codes_list[i] = 0
+                turns.append(raw_turn)
 
-                                # If hand arrays are shorter than 10, pad
-                                while len(h_ids_list) < 10:
-                                    h_ids_list.append(255)
-                                while len(h_codes_list) < 10:
-                                    h_codes_list.append(0)
+        # --- BATCH INFERENCE ---
+        if _PLANNING_CRITIC and turns:
+            try:
+                preds = _PLANNING_CRITIC.infer_rows(turns)
+                for i, pred in enumerate(preds):
+                    turns[i]["critic_yield"] = pred
+            except Exception as e:
+                print(f"[PlanningCritic] Inference error: {e}")
 
-                                h_ids = torch.tensor([h_ids_list], dtype=torch.long).to(DEVICE)
-                                san_codes = [min(int(c), 31) for c in h_codes_list]
-                                h_codes = torch.tensor([san_codes], dtype=torch.long).to(DEVICE)
-
-                                meta_list = [meta_proc.get_meta(cid) for cid in h_ids_list]
-                                h_meta = torch.stack(meta_list).unsqueeze(0).to(DEVICE)
-
-                                # Extended Context (36 dims)
-                                p_hp = raw_turn.get("p_hp_start", 1000) / 1000.0
-                                e_hp = raw_turn.get("e_hp_start", 2000) / 2000.0
-
-                                used_vec = [0.0] * 6
-                                c_list = raw_turn.get("player_used_crosses", raw_turn.get("used_crosses", []))
-                                for c in c_list:
-                                    if 1 <= c <= 6:
-                                        used_vec[c - 1] = 1.0
-
-                                cur_cross_id = raw_turn.get("current_cross", 0)
-                                cur_cross_vec = [0.0] * 6
-                                if 0 <= cur_cross_id <= 5:
-                                    cur_cross_vec[cur_cross_id] = 1.0
-                                else:
-                                    cur_cross_vec[0] = 1.0
-
-                                beast_val = 1.0 if raw_turn.get("beast_mode", 0) > 0 else 0.0
-
-                                grid_raw = raw_turn.get("grid_state", [0] * 18)
-                                if len(grid_raw) < 18:
-                                    grid_raw = list(grid_raw) + [0] * (18 - len(grid_raw))
-                                grid_vec = [float(x) / 10.0 for x in grid_raw[:18]]
-
-                                is_full_sync = 1.0 if raw_turn.get("player_emotion", 0) == 1 else 0.0
-
-                                owner_sum = sum(raw_turn.get("grid_owner_state", [0] * 18))
-                                area_adv = ((18 - owner_sum) - 9.0) / 9.0
-
-                                e_col = raw_turn["e_grid_idx"] % 6
-                                e_col_norm = e_col / 5.0
-
-                                ctx_list = (
-                                    [p_hp, e_hp]
-                                    + used_vec
-                                    + cur_cross_vec
-                                    + [beast_val]
-                                    + grid_vec
-                                    + [is_full_sync, area_adv, e_col_norm]
-                                )
-                                full_ctx = torch.tensor([ctx_list], dtype=torch.float32).to(DEVICE)
-
-                                pos = torch.arange(10, device=DEVICE).unsqueeze(0)
-                                src = (
-                                    strategy_model.chip_embedding(h_ids)
-                                    + strategy_model.code_embedding(h_codes)
-                                    + strategy_model.meta_proj(h_meta)
-                                    + strategy_model.pos_embedding(pos)
-                                )
-                                src = src + strategy_model.context_proj(full_ctx).unsqueeze(1)
-
-                                memory = strategy_model.encoder(src)
-                                cross_logits = strategy_model.cross_head(memory.mean(dim=1))
-                                _, seq_tokens = strategy_model.inference(memory, cross_logits, max_chip_index=visible_count)
-
-                                raw_turn["ai_indices"] = [t for t in seq_tokens[0].tolist() if t < 10 or t == 11]
-                                raw_turn["ai_cross"] = torch.argmax(cross_logits, dim=1).item()
-                        except Exception as e:
-                            print(f"Inference error: {e}")
-
-                    turns.append(raw_turn)
-        except Exception as e:
-            print(f"Error reading strategy DB: {e}")
+    except Exception as e:
+        print(f"Error reading strategy DB: {e}")
 
     return render_template("view_strategy.html", turns=turns[::-1])
 
-from derived_state import compute_derived
+
+import os
+import json
 import time
+import gc
+import torch
+from typing import Dict, Any
+from flask import Flask, jsonify
+
+from derived_state import compute_derived
 
 _CRITIC = None
 _CRITIC_ERR = None
@@ -1106,12 +1448,11 @@ _CRITIC_ERR = None
 # Critic config
 # ---------------------------------------------------------------------------
 
-_DEFAULT_CRITIC_CKPT = "C:\\Users\\leeor\\FFCO\\ai\\tango-ai\\checkpoints\\critic_rl\\tdlam_overfit_bs32_lr1e3_wd0\\last.pt"
-# _DEFAULT_CRITIC_CKPT = "C:\\Users\\leeor\\FFCO\\ai\\tango-ai\\checkpoints\\critic_rl\\tdlam_v1\\last.pt"
+_DEFAULT_CRITIC_CKPT = "C:\\Users\\leeor\\FFCO\\ai\\tango-ai\\checkpoints\\critic_rl\\tdlam_complete_v5_final\\last.pt"
 _DEFAULT_CRITIC_DEVICE = "cuda"
 
 # Increase batch size significantly to saturate GPU
-_DEFAULT_BATCH_SEQS = 2048  
+_DEFAULT_BATCH_SEQS = 256  
 
 
 def _init_critic():
@@ -1183,9 +1524,8 @@ def serve_inputs(replay_name):
     # 2) Critic Inference
     if _CRITIC is not None and derived_data:
         try:
+            # We trust the model's seq_len, but force stride 1 for visualization
             trained_seq_len = getattr(_CRITIC, "trained_seq_len", 16)
-            
-            # FORCE STRIDE 1 to get a value for every single frame
             stride = 1 
 
             print(f"[Serve] Inferencing Critic (stride={stride}, seq_len={trained_seq_len})...")
@@ -1212,6 +1552,11 @@ def serve_inputs(replay_name):
             print(f"[Serve] Critic inference failed: {e}")
             import traceback
             traceback.print_exc()
+        
+        # --- VRAM CLEANUP ---
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # 3) Attach
     if critic_values:

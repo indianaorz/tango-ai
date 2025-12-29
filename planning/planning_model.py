@@ -1,412 +1,451 @@
-#planning/planning_model.py
 import torch
-import torch.nn as nn
-import json
+import numpy as np
 import os
-from collections import deque
-from typing import Dict, Any, List, Optional
 import sys
+import copy
+from collections import deque
+from typing import Dict, Any, List, Tuple, Optional
 
-# Add parent directory to path so we can import 'strategy'
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+# Ensure viewer/ is in python path to access critic_infer
+sys.path.append(os.getcwd())
 
-from planning.strategy_model import StrategyTransformer, META_DIM, ELEMENTS
-
-# =============================================================================
-# 1. METADATA PROCESSOR
-# =============================================================================
-
-class ChipMetaProcessor:
-    def __init__(self, json_path):
-        self.db = {} 
-        self.load_db(json_path)
-        
-    def load_db(self, path):
-        if not os.path.exists(path):
-            print(f"⚠️ [Plan] Warning: Chips DB not found at {path}")
-            return
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        for chip in data:
-            vec = self._build_vector(chip)
-            def set_id(raw_val):
-                if raw_val is None: return
-                s_val = str(raw_val).strip()
-                if not s_val: return 
-                try: self.db[int(s_val)] = vec
-                except: pass 
-            set_id(chip.get('SId'))
-            set_id(chip.get('MId'))
-                
-    def _build_vector(self, chip):
-        dmg_str = str(chip.get('Damage', '0'))
-        if '-' in dmg_str: dmg_str = dmg_str.split('-')[1]
-        try:
-            if not dmg_str.strip() or not dmg_str[0].isdigit(): dmg_val = 0.0
-            else: dmg_val = float(dmg_str) / 500.0
-        except: dmg_val = 0.0
-        elem_vec = [0.0] * len(ELEMENTS)
-        c_elem = chip.get('Element', "")
-        if c_elem in ELEMENTS: elem_vec[ELEMENTS.index(c_elem)] = 1.0
-        else: elem_vec[0] = 1.0 
-        type_vec = [0.0] * 3
-        try:
-            mb_str = str(chip.get('MB', '0')).strip()
-            mb_val = int(float(mb_str)) if mb_str else 0
-        except: mb_val = 0
-        if chip.get('MId') is not None and str(chip.get('MId')).strip():
-            if "Giga" in chip.get('Version', '') or mb_val > 80: type_vec[2] = 1.0
-            else: type_vec[1] = 1.0
-        else: type_vec[0] = 1.0
-        return torch.tensor([dmg_val] + elem_vec + type_vec, dtype=torch.float32)
-
-    def get_meta(self, chip_id):
-        if chip_id in self.db: return self.db[chip_id]
-        return torch.zeros(META_DIM, dtype=torch.float32)
+try:
+    from viewer.critic_infer import CriticRunner, _tensorize_frame_v5
+except ImportError:
+    # Fallback if running from a different root
+    sys.path.append(os.path.join(os.getcwd(), 'viewer'))
+    from critic_infer import CriticRunner, _tensorize_frame_v5
 
 # =============================================================================
-# 2. PLANNING STRATEGY (Execution Logic)
+# MMBN6 CONSTANTS
+# =============================================================================
+WILDCARD_CODE = 26  # * Code (Wildcard)
+MAX_SLOTS = 5       # Max total slots allowed (Chips + Beast)
+NAVI_CUST_MAX = 50  # MB limit (simplified, not strictly enforced here)
+
+# =============================================================================
+# CRITIC PLANNER STRATEGY
 # =============================================================================
 
 class PlanningAgentStrategy:
     def __init__(self, 
                  model_path: str, 
-                 chips_db_path: str,
                  device: torch.device, 
-                 key_bit_positions: Dict[str, int]):
+                 key_bit_positions: Dict[str, int],
+                 folder_len: int = 30,
+                 **kwargs):
         
         self.device = device
         self.key_bits = key_bit_positions
-        self.EOS_TOKEN = 13
+        self.folder_len = folder_len
         
-        # Load Model
-        self.model = StrategyTransformer(
-            num_chip_ids=512, 
-            num_codes=32, 
-            d_model=512, 
-            nhead=8, 
-            num_layers=6,
-            dropout=0.0
-        )
+        print(f"[Planner] Initializing Critic-Based Planner using: {model_path}")
         
+        # Load the Critic Model (The "Brain")
+        # We use batch_seqs=2048 to ensure we can eval ALL combos in one massive batch
         try:
-            # Checkpoint Sanitization
-            state_dict = torch.load(model_path, map_location=device)
-            new_state_dict = {}
-            for k, v in state_dict.items():
-                new_key = k.replace("_orig_mod.", "")
-                new_state_dict[new_key] = v
-            
-            self.model.load_state_dict(new_state_dict)
-            self.model.to(device)
-            self.model.eval()
-            print(f"[Plan] Model loaded from {model_path} on {device}")
+            self.critic = CriticRunner(
+                ckpt_path=model_path, 
+                device=str(device), 
+                use_amp=True, 
+                batch_seqs=2048
+            )
+            print("[Planner] Critic loaded successfully.")
         except Exception as e:
-            print(f"[Plan] ❌ Failed to load planning model: {e}")
-            
-        self.meta_proc = ChipMetaProcessor(chips_db_path)
-        self.action_queue = deque() 
-        self.current_targets = deque() 
-        
-        # WARMUP TIMER (180 frames = ~3.0s)
+            print(f"[Planner] ❌ FATAL: Failed to load critic: {e}")
+            self.critic = None
+
+        # State management
+        self.action_queue = deque()      # Buffer for button mashing (holding A)
+        self.current_targets = deque()   # High level steps (Navigate -> Select -> OK)
         self.frames_in_window = 0
-        self.WINDOW_WARMUP_FRAMES = 180 
         self.plan_generated = False
         
+        # Config
+        self.WINDOW_WARMUP_FRAMES = 30   # Wait 0.5s for menu to settle
+        self.BUTTON_HOLD_FRAMES = 4
+        self.BUTTON_WAIT_FRAMES = 12
+
     def reset_state(self, port: int):
+        """Called when entering Battle Mode or Resetting."""
         self.action_queue.clear()
         self.current_targets.clear()
         self.frames_in_window = 0
         self.plan_generated = False
 
-    def _int_to_bin16(self, mask: int) -> str:
-        return format(int(mask) & 0xFFFF, "016b")
-
-    def _get_key_mask(self, btn_name: str) -> int:
-        ALIASES = {
-            'A': 'Z', 'B': 'X', 'L': 'A', 'R': 'S',
-            'START': 'RETURN', 'SELECT': 'BACKSPACE',
-            'UP': 'Up', 'DOWN': 'Down', 'LEFT': 'Left', 'RIGHT': 'Right'
-        }
-        physical_name = ALIASES.get(btn_name, btn_name)
-        if physical_name in self.key_bits: return (1 << int(self.key_bits[physical_name]))
-        for k, v in self.key_bits.items():
-            if k.upper() == physical_name.upper(): return (1 << int(v))
-        for k, v in self.key_bits.items():
-            if k.upper() == btn_name.upper(): return (1 << int(v))
-        return 0
-
     def decide_action(self, port: int, game_state: dict) -> dict:
+        """
+        Main Loop:
+        1. If Window Closed -> Reset & NoOp.
+        2. If executing a plan -> return next button press.
+        3. If no plan -> Brute force best hand -> Generate plan.
+        """
         inside_window = bool(float(game_state.get("inside_window", 0)))
         
         # 1. Reset logic if we leave the window
         if not inside_window:
-            self.frames_in_window = 0
-            self.action_queue.clear()
-            self.current_targets.clear()
-            self.plan_generated = False
+            if self.frames_in_window > 0:
+                print(f"[Planner] Window closed. Resetting.")
+            self.reset_state(port)
             return self._no_op()
 
         # 2. Increment timer
         self.frames_in_window += 1
 
-        # 3. WARMUP CHECK
+        # 3. Warmup (Wait for UI to fade in)
         if self.frames_in_window < self.WINDOW_WARMUP_FRAMES:
             return self._no_op()
 
-        # 4. Execute Queued Actions
+        # 4. Execute Low-Level Action Queue (Button Holds/Waits)
         if self.action_queue:
             mask = self.action_queue.popleft()
             return self._create_response(mask, debug_msg="executing_queue")
 
-        # 5. Navigate to Targets
+        # 5. Navigate to High-Level Targets
         if self.current_targets:
             return self._navigate_to_next_target(game_state)
 
-        # 6. Stop if Done
+        # 6. Stop if Done (Waiting for battle to start)
         if self.plan_generated:
             return self._no_op()
 
-        # 7. Generate Plan
-        self.plan_generated = True 
-        return self._run_inference_and_plan(game_state)
+        # 7. Generate Plan (The "Brute Force" Step)
+        self.plan_generated = True
+        return self._run_brute_force_planning(game_state)
 
-    def _run_inference_and_plan(self, game_state: dict):
+    # -------------------------------------------------------------------------
+    # CORE PLANNING LOGIC
+    # -------------------------------------------------------------------------
+
+    def _run_brute_force_planning(self, game_state: dict):
+        """
+        Generates all valid hands, feeds them to Critic, picks best.
+        """
+        if not self.critic:
+            return self._no_op()
+
         try:
-            # --- A. PREPARE HAND ---
-            chip_slots = game_state.get("chip_slots", [])[:10]
-            chip_codes = game_state.get("chip_codes", [])[:10]
-            visible_count = int(game_state.get("chip_visible_count", 5))
+            # A. Parse Context
+            static = {} # Static data usually mostly relevant for folder ID mapping, 
+                        # but Critic needs it. If missing, we rely on tensorizer defaults.
             
-            while len(chip_slots) < 10: chip_slots.append(255)
-            while len(chip_codes) < 10: chip_codes.append(0)
-
-            for i in range(visible_count, 10):
-                chip_slots[i] = 255
-                chip_codes[i] = 0
-
-            chip_slots = [max(0, min(int(x), 511)) for x in chip_slots]
-            chip_codes = [max(0, min(int(x), 31)) for x in chip_codes]
-
-            h_ids = torch.tensor([chip_slots], dtype=torch.long).to(self.device)
-            h_codes = torch.tensor([chip_codes], dtype=torch.long).to(self.device)
-            meta_list = [self.meta_proc.get_meta(cid) for cid in chip_slots]
-            h_meta = torch.stack(meta_list).unsqueeze(0).to(self.device)
+            # Reconstruct 'derived' dict from game_state for the tensorizer
+            derived = self._reconstruct_derived(game_state)
             
-            # --- B. PREPARE CONTEXT (36 Dims) ---
-            p_hp = float(game_state.get("player_health", 500)) / 1000.0
-            e_hp = float(game_state.get("enemy_health", 500)) / 2000.0
+            hand_slots = [int(x) for x in game_state.get("chip_slots", [])]
+            hand_codes = [int(x) for x in game_state.get("chip_codes", [])]
             
-            used_crosses = game_state.get("player_used_crosses_list", [])
-            used_cross_vec = [0.0] * 6
-            for c in used_crosses:
-                if 1 <= c <= 6: used_cross_vec[c-1] = 1.0
+            # B. Generate Candidates
+            # Returns list of dicts: {'chain': [idxs], 'cross': int, 'beast': bool}
+            candidates = self._generate_all_valid_moves(hand_slots, hand_codes, derived)
             
-            curr_cross_id = int(float(game_state.get("player_cross_id", 0)))
-            curr_cross_vec = [0.0] * 6
-            if 0 <= curr_cross_id <= 5: curr_cross_vec[curr_cross_id] = 1.0
-            else: curr_cross_vec[0] = 1.0
-                
-            beast_val = 1.0 if int(float(game_state.get("beast_mode", 0))) > 0 else 0.0
-            
-            grid_raw = game_state.get("grid_state", [0]*18)
-            grid_vec = [x / 10.0 for x in grid_raw]
-            if len(grid_vec) != 18: grid_vec = [0.0]*18
-            
-            p_emo = int(float(game_state.get("player_emotion", 0)))
-            is_full_sync = 1.0 if p_emo == 1 else 0.0
-            
-            owner_state = game_state.get("grid_owner_state", [0]*18)
-            if len(owner_state) != 18: owner_state = [0]*9 + [1]*9
-            area_adv = ((18 - sum(owner_state)) - 9.0) / 9.0
-            
-            e_pos = game_state.get("enemy_pos", [0, 0])
-            e_col = max(0, min(5, int((e_pos[0] - 40) / 40)))
-            e_col_norm = e_col / 5.0
-            
-            ctx_list = [p_hp, e_hp] + used_cross_vec + curr_cross_vec + [beast_val] + grid_vec + [is_full_sync, area_adv, e_col_norm]
-            ctx_vec = torch.tensor([ctx_list], dtype=torch.float32).to(self.device)
-            
-            # --- C. INFERENCE ---
-            B = h_ids.shape[0]
-            pos = torch.arange(10, device=self.device).unsqueeze(0).expand(B, 10)
-            
-            with torch.no_grad():
-                src = (self.model.chip_embedding(h_ids) + 
-                       self.model.code_embedding(h_codes) + 
-                       self.model.meta_proj(h_meta) + 
-                       self.model.pos_embedding(pos))
-                src = src + self.model.context_proj(ctx_vec).unsqueeze(1)
-                memory = self.model.encoder(src)
-                
-                cross_logits, seq_tokens = self.model.inference(
-                    memory, 
-                    self.model.cross_head(memory.mean(dim=1)),
-                    max_chip_index=visible_count
-                )
-
-            # --- D. DECODE PLAN ---
-            # Cross output MUST be interpreted as a *menu index* in the cross window.
-            # The menu dynamically shrinks as crosses are used (removed from the list).
-            # If the model outputs an index that doesn't exist anymore, we ignore it.
-            selected_cross_raw = int(torch.argmax(cross_logits, dim=1).item())
-
-            used_list = game_state.get("player_used_crosses_list", []) or []
-
-            # Cross menu contains 5 crosses (not "Normal"). IDs are 1..5 in our planner convention.
-            available_cross_ids = [cid for cid in (1, 2, 3, 4, 5) if cid not in used_list]
-            avail_n = len(available_cross_ids)
-
-            def _as_valid_menu_index(raw: int) -> Optional[int]:
-                """
-                Support both training conventions:
-                - raw in [0..4]  : already a menu index
-                - raw in [1..5]  : menu index is raw-1 (common off-by-one if 0 reserved)
-                Anything else => invalid / 'no cross'.
-                """
-                if 0 <= raw < avail_n:
-                    return raw
-                if 1 <= raw <= 5 and 0 <= (raw - 1) < avail_n:
-                    return raw - 1
-                return None
-
-            cross_menu_idx = _as_valid_menu_index(selected_cross_raw)
-            if cross_menu_idx is not None:
-                self.current_targets.append({"type": "cross", "val": cross_menu_idx})
-
-                
-            tokens = seq_tokens[0].tolist()
-            for t in tokens:
-                if t == self.EOS_TOKEN:
-                    self.current_targets.append({"type": "ok", "val": 0})
-                    break 
-                elif t == 11:
-                    self.current_targets.append({"type": "beast", "val": 0})
-                elif t < 10:
-                    if t < visible_count:
-                        self.current_targets.append({"type": "chip", "val": t})
-            
-            print(f"[Plan] Generated: {self.current_targets}")
-            return self._navigate_to_next_target(game_state)
-            
-        except Exception as e:
-            print(f"[Plan] Error: {e}")
-            import traceback; traceback.print_exc()
-            self.action_queue.append(self._get_key_mask("START"))
-            return self._create_response(0, debug_msg="inference_failed")
-
-    def _navigate_to_next_target(self, game_state):
-        if not self.current_targets: return self._no_op()
-        target = self.current_targets[0]
-        
-        curr_idx = game_state.get("selected_menu_index")
-        curr_cross_idx = int(game_state.get("selected_cross_index", 0))
-        try: inside_cross_window = bool(float(game_state.get("inside_cross_window", 0)))
-        except: inside_cross_window = False
-
-        if curr_idx is None: return self._no_op()
-        curr_idx = int(curr_idx)
-        visible_count = int(game_state.get("chip_visible_count", 5))
-
-        # 1. OK
-        if target['type'] == 'ok':
-            if curr_idx == 10:
-                self.current_targets.popleft()
-                return self._press("A")
-            if inside_cross_window: return self._press("DOWN")
-            return self._press("START")
-
-        # 2. BEAST
-        if target['type'] == 'beast':
-            if inside_cross_window: return self._press("DOWN")
-            if curr_idx == 11:
-                print("[Plan] Beast Out Selected")
-                self.current_targets.popleft()
-                return self._press("A")
-            if curr_idx == 10: return self._press("RIGHT")
-            return self._press("START")
-
-        # 3. CROSS (Dynamic) — MENU-INDEX BASED
-        if target['type'] == 'cross':
-            desired_menu_idx = int(target['val'])
-
-            used_list = game_state.get("player_used_crosses_list", []) or []
-
-            # Cross menu contains 5 crosses (IDs 1..5). Used ones are removed.
-            available_cross_ids = [cid for cid in (1, 2, 3, 4, 5) if cid not in used_list]
-            avail_n = len(available_cross_ids)
-
-            # If the model asks for an index that no longer exists (e.g. 4 when only 0..3),
-            # we must IGNORE it (skip this target) — otherwise we can never reach it.
-            if desired_menu_idx < 0 or desired_menu_idx >= avail_n:
-                print(f"[Plan] ⚠️ Cross menu idx {desired_menu_idx} out of range (0..{max(avail_n-1, 0)}). Ignoring.")
-                self.current_targets.popleft()
+            if not candidates:
+                print("[Planner] No valid moves found. Pressing OK.")
+                self.current_targets.append({"type": "ok"})
                 return self._no_op()
 
-            # Optional: for logging only (which actual cross ID sits at that menu index right now)
-            tgt_cross_id = available_cross_ids[desired_menu_idx]
-
-            if not inside_cross_window:
-                if curr_idx == 11: return self._press("UP")
-                if curr_idx == 10: return self._press("LEFT")
-                return self._press("UP")
-
-            if curr_cross_idx == desired_menu_idx:
-                print(f"[Plan] Cross menu idx {desired_menu_idx} (id={tgt_cross_id}) Selected")
-                self.current_targets.popleft()
-                return self._press("A")
-
-            diff = desired_menu_idx - curr_cross_idx
-            if diff > 0: return self._press("DOWN")
-            if diff < 0: return self._press("UP")
-
-        # 4. CHIP
-        if target['type'] == 'chip':
-            tgt_idx = target['val']
-            if inside_cross_window: return self._press("DOWN")
+            # C. Batch Evaluation
+            # We construct a massive batch of "Hallucinated Futures"
+            batch_tensors = []
             
-            if curr_idx == 11: return self._press("UP")
-            if curr_idx == 10: return self._press("LEFT")
+            for cand in candidates:
+                # Create the future state (Window Closed, Chips in Queue)
+                t_dict = self._create_hallucinated_state(
+                    cand, game_state, static, derived, hand_slots, hand_codes
+                )
+                batch_tensors.append(t_dict)
 
-            if curr_idx == tgt_idx:
-                print(f"[Plan] Chip {tgt_idx} Selected")
+            # Stack for inference
+            xb = {}
+            first_keys = batch_tensors[0].keys()
+            for k in first_keys:
+                # Stack [N, ...] -> [B, N, ...] -> [B, 1, ...]
+                t_list = [d[k] for d in batch_tensors]
+                stacked = torch.stack(t_list, dim=0).unsqueeze(1)
+                xb[k] = stacked.to(self.critic.device, non_blocking=True)
+
+            # D. Inference
+            with torch.no_grad():
+                # [B, 1] output
+                values = self.critic.model(xb).squeeze(-1).squeeze(-1).cpu().numpy()
+
+            # E. Selection
+            best_idx = np.argmax(values)
+            best_move = candidates[best_idx]
+            best_val = values[best_idx]
+
+            print(f"[Planner] Evaluated {len(candidates)} hands. Best V(s): {best_val:.3f}")
+            print(f"   -> Chips: {best_move['chain']} | Cross: {best_move['cross_idx']} | Beast: {best_move['do_beast']}")
+
+            # F. Build Execution Path
+            self._build_execution_path(best_move)
+            
+            # Start executing immediately
+            return self._navigate_to_next_target(game_state)
+
+        except Exception as e:
+            print(f"[Planner] ❌ Error in planning: {e}")
+            import traceback; traceback.print_exc()
+            # Fallback: Just press OK
+            self.current_targets.append({"type": "ok"})
+            return self._no_op()
+
+    def _generate_all_valid_moves(self, hand_slots, hand_codes, derived) -> List[Dict]:
+        """
+        Combinatorics:
+        1. Valid Chip Chains (DFS) - Enforcing Same ID *OR* Same Code logic.
+        2. Valid Form Changes (Current Cross -> New Cross / Beast).
+        """
+        # --- 1. Generate Chains ---
+        valid_indices = [i for i, x in enumerate(hand_slots) if x != 255 and x != 65535]
+        chains = self._generate_chip_chains(hand_slots, hand_codes, valid_indices)
+        
+        # --- 2. Form Options ---
+        curr_cross = derived.get("active_cross", {}).get("idx", 0)
+        is_beast = derived.get("beast", {}).get("active", False)
+        
+        form_opts = []
+        # Option A: Stay
+        form_opts.append((curr_cross, is_beast))
+        
+        # Option B: Beast Out (if not active)
+        if not is_beast:
+            form_opts.append((curr_cross, True))
+            
+        # Option C: Change Cross (Not implemented in this version to keep logic simple)
+        # Would require knowing unlocked crosses.
+        
+        # --- 3. Cartesian Product & Filter ---
+        candidates = []
+        for ch in chains:
+            for (cr, b) in form_opts:
+                
+                # RULE: Beast Out consumes 1 chip slot.
+                # If Beast=True, max chips = MAX_SLOTS - 1
+                max_allowed = MAX_SLOTS - 1 if b else MAX_SLOTS
+                
+                if len(ch) <= max_allowed:
+                    candidates.append({
+                        "chain": ch,
+                        "cross_idx": cr,
+                        "do_beast": b
+                    })
+                
+        return candidates
+
+    def _generate_chip_chains(self, ids: List[int], codes: List[int], valid_indices: List[int]) -> List[List[int]]:
+        """
+        Generates valid MMBN chip selection chains.
+        
+        RULES:
+        1. Ascending hand indices (Sequential).
+        2. The ENTIRE chain must satisfy ONE of these Global Constraints:
+           a) All chips have the same ID (Code doesn't matter).
+           b) All chips have compatible Codes (One specific code + Wildcards).
+        """
+        chains = [[]] # Option: Empty hand
+        
+        # Recursive State: (is_same_id_possible, required_id, is_same_code_possible, required_code)
+        
+        def extend_chain(current_chain, state):
+            # Max depth check is handled by caller/filters, but good to have safety
+            if len(current_chain) >= MAX_SLOTS: return
+
+            last_idx = current_chain[-1]
+            # Search strictly forward
+            start_search = last_idx + 1
+            
+            same_id_ok, req_id, same_code_ok, req_code = state
+
+            for i in valid_indices:
+                if i < start_search: continue
+                
+                c = codes[i]
+                idn = ids[i]
+                
+                # Check 1: Can we continue "Same ID" mode?
+                next_same_id_ok = same_id_ok and (idn == req_id)
+                
+                # Check 2: Can we continue "Same Code" mode?
+                next_same_code_ok = same_code_ok
+                next_req_code = req_code
+                
+                if same_code_ok:
+                    if c != WILDCARD_CODE:
+                        if req_code is None:
+                            # We just locked into a code
+                            next_req_code = c
+                        elif c != req_code:
+                            # Code mismatch
+                            next_same_code_ok = False
+                
+                # If EITHER mode is still alive, this chip is valid
+                if next_same_id_ok or next_same_code_ok:
+                    new_chain = current_chain + [i]
+                    chains.append(new_chain)
+                    
+                    new_state = (next_same_id_ok, req_id, next_same_code_ok, next_req_code)
+                    extend_chain(new_chain, new_state)
+
+        # Start chains from every single chip
+        for i in valid_indices:
+            chain = [i]
+            chains.append(chain)
+            
+            # Initial Constraint State for a chain of length 1
+            c = codes[i]
+            req_c = c if c != WILDCARD_CODE else None
+            
+            # (ID Mode Alive, ID[i], Code Mode Alive, Code[i] or None)
+            init_state = (True, ids[i], True, req_c)
+            extend_chain(chain, init_state)
+            
+        return chains
+
+    def _create_hallucinated_state(self, cand, frame, static, derived, hand_ids, hand_codes):
+        """
+        Creates the tensor dict for the Critic, imagining the window is closed.
+        """
+        chain_idxs = cand["chain"]
+        
+        # 1. Hallucinate Held Chips
+        sim_ids = [hand_ids[i] for i in chain_idxs]
+        sim_codes = [hand_codes[i] for i in chain_idxs]
+        
+        # On Deck is the first chip
+        sim_on_deck = sim_ids[0] if sim_ids else 0
+        
+        # 2. Hallucinate Form
+        sim_derived = copy.deepcopy(derived)
+        sim_derived["active_cross"]["idx"] = cand["cross_idx"]
+        sim_derived["beast"]["active"] = cand["do_beast"]
+        sim_derived["held_chips"] = [{"id": i, "code": c} for i, c in zip(sim_ids, sim_codes)]
+        
+        # 3. Hallucinate Frame
+        sim_frame = frame.copy()
+        sim_frame["inside_window"] = False
+        sim_frame["player_chip"] = sim_on_deck # The critical causal link
+        
+        # 4. Tensorize
+        return _tensorize_frame_v5(sim_frame, sim_derived, static, folder_len=self.folder_len)
+
+    def _reconstruct_derived(self, game_state):
+        """
+        Helper to rebuild 'derived' dict structure from flat game_state.
+        """
+        return {
+            "active_cross": {"idx": int(game_state.get("player_cross_id", 0))},
+            "beast": {"active": bool(game_state.get("beast_mode", 0))},
+            "held_chips": [], # Empty in window
+            "folder_used_mask": game_state.get("folder_used_mask", []),
+            "used_cross_mask": game_state.get("player_used_crosses_list", []),
+            "used_chip_id": 0 # Reset
+        }
+
+    # -------------------------------------------------------------------------
+    # NAVIGATION & EXECUTION
+    # -------------------------------------------------------------------------
+
+    def _build_execution_path(self, best_move):
+        """
+        Converts the Best Move into a queue of targets.
+        """
+        # 1. Beast Out?
+        if best_move['do_beast']:
+             # Assume 'R' button or similar triggers Beast in the menu.
+             self.current_targets.append({"type": "beast"})
+
+        # 2. Chips
+        for idx in best_move['chain']:
+            self.current_targets.append({"type": "chip", "idx": idx})
+            
+        # 3. OK
+        self.current_targets.append({"type": "ok"})
+
+    def _navigate_to_next_target(self, game_state):
+        """
+        Moves the cursor to the target index and presses A.
+        """
+        if not self.current_targets:
+            return self._no_op()
+            
+        target = self.current_targets[0]
+        curr_idx = int(game_state.get("selected_menu_index", 0))
+        visible_count = int(game_state.get("chip_visible_count", 5))
+        
+        # --- EXECUTE: BEAST ---
+        if target['type'] == 'beast':
+            print("[Planner] Executing Beast Out")
+            self.current_targets.popleft()
+            return self._press("R") # Standard Beast Button
+
+        # --- EXECUTE: OK ---
+        if target['type'] == 'ok':
+            # Shortcut: Press START to OK immediately?
+            # Standard MMBN behavior usually allows START to confirm.
+            if curr_idx == 10:
+                print("[Planner] Pressing OK (A)")
                 self.current_targets.popleft()
                 return self._press("A")
+            
+            print("[Planner] Pressing OK (Start Shortcut)")
+            self.current_targets.popleft()
+            return self._press("START") 
 
+        # --- EXECUTE: CHIP SELECT ---
+        if target['type'] == 'chip':
+            tgt_idx = target['idx']
+            
+            if curr_idx == tgt_idx:
+                print(f"[Planner] Selecting Chip {tgt_idx}")
+                self.current_targets.popleft()
+                return self._press("A")
+            
+            # Grid Navigation (2 rows of 5)
+            # 0 1 2 3 4
+            # 5 6 7 8 9
+            # 10 (OK)
+            
+            # If we are at OK (10), go back up
+            if curr_idx == 10:
+                return self._press("UP")
+                
             curr_x, curr_y = curr_idx % 5, curr_idx // 5
             tgt_x, tgt_y = tgt_idx % 5, tgt_idx // 5
             
-            if curr_y != tgt_y:
-                direction = "DOWN" if tgt_y > curr_y else "UP"
-                dest_idx = curr_idx + (5 if direction == "DOWN" else -5)
-                if dest_idx < visible_count: return self._press(direction)
-
-            if curr_x != tgt_x:
-                direction = "RIGHT" if tgt_x > curr_x else "LEFT"
-                dest_idx = curr_idx + (1 if direction == "RIGHT" else -1)
-                if dest_idx < visible_count: return self._press(direction)
-            
-            return self._press("LEFT")
+            if curr_y < tgt_y: return self._press("DOWN")
+            if curr_y > tgt_y: return self._press("UP")
+            if curr_x < tgt_x: return self._press("RIGHT")
+            if curr_x > tgt_x: return self._press("LEFT")
 
         return self._no_op()
 
     def _press(self, key_name: str):
         mask = self._get_key_mask(key_name)
         
-        # 🚀 UPDATE: "Decisive Press" Logic
-        # 1. HOLD the button for 5 frames (ensure registration)
-        for _ in range(5): 
+        # Hold for a few frames
+        for _ in range(self.BUTTON_HOLD_FRAMES):
             self.action_queue.append(mask)
-            
-        # 2. WAIT for 25 frames (allow UI animation/state update)
-        for _ in range(25): 
+        # Release and wait
+        for _ in range(self.BUTTON_WAIT_FRAMES):
             self.action_queue.append(0)
             
-        # Total: 30 frames per action
         return self._create_response(mask, f"press_{key_name}")
 
+    def _get_key_mask(self, btn_name: str) -> int:
+        # Standard alias mapping
+        ALIAS = {'A': 'Z', 'B': 'X', 'L': 'A', 'R': 'S', 'START': 'RETURN'}
+        name = ALIAS.get(btn_name, btn_name)
+        if name in self.key_bits:
+            return (1 << int(self.key_bits[name]))
+        return 0
+
     def _create_response(self, mask: int, debug_msg: str):
-        return {"button_command": {"type": "key_press", "key": self._int_to_bin16(mask)}, "ng_key_bin": "", "debug": {"plan_action": debug_msg}}
+        bin_str = format(int(mask) & 0xFFFF, "016b")
+        return {
+            "button_command": {"type": "key_press", "key": bin_str}, 
+            "debug": {"plan_action": debug_msg}
+        }
 
     def _no_op(self):
         return self._create_response(0, "no_op")

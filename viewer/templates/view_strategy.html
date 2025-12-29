@@ -1,104 +1,320 @@
 <!DOCTYPE html>
 <html>
+
 <head>
+    <meta charset="utf-8" />
     <title>Tango Strategy Analyzer</title>
     <style>
-        body { background: #111; color: #eee; font-family: 'Consolas', monospace; padding: 20px; }
-        h2 { color: #4db8ff; border-bottom: 1px solid #333; padding-bottom: 10px; }
-        a { color: #888; text-decoration: none; }
-        a:hover { color: #fff; }
-
-        /* TABLE STYLING */
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 12px; }
-        th { text-align: left; color: #666; border-bottom: 2px solid #444; padding: 10px; text-transform: uppercase; letter-spacing: 1px; }
-        td { border-bottom: 1px solid #222; padding: 12px 10px; vertical-align: top; }
-        tr:hover { background: #1a1a1a; }
-
-        /* CHIP VISUALIZATION */
-        .hand-container { display: flex; gap: 4px; flex-wrap: wrap; max-width: 250px; }
-        .queue-container { display: flex; gap: 4px; align-items: center; }
-        
-        .chip-slot { 
-            width: 40px; height: 50px; 
-            background: #222; border: 1px solid #444; 
-            display: flex; flex-direction: column; 
-            align-items: center; justify-content: flex-end; 
-            border-radius: 4px; position: relative; overflow: hidden;
+        body {
+            background: #111;
+            color: #eee;
+            font-family: 'Consolas', monospace;
+            padding: 20px;
         }
 
-        /* Hand Styles */
-        .chip-slot.in-hand { opacity: 0.5; filter: grayscale(0.6); }
-        .chip-slot.in-hand.selected { 
+        h2 {
+            color: #4db8ff;
+            border-bottom: 1px solid #333;
+            padding-bottom: 10px;
+        }
+
+        a {
+            color: #888;
+            text-decoration: none;
+        }
+
+        a:hover {
+            color: #fff;
+        }
+
+        /* --- TABLE STYLES --- */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            font-size: 12px;
+        }
+
+        th {
+            text-align: left;
+            color: #666;
+            border-bottom: 2px solid #444;
+            padding: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        td {
+            border-bottom: 1px solid #222;
+            padding: 12px 10px;
+            vertical-align: top;
+        }
+
+        tr.turn-row:hover {
+            background: #1a1a1a;
+            cursor: pointer;
+        }
+
+        tr.turn-row:active {
+            background: #222;
+        }
+
+        /* --- VISUALS --- */
+        .chip-slot {
+            width: 40px;
+            height: 50px;
+            background: #222;
+            border: 1px solid #444;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-end;
+            border-radius: 4px;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.1s;
+        }
+
+        .chip-img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 0;
+        }
+
+        .chip-code {
+            font-size: 10px;
+            color: #fff;
+            font-weight: bold;
+            background: rgba(0, 0, 0, 0.7);
+            width: 100%;
+            text-align: center;
+            padding: 2px 0;
+            z-index: 1;
+            position: relative;
+        }
+
+        .hand-container, .queue-container {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+            max-width: 260px;
+        }
+
+        .chip-slot.in-hand { opacity: 0.6; filter: grayscale(0.6); }
+        .chip-slot.in-hand.selected {
             opacity: 1.0; filter: grayscale(0);
             border-color: #4db8ff; background: #223344;
-            box-shadow: 0 0 5px rgba(77, 184, 255, 0.2);
+            box-shadow: 0 0 5px rgba(77, 184, 255, 0.4);
             transform: translateY(-2px);
         }
         
-        /* Queue Styles */
-        .chip-slot.in-queue { border-color: #00ff00; box-shadow: 0 0 8px rgba(0, 255, 0, 0.1); }
-        .chip-slot.ai-queue { border-color: #ff00ff; box-shadow: 0 0 8px rgba(255, 0, 255, 0.2); }
+        .chip-slot.in-queue { border-color: #00ff00; box-shadow: 0 0 8px rgba(0, 255, 0, 0.15); }
+        .chip-slot.ai-queue { border-color: #ff00ff; box-shadow: 0 0 8px rgba(255, 0, 255, 0.20); }
         
-        /* Beast Out Card Style */
         .chip-slot.beast-card {
             border-color: #8855ff; background: #220044;
-            box-shadow: 0 0 8px rgba(136, 85, 255, 0.4);
+            box-shadow: 0 0 8px rgba(136, 85, 255, 0.40);
             justify-content: center;
         }
-        .beast-text {
-            color: #fff; font-weight: bold; font-size: 9px; 
-            text-align: center; line-height: 1.2; text-shadow: 0 0 4px #aa00ff;
-        }
+        .beast-text { color: #fff; font-weight: bold; font-size: 9px; text-align: center; line-height: 1.2; text-shadow: 0 0 4px #aa00ff; }
 
         .order-badge {
             position: absolute; top: 0; right: 0;
             background: #4db8ff; color: #000;
             font-size: 9px; font-weight: bold;
             width: 12px; height: 12px;
-            display: flex; align-items: center; justify-content: center; z-index: 2;
+            display: flex; align-items: center; justify-content: center;
+            z-index: 2;
         }
 
-        .chip-img { width: 100%; height: 100%; object-fit: contain; position: absolute; top: 0; left: 0; z-index: 0; }
-        .chip-code { 
-            font-size: 10px; color: #fff; font-weight: bold;
-            background: rgba(0,0,0,0.7); width: 100%; text-align: center;
-            padding: 2px 0; z-index: 1; position: relative; 
-        }
-
-        /* GRID */
-        .mini-grid {
-            display: grid; grid-template-columns: repeat(6, 12px); grid-template-rows: repeat(3, 12px);
-            gap: 1px; margin-top: 5px; background: #000; border: 1px solid #444; width: fit-content;
-        }
-        .grid-cell { width: 100%; height: 100%; position: relative; }
-        .owner-0 { background: #003366; } 
-        .owner-1 { background: #661111; } 
-        .type-1 { background-image: radial-gradient(#000 20%, transparent 20%); background-size: 2px 2px; } 
-        .type-2 { background: #111; } 
-        .entity-p { width: 6px; height: 6px; background: #00ffff; border-radius: 50%; position: absolute; top:3px; left:3px; box-shadow: 0 0 4px #00ffff; }
-        .entity-e { width: 6px; height: 6px; background: #ff4444; border-radius: 50%; position: absolute; top:3px; left:3px; box-shadow: 0 0 4px #ff0000; }
-
-        /* TAGS */
-        .state-tag { font-size: 9px; padding: 2px 4px; border-radius: 3px; display: inline-block; margin: 1px; font-weight: bold; border: 1px solid transparent; }
-        .tag-fullsynchro { background: #ff00ff; color: #fff; text-shadow: 0 0 2px #fff; }
-        .tag-anger { background: #ff0000; color: #fff; }
-        .tag-beast { background: #4400cc; color: #fff; border-color: #8855ff; }
+        /* --- STATS & TEXT --- */
+        .kv { font-size: 10px; color: #aaa; line-height: 1.35; margin-top: 4px; }
+        .kv b { color: #ddd; font-weight: 700; }
+        .muted { color: #666; }
+        .warn { color: #ffcc66; }
+        .ok { color: #66ffcc; }
+        .yield-pos { color: #00ff00; font-weight: bold; }
+        .yield-neg { color: #ff4d4d; font-weight: bold; }
         
+        .state-tag {
+            font-size: 9px; padding: 2px 4px; border-radius: 3px;
+            display: inline-block; margin: 1px; font-weight: bold;
+            border: 1px solid transparent;
+        }
         .tag-current-form { background: #224466; color: #aaddff; border-color: #4488aa; }
         .tag-select-form { background: #ccaa00; color: #000; }
         .tag-ai-form { background: #440044; color: #ff00ff; border-color: #ff00ff; }
+        .tag-fullsynchro { background: #ff00ff; color: #fff; text-shadow: 0 0 2px #fff; }
+        .tag-anger { background: #ff0000; color: #fff; }
+        .tag-beast { background: #4400cc; color: #fff; border-color: #8855ff; }
 
-        /* HISTORY */
-        .history-section { font-size: 9px; color: #888; margin-top: 6px; border-top: 1px solid #333; padding-top: 2px; }
+        .history-section {
+            font-size: 9px; color: #888; margin-top: 6px;
+            border-top: 1px solid #333; padding-top: 2px;
+        }
         .history-label { font-weight: bold; color: #555; display: block; margin-bottom: 1px; }
         .cross-name { margin-right: 4px; }
         .cross-spent { color: #555; text-decoration: line-through; }
-
-        .yield-pos { color: #00ff00; font-weight: bold; }
-        .yield-neg { color: #ff4d4d; font-weight: bold; }
         .arrow-divider { font-size: 18px; color: #444; margin: 0 10px; }
+        .section-title {
+            font-size: 10px; color: #888; margin-top: 6px;
+            padding-top: 6px; border-top: 1px solid #222;
+        }
+
+        /* --- HIGH-FIDELITY GRID STYLES (from view.html) --- */
+        .grid-cell {
+            width: 100%; height: 100%;
+            background: #222;
+            display: flex; justify-content: center; align-items: center;
+            font-size: 10px; color: rgba(255, 255, 255, 0.65);
+            position: relative;
+            border: 2px solid rgba(180, 180, 180, 0.35);
+            box-sizing: border-box;
+            --own-rgb: 180, 180, 180;
+            border-color: rgba(var(--own-rgb), 0.95);
+        }
+        .cell-p1 { --own-rgb: 255, 77, 77; } /* Player (Red in view.html, but P1 is usually Left) */
+        .cell-p2 { --own-rgb: 77, 184, 255; } /* Enemy (Blue) */
+
+        /* Tile Fills */
+        .tile-permahole { background: #000 !important; border-style: dashed; color: rgba(255, 255, 255, 0.25); }
+        .tile-hole { background: #000 !important; }
+        .tile-basic { background: rgba(var(--own-rgb), 0.28) !important; }
+        .tile-cracked {
+            background: repeating-linear-gradient(135deg, rgba(255,255,255,0.08) 0px, rgba(255,255,255,0.08) 3px, rgba(0,0,0,0) 3px, rgba(0,0,0,0) 6px) !important;
+        }
+        .tile-poison { background: rgba(160, 80, 255, 0.35) !important; }
+        .tile-holy { background: rgba(255, 220, 80, 0.40) !important; color: rgba(0, 0, 0, 0.7); }
+        .tile-grass { background: rgba(80, 220, 120, 0.35) !important; }
+        .tile-ice { background: rgba(80, 220, 255, 0.35) !important; }
+        .tile-volcano {
+            background: radial-gradient(circle at 50% 55%, rgba(60,35,15,0.85) 0%, rgba(60,35,15,0.85) 28%, rgba(140,85,35,0.55) 29%, rgba(140,85,35,0.55) 100%) !important;
+        }
+        .tile-conv-left, .tile-conv-right {
+            background: repeating-linear-gradient(90deg, rgba(255,255,255,0.10) 0px, rgba(255,255,255,0.10) 3px, rgba(0,0,0,0) 3px, rgba(0,0,0,0) 6px) !important;
+        }
+
+        /* Entities */
+        .entity-p {
+            width: 10px; height: 10px; background: #00ffff; border-radius: 50%;
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            box-shadow: 0 0 5px #00ffff; z-index: 2;
+        }
+        .entity-e {
+            width: 10px; height: 10px; background: #ff4444; border-radius: 50%;
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            box-shadow: 0 0 5px #ff0000; z-index: 2;
+        }
+
+        /* --- PREVIEW MINI GRID (Table) --- */
+        .mini-grid {
+            display: grid;
+            grid-template-columns: repeat(6, 12px);
+            grid-template-rows: repeat(3, 12px);
+            gap: 1px;
+            margin-top: 5px;
+            background: #000;
+            border: 1px solid #444;
+            width: fit-content;
+        }
+        
+        /* Inherit detailed styles but scale down borders */
+        .mini-grid .grid-cell { 
+            border: 1px solid rgba(180, 180, 180, 0.3); 
+            font-size: 0; 
+        }
+        
+        /* Owner Borders for Mini Grid */
+        .mini-grid .cell-p1 { border-color: rgba(255, 77, 77, 0.8); }
+        .mini-grid .cell-p2 { border-color: rgba(77, 184, 255, 0.8); }
+        
+        /* Tiny Entities */
+        .mini-grid .entity-p, .mini-grid .entity-e { 
+            width: 6px; height: 6px; box-shadow: none; 
+        }
+
+        /* --- MODAL / PLANNER DIALOG --- */
+        .modal-overlay {
+            display: none;
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 999;
+            backdrop-filter: blur(4px);
+            align-items: center; justify-content: center;
+        }
+        .planner-dialog {
+            background: #181818;
+            border: 1px solid #444;
+            width: 900px; max-width: 95%; height: 600px;
+            display: flex; flex-direction: column;
+            box-shadow: 0 0 30px #000;
+            border-radius: 8px; overflow: hidden;
+        }
+        .planner-header {
+            background: #222; padding: 15px; border-bottom: 1px solid #333;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .planner-body {
+            flex: 1; padding: 20px; display: flex; gap: 20px; overflow-y: auto;
+        }
+        .planner-col { flex: 1; display: flex; flex-direction: column; gap: 15px; }
+        
+        .planner-section {
+            background: #111; border: 1px solid #333; padding: 10px; border-radius: 4px;
+        }
+        .section-header {
+            font-size: 11px; text-transform: uppercase; color: #666;
+            margin-bottom: 10px; font-weight: bold; border-bottom: 1px solid #222; padding-bottom: 4px;
+        }
+
+        .planner-hand { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+        .planner-chip { cursor: pointer; width: 60px; height: 75px; font-size: 11px; }
+        .planner-chip:hover { border-color: #fff; transform: translateY(-2px); }
+
+        .cross-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+        .cross-btn {
+            background: #222; border: 1px solid #444; color: #888;
+            padding: 8px 4px; font-size: 10px; text-align: center;
+            cursor: pointer; border-radius: 3px;
+        }
+        .cross-btn:hover { background: #333; color: #fff; }
+        .cross-btn.active { background: #ccaa00; color: #000; border-color: #ffcc00; font-weight: bold; }
+        .cross-btn.disabled { opacity: 0.3; cursor: not-allowed; text-decoration: line-through; }
+
+        .beast-toggle {
+            background: #220044; border: 1px solid #8855ff; color: #dcbfff;
+            padding: 10px; text-align: center; cursor: pointer; border-radius: 4px;
+            font-weight: bold; text-transform: uppercase; letter-spacing: 1px;
+            transition: all 0.2s;
+        }
+        .beast-toggle:hover { background: #330066; }
+        .beast-toggle.active { background: #6600cc; color: #fff; box-shadow: 0 0 10px #8855ff; }
+
+        .result-box {
+            background: #000; border: 1px solid #333; padding: 15px; text-align: center; border-radius: 4px;
+        }
+        .result-val { font-size: 32px; font-weight: bold; margin: 5px 0; }
+        .result-label { color: #666; font-size: 10px; text-transform: uppercase; }
+
+        /* Planner Grid Container */
+        .big-mini-grid {
+            display: grid;
+            grid-template-columns: repeat(6, 25px); /* Matches typical tile width */
+            grid-template-rows: repeat(3, 25px);
+            gap: 2px;
+            margin: 0 auto;
+            background: #000;
+            border: 2px solid #333;
+            width: fit-content;
+            padding: 2px;
+        }
     </style>
 </head>
+
 <body>
     <div style="display:flex; justify-content:space-between; align-items:center;">
         <a href="/">&larr; Back to Dashboard</a>
@@ -106,176 +322,680 @@
     </div>
 
     <h2>🧠 Chip Window Strategy Data</h2>
+    <p style="color:#666; font-size:12px; margin-top:-5px;">Click any row to open the Interactive Strategy Planner.</p>
+
+    {% macro cross_name(idx) -%}
+    {%- set i = (idx|int) -%}
+    {%- if i == 0 -%}Normal
+    {%- elif i == 1 -%}Fire{%- elif i == 2 -%}Elec{%- elif i == 3 -%}Slash{%- elif i == 4 -%}Erase{%- elif i == 5 -%}Charge
+    {%- elif i == 6 -%}Aqua{%- elif i == 7 -%}Thawk{%- elif i == 8 -%}Tengu{%- elif i == 9 -%}Grnd{%- elif i == 10 -%}Dust
+    {%- else -%}C{{ i }}{%- endif -%}
+    {%- endmacro %}
+
+    {% macro cross_state_label(st) -%}
+    {%- if st and st.idx is not none -%}
+    {{ cross_name(st.idx) }}{% if st.beast %} (Beast){% endif %}
+    {%- else -%}Normal{%- endif -%}
+    {%- endmacro %}
+    {% macro tile_class(t) -%}
+    {%- if t == 1 -%}tile-hole
+    {%- elif t == 2 -%}tile-basic
+    {%- elif t == 3 -%}tile-cracked
+    {%- elif t == 4 -%}tile-poison
+    {%- elif t == 5 -%}tile-holy
+    {%- elif t == 6 -%}tile-grass
+    {%- elif t == 7 -%}tile-ice
+    {%- elif t == 8 -%}tile-volcano
+    {%- elif t == 11 -%}tile-conv-left
+    {%- elif t == 12 -%}tile-conv-right
+    {%- elif t is none -%}tile-permahole
+    {%- endif -%}
+    {%- endmacro %}
+
+    {% macro render_chip_card(chip, cls="") -%}
+    {% if chip %}
+    <div class="chip-slot {{ cls }}">
+        {% if chip.image_url %}<img src="{{ chip.image_url }}" class="chip-img">{% endif %}
+        <span class="chip-code">{{ chip.char_code if chip.char_code is defined else '?' }}</span>
+    </div>
+    {% else %}
+    <div class="chip-slot" style="background:#111; opacity:0.3;"><span style="color:#333; font-size:20px;">?</span></div>
+    {% endif %}
+    {%- endmacro %}
+
+    {% macro render_beast_card() -%}
+    <div class="chip-slot beast-card"><span class="beast-text">BEAST<br>OUT</span></div>
+    {%- endmacro %}
 
     <table>
         <thead>
             <tr>
                 <th style="width: 90px;">Replay</th>
-                <th style="width: 160px;">Context State</th>
+                <th style="width: 220px;">Context State</th>
                 <th>Input Hand</th>
-                <th style="width: 20px;"></th> 
-                <th>Human Selection</th>
-                <th>AI Prediction</th>
-                <th style="width: 60px;">Net Yield</th>
+                <th style="width: 20px;"></th>
+                <th>Human Commit / Held</th>
+                <th>AI Critic (Yield)</th>
+                <th style="width: 70px;">Net Yield</th>
             </tr>
         </thead>
         <tbody>
             {% for turn in turns %}
-            {% macro cross_name(cid) %}{% if cid==1 %}Spout{% elif cid==2 %}Tengu{% elif cid==3 %}Tomahawk{% elif cid==4 %}Ground{% elif cid==5 %}Dust{% elif cid==0 %}Normal{% else %}C{{cid}}{% endif %}{% endmacro %}
+            {% set d = turn.get('derived', {}) %}
+            {% set dp = d.get('player', {}) %}
+            {% set de = d.get('enemy', {}) %}
+            {% set wc = turn.get('window_commit', dp.get('window_commit', {})) %}
+            {% set p_active = turn.get('active_cross_p_open', dp.get('active_cross', None)) %}
+            {% set e_active = turn.get('active_cross_e_open', de.get('active_cross', None)) %}
+            
+            {% set p_used_mask = turn.get('used_cross_mask_p_open', dp.get('used_cross_mask', [])) %}
+            {% set e_used_mask = turn.get('used_cross_mask_e_open', de.get('used_cross_mask', [])) %}
+            {% set p_folder_used = turn.get('folder_used_mask_p_open', dp.get('folder_used_mask', [])) %}
+            {% set e_folder_used = turn.get('folder_used_mask_e_open', de.get('folder_used_mask', [])) %}
+            
+            {% set p_beast = turn.get('beast_p_open', dp.get('beast', {})) %}
+            {% set e_beast = turn.get('beast_e_open', de.get('beast', {})) %}
 
-            <tr>
+            <tr class="turn-row" onclick="openPlanner(this)" data-context='{{ turn | tojson }}'>
                 <td>
-                    <div style="color:#fff; font-size:11px; word-break:break-all;">{{ turn.replay_file }}</div>
-                    <div style="color:#666; font-size:10px;">Frame: {{ turn.frame_start }}</div>
+                    <div style="color:#fff; font-size:11px; word-break:break-all;">{{ turn.get('replay_file', turn.get('replay', '')) }}</div>
+                    <div style="color:#666; font-size:10px;">
+                        Frame: {{ turn.get('frame_open', turn.get('frame_start', 0)) }}
+                        {% if turn.get('turn_index') is not none %}<span class="muted"> · Turn {{ turn.get('turn_index') }}</span>{% endif %}
+                    </div>
+                    {% if wc and wc.happened %}
+                    <div class="kv">
+                        <b>Commit</b>:
+                        {% if wc.close_chip_select_count is defined %}
+                        close_count={{ wc.close_chip_select_count }}
+                        {% else %}-{% endif %}
+                        {% if wc.source %}<span class="muted"> · {{ wc.source }}</span>{% endif %}
+                    </div>
+                    {% endif %}
                 </td>
 
                 <td>
                     <div style="display:flex; justify-content:space-between; font-size:10px; margin-bottom:4px;">
-                        <span style="color:#4db8ff; font-weight:bold;">P: {{ turn.p_hp_start }}</span>
-                        <span style="color:#ff4d4d; font-weight:bold;">E: {{ turn.e_hp_start }}</span>
+                        <span style="color:#4db8ff; font-weight:bold;">P: {{ turn.get('p_hp_start', turn.get('p_hp_open', 0)) }}</span>
+                        <span style="color:#ff4d4d; font-weight:bold;">E: {{ turn.get('e_hp_start', turn.get('e_hp_open', 0)) }}</span>
                     </div>
 
-                    {% if turn.grid_state %}
+                    {% if turn.get('grid_state') and turn.get('grid_owner_state') %}
                     <div class="mini-grid">
                         {% for i in range(18) %}
-                            <div class="grid-cell owner-{{ turn.grid_owner_state[i] }} type-{{ turn.grid_state[i] }}">
-                                {% if i == turn.p_grid_idx %} <div class="entity-p"></div> {% endif %}
-                                {% if i == turn.e_grid_idx %} <div class="entity-e"></div> {% endif %}
-                            </div>
+                        {% set t = turn.grid_state[i] %}
+                        {% set o = turn.grid_owner_state[i] %}
+                        
+                        {% set owner_cls = '' %}
+                        {% if o == 0 %}{% set owner_cls = 'cell-p1' %}
+                        {% elif o == 1 %}{% set owner_cls = 'cell-p2' %}
+                        {% endif %}
+                        
+                        <div class="grid-cell {{ owner_cls }} {{ tile_class(t) }}">
+                            {% if turn.get('p_grid_idx') is not none and i == turn.p_grid_idx %}
+                                <div class="entity-p"></div>
+                            {% endif %}
+                            {% if turn.get('e_grid_idx') is not none and i == turn.e_grid_idx %}
+                                <div class="entity-e"></div>
+                            {% endif %}
+                        </div>
                         {% endfor %}
                     </div>
                     {% endif %}
 
                     <div style="margin-top:4px;">
-                        <span class="state-tag tag-current-form">
-                            Now: {{ cross_name(turn.get('current_cross', 0)) }}
-                        </span>
-                        {% if turn.player_emotion == 1 %}<span class="state-tag tag-fullsynchro">FULL SYNC</span>{% endif %}
-                        {% if turn.player_emotion == 2 %}<span class="state-tag tag-anger">ANGER</span>{% endif %}
-                        {% if turn.beast_mode > 0 %}<span class="state-tag tag-beast">BEAST</span>{% endif %}
+                        {% if p_active %}
+                        <span class="state-tag tag-current-form">P Now: {{ cross_state_label(p_active) }}</span>
+                        {% else %}
+                        <span class="state-tag tag-current-form">P Now: {{ cross_name(turn.get('current_cross', 0)) }}</span>
+                        {% endif %}
+
+                        {% if e_active %}
+                        <span class="state-tag tag-current-form">E Now: {{ cross_state_label(e_active) }}</span>
+                        {% endif %}
+
+                        {% if turn.get('player_emotion', turn.get('player_emotion_open', 0)) == 1 %}<span class="state-tag tag-fullsynchro">FULL SYNC</span>{% endif %}
+                        {% if turn.get('player_emotion', turn.get('player_emotion_open', 0)) == 2 %}<span class="state-tag tag-anger">ANGER</span>{% endif %}
+                        {% if p_beast and p_beast.active %}<span class="state-tag tag-beast">P BEAST</span>{% endif %}
+                        {% if e_beast and e_beast.active %}<span class="state-tag tag-beast">E BEAST</span>{% endif %}
                     </div>
 
-                    <div class="history-section">
-                        <span class="history-label">PLAYER HISTORY</span>
-                        {% if turn.player_used_crosses %}
-                            {% for c in turn.player_used_crosses %}
-                                <span class="cross-name cross-spent">{{ cross_name(c) }}</span>
-                            {% endfor %}
-                        {% else %}
-                            <span style="color:#444;">- None -</span>
+                    <div class="kv">
+                        {% if p_folder_used and (p_folder_used|length) > 0 %}
+                        <div><b>P Folder used</b>: {{ (p_folder_used|select('equalto', true)|list|length) }}/{{ p_folder_used|length }}</div>
+                        {% endif %}
+                        {% if e_folder_used and (e_folder_used|length) > 0 %}
+                        <div><b>E Folder used</b>: {{ (e_folder_used|select('equalto', true)|list|length) }}/{{ e_folder_used|length }}</div>
+                        {% endif %}
+
+                        {% if p_beast and p_beast.ever %}
+                        <div class="muted"><b>P Beast</b>: ever · turns_since={{ p_beast.turns_since if p_beast.turns_since is not none else '?' }}</div>
+                        {% endif %}
+                        {% if e_beast and e_beast.ever %}
+                        <div class="muted"><b>E Beast</b>: ever · turns_since={{ e_beast.turns_since if e_beast.turns_since is not none else '?' }}</div>
+                        {% endif %}
+
+                        {% if d.get('critic_v') is not none or turn.get('critic_v') is not none %}
+                        {% set cv = (d.get('critic_v') if d.get('critic_v') is not none else turn.get('critic_v')) %}
+                        <div class="muted"><b>Critic V</b>: {{ "%.3f"|format(cv) }}</div>
                         {% endif %}
                     </div>
 
                     <div class="history-section">
-                        <span class="history-label">ENEMY HISTORY</span>
-                        {% if turn.enemy_used_crosses %}
-                            {% for c in turn.enemy_used_crosses %}
-                                <span class="cross-name cross-spent">{{ cross_name(c) }}</span>
-                            {% endfor %}
+                        <span class="history-label">PLAYER CROSSES (used)</span>
+                        {% if p_used_mask and (p_used_mask|length) > 0 %}
+                        {% for i in range(p_used_mask|length) %}
+                        {% if i != 0 and p_used_mask[i] %}
+                        <span class="cross-name cross-spent">{{ cross_name(i) }}</span>
+                        {% endif %}
+                        {% endfor %}
+                        {% elif turn.get('player_used_crosses') %}
+                        {% for c in turn.player_used_crosses %}
+                        <span class="cross-name cross-spent">{{ cross_name(c) }}</span>
+                        {% endfor %}
                         {% else %}
-                            <span style="color:#444;">- None -</span>
+                        <span style="color:#444;">- None -</span>
+                        {% endif %}
+                    </div>
+
+                    <div class="history-section">
+                        <span class="history-label">ENEMY CROSSES (used)</span>
+                        {% if e_used_mask and (e_used_mask|length) > 0 %}
+                        {% for i in range(e_used_mask|length) %}
+                        {% if i != 0 and e_used_mask[i] %}
+                        <span class="cross-name cross-spent">{{ cross_name(i) }}</span>
+                        {% endif %}
+                        {% endfor %}
+                        {% elif turn.get('enemy_used_crosses') %}
+                        {% for c in turn.enemy_used_crosses %}
+                        <span class="cross-name cross-spent">{{ cross_name(c) }}</span>
+                        {% endfor %}
+                        {% else %}
+                        <span style="color:#444;">- None -</span>
                         {% endif %}
                     </div>
                 </td>
 
                 <td>
                     <div class="hand-container">
-                        {% for i in range(turn.rich_hand|length) %}
-                            {% set chip = turn.rich_hand[i] %}
-                            {% set is_selected = i in turn.selected_indices %}
-                            {% set sel_order = -1 %}
-                            {% for s_idx in turn.selected_indices %}
-                                {% if s_idx == i %} {% set sel_order = loop.index %} {% endif %}
-                            {% endfor %}
-
-                            {% if chip %}
-                            <div class="chip-slot in-hand {{ 'selected' if is_selected else '' }}">
-                                {% if sel_order > -1 %} <div class="order-badge">{{ sel_order }}</div> {% endif %}
-                                {% if chip.image_url %} <img src="{{ chip.image_url }}" class="chip-img"> {% endif %}
-                                <span class="chip-code">{{ chip.char_code }}</span>
-                            </div>
-                            {% else %}
-                                <div class="chip-slot" style="background:#111; opacity:0.3;">
-                                    <span style="color:#333; font-size:20px;">?</span>
-                                </div>
-                            {% endif %}
+                        {% set rich_hand = turn.get('rich_hand', []) %}
+                        {% set sel_indices = turn.get('selected_indices', []) %}
+                        {% for i in range(rich_hand|length) %}
+                        {% set chip = rich_hand[i] %}
+                        {% set is_selected = (i in sel_indices) %}
+                        {% set sel_order = -1 %}
+                        {% for s_idx in sel_indices %}
+                        {% if s_idx == i %}{% set sel_order = loop.index %}{% endif %}
                         {% endfor %}
+
+                        {% if chip %}
+                        <div class="chip-slot in-hand {{ 'selected' if is_selected else '' }}">
+                            {% if sel_order > -1 %}<div class="order-badge">{{ sel_order }}</div>{% endif %}
+                            {% if chip.image_url %}<img src="{{ chip.image_url }}" class="chip-img">{% endif %}
+                            <span class="chip-code">{{ chip.char_code }}</span>
+                        </div>
+                        {% else %}
+                        <div class="chip-slot" style="background:#111; opacity:0.3;">
+                            <span style="color:#333; font-size:20px;">?</span>
+                        </div>
+                        {% endif %}
+                        {% endfor %}
+                    </div>
+
+                    {% if turn.get('chip_visible_count') is not none %}
+                    <div class="kv muted">
+                        visible={{ turn.get('chip_visible_count') }} / {{ (turn.get('hand_slots', [])|length) if turn.get('hand_slots') else 10 }}
+                    </div>
+                    {% endif %}
+
+                    {% set rich_held_before = turn.get('rich_held_before', []) %}
+                    <div class="section-title"><b>Held</b> (before window):</div>
+                    <div class="queue-container" style="margin-top:4px;">
+                        {% if rich_held_before and (rich_held_before|length) > 0 %}
+                        {% for chip in rich_held_before %}
+                        {{ render_chip_card(chip, "in-queue") }}
+                        {% endfor %}
+                        {% else %}
+                        <span class="muted">—</span>
+                        {% endif %}
                     </div>
                 </td>
 
                 <td><div class="arrow-divider">&rarr;</div></td>
 
                 <td>
-                    <div class="queue-container">
-                        {% for idx in turn.selected_indices %}
-                            {% if idx == 11 %}
-                                <div class="chip-slot beast-card">
-                                    <span class="beast-text">BEAST<br>OUT</span>
-                                </div>
-                            {% else %}
-                                {% set chip = turn.rich_hand[idx] %}
-                                {% if chip %}
-                                <div class="chip-slot in-queue">
-                                    {% if chip.image_url %} <img src="{{ chip.image_url }}" class="chip-img"> {% endif %}
-                                    <span class="chip-code">{{ chip.char_code }}</span>
-                                </div>
-                                {% endif %}
-                            {% endif %}
+                    {% set rich_selected = turn.get('rich_selected', []) %}
+                    {% set rich_held_after = turn.get('rich_held_after', turn.get('rich_held', [])) %}
+
+                    {% if wc and wc.happened %}
+                    <div class="kv">
+                        <b>Window commit</b>:
+                        {% if wc.close_chip_select_count is defined and wc.close_chip_select_count == 0 %}
+                        <span class="warn">carry</span>
+                        {% else %}
+                        {% if wc.selected_any %}<span class="ok">select</span>{% else %}<span class="warn">none</span>{% endif %}
+                        {% endif %}
+                    </div>
+
+                    <div class="section-title"><b>Selected</b> (commit):</div>
+                    <div class="queue-container" style="margin-top:4px;">
+                        {% if wc.beast_selected %}
+                        {{ render_beast_card() }}
+                        {% endif %}
+
+                        {% if rich_selected and (rich_selected|length) > 0 %}
+                        {% for chip in rich_selected %}
+                        {{ render_chip_card(chip, "in-queue") }}
+                        {% endfor %}
+                        {% else %}
+                        <span class="muted">—</span>
+                        {% endif %}
+                    </div>
+
+                    {% set sel_state = turn.get('selected_cross_state') %}
+                    {% if sel_state and sel_state.idx is not none and sel_state.idx != 0 %}
+                    <div style="margin-top:4px;">
+                        <span class="state-tag tag-select-form">
+                            Select: {{ cross_state_label(sel_state) }}
+                        </span>
+                        <span class="muted" style="font-size:9px;">(emotion {{ sel_state.raw }})</span>
+                    </div>
+
+                    {% set pre_state = turn.get('selected_cross_pre_state') %}
+                    {% set commit_state = turn.get('selected_cross_commit_state') %}
+                    {% if pre_state and commit_state %}
+                    <div class="kv muted">
+                        pre={{ cross_state_label(pre_state) }} → commit={{ cross_state_label(commit_state) }}
+                    </div>
+                    {% endif %}
+                    {% endif %}
+
+                    {% else %}
+                    <div class="kv muted">No commit metadata (legacy / incomplete row).</div>
+                    {% endif %}
+
+                    {% if rich_held_after and (rich_held_after|length) > 0 %}
+                    <div class="section-title"><b>Held</b> (enter battle):</div>
+                    <div class="queue-container" style="margin-top:4px;">
+                        {% for chip in rich_held_after %}
+                        {{ render_chip_card(chip, "in-queue") }}
                         {% endfor %}
                     </div>
-                    {% if turn.selected_cross > 0 %}
-                        <div style="margin-top:4px;">
-                            <span class="state-tag tag-select-form">
-                                Select: {{ cross_name(turn.selected_cross) }}
-                            </span>
-                        </div>
                     {% endif %}
                 </td>
 
                 <td>
                     <div class="queue-container">
                         {% if turn.ai_indices is defined %}
-                            {% for idx in turn.ai_indices %}
-                                {% if idx == 11 %}
-                                    <div class="chip-slot beast-card">
-                                        <span class="beast-text">BEAST<br>OUT</span>
-                                    </div>
-                                {% else %}
-                                    {% set chip = turn.rich_hand[idx] %}
-                                    {% if chip %}
-                                    <div class="chip-slot ai-queue">
-                                        {% if chip.image_url %} <img src="{{ chip.image_url }}" class="chip-img"> {% endif %}
-                                        <span class="chip-code">{{ chip.char_code }}</span>
-                                    </div>
-                                    {% endif %}
-                                {% endif %}
-                            {% endfor %}
+                        {% for idx in turn.ai_indices %}
+                        {% if idx == 11 %}
+                        {{ render_beast_card() }}
                         {% else %}
-                            <span style="color:#555;">...</span>
+                        {% set chip = (turn.rich_hand[idx] if turn.get('rich_hand') and idx < (turn.rich_hand|length) else None) %}
+                        {% if chip %} {{ render_chip_card(chip, "ai-queue" ) }} {% endif %}
+                        {% endif %}
+                        {% endfor %}
+                        {% else %} <span class="muted">...</span>
                         {% endif %}
                     </div>
+
                     {% if turn.ai_cross is defined and turn.ai_cross > 0 %}
-                        <div style="margin-top:4px;">
-                            <span class="state-tag tag-ai-form">
-                                AI: {{ cross_name(turn.ai_cross) }}
-                            </span>
-                        </div>
+                    <div style="margin-top:4px;">
+                        <span class="state-tag tag-ai-form">
+                            AI: {{ cross_name(turn.ai_cross) }}
+                        </span>
+                    </div>
                     {% endif %}
                 </td>
 
                 <td>
+                    {% if turn.critic_yield is defined %}
+                    {% set cy = turn.critic_yield %}
+                    <div style="margin-top:6px; font-size:14px; font-weight:bold;">
+                        {% if cy > 10 %}<span style="color:#00ff00;">+{{ "%.0f"|format(cy) }}</span>
+                        {% elif cy < -10 %}<span style="color:#ff4d4d;">{{ "%.0f"|format(cy) }}</span>
+                        {% else %}<span style="color:#666;">{{ "%.0f"|format(cy) }}</span>{% endif %}
+                    </div>
+                    <div style="font-size:9px; color:#666;">Predicted Net HP</div>
+                    {% else %}
+                    <span class="muted">-</span>
+                    {% endif %}
+                </td>
+
+                <td>
+                    {% set ny = turn.get('net_yield', 0) %}
                     <div style="font-size:14px;">
-                        {% if turn.net_yield > 0 %} <span class="yield-pos">+{{ turn.net_yield }}</span>
-                        {% elif turn.net_yield < 0 %} <span class="yield-neg">{{ turn.net_yield }}</span>
-                        {% else %} <span style="color:#666;">0</span> {% endif %}
+                        {% if ny > 0 %}<span class="yield-pos">+{{ ny }}</span>
+                        {% elif ny < 0 %} <span class="yield-neg">{{ ny }}</span>
+                        {% else %}<span style="color:#666;">0</span>{% endif %}
                     </div>
                     <div style="font-size:9px; color:#555; margin-top:2px;">
-                        D:{{ turn.damage_dealt }}<br>T:{{ turn.damage_taken }}
+                        D:{{ turn.get('damage_dealt', 0) }}<br>
+                        T:{{ turn.get('damage_taken', 0) }}
                     </div>
                 </td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
+
+    <div id="plannerModal" class="modal-overlay" onclick="closePlanner(event)">
+        <div class="planner-dialog" onclick="event.stopPropagation()">
+            <div class="planner-header">
+                <div>
+                    <h3 style="margin:0; color:#fff;">Strategy Planner</h3>
+                    <span id="plannerSubtitle" style="color:#666; font-size:11px;">Replay: ??? | Frame: ???</span>
+                </div>
+                <button onclick="closePlanner(null)" style="background:#222; color:#fff; border:1px solid #444; padding:5px 10px; cursor:pointer;">CLOSE</button>
+            </div>
+            
+            <div class="planner-body">
+                <div class="planner-col">
+                    <div class="planner-section">
+                        <div class="section-header">1. Hand (Click to Select)</div>
+                        <div class="planner-hand" id="plannerHand"></div>
+                    </div>
+
+                    <div class="planner-section">
+                        <div class="section-header">2. Transformation</div>
+                        <div style="margin-bottom:8px;">Cross Selection:</div>
+                        <div class="cross-grid" id="plannerCrosses"></div>
+                        
+                        <div style="margin-top:15px; margin-bottom:8px;">Beast Out:</div>
+                        <div class="beast-toggle" id="plannerBeast" onclick="toggleBeast()">Beast Out</div>
+                    </div>
+                </div>
+
+                <div class="planner-col" style="flex:0.6;">
+                    <div class="planner-section" style="text-align:center;">
+                        <div class="section-header">Board State</div>
+                        <div id="plannerGrid" class="big-mini-grid"></div>
+                        <div style="margin-top:10px; font-size:12px;">
+                            <span style="color:#4db8ff">P_HP: <span id="valPHP"></span></span>
+                            <span style="color:#666; margin:0 8px;">|</span>
+                            <span style="color:#ff4d4d">E_HP: <span id="valEHP"></span></span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="planner-col">
+                    <div class="planner-section">
+                        <div class="section-header">Selected Queue (Max 5)</div>
+                        <div id="plannerQueue" style="display:flex; flex-direction:column; gap:5px; min-height:200px;"></div>
+                    </div>
+
+                    <div class="result-box">
+                        <div class="result-label">Critic Predicted Yield</div>
+                        <div class="result-val" id="plannerResult">...</div>
+                        <div class="result-label">Net HP Advantage</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentContext = null;
+        let selectedIndices = []; // ordered list of hand indices
+        let selectedCross = 0;
+        let selectedBeast = false;
+        let debounceTimer = null;
+
+        const CROSS_NAMES = ["Normal", "Fire", "Elec", "Slash", "Erase", "Charge", "Aqua", "Thawk", "Tengu", "Grnd", "Dust"];
+
+        // Tile IDs mapping
+        const TILE = {
+            PERMA_HOLE: null, // if grid_state[i] is null
+            HOLE: 1,
+            BASIC: 2,
+            CRACKED: 3,
+            POISON: 4,
+            HOLY: 5,
+            GRASS: 6,
+            ICE: 7,
+            VOLCANO: 8,
+            CONV_LEFT: 11,
+            CONV_RIGHT: 12,
+        };
+
+        function _applyTileFill(el, tileVal, owner) {
+            el.className = 'grid-cell'; // reset
+            
+            // Apply owner border
+            if (owner === 0) el.classList.add('cell-p1');
+            else if (owner === 1) el.classList.add('cell-p2');
+            
+            const t = Number.isFinite(Number(tileVal)) ? Number(tileVal) : 0;
+
+            if (tileVal === null) {
+                el.classList.add('tile-permahole'); el.title = 'Perma Hole'; return;
+            }
+
+            if (t === TILE.HOLE) { el.classList.add('tile-hole'); el.title = 'Hole'; }
+            else if (t === TILE.BASIC) { el.classList.add('tile-basic'); el.title = 'Basic'; }
+            else if (t === TILE.CRACKED) { el.classList.add('tile-cracked'); el.title = 'Cracked'; }
+            else if (t === TILE.POISON) { el.classList.add('tile-poison'); el.title = 'Poison'; }
+            else if (t === TILE.HOLY) { el.classList.add('tile-holy'); el.title = 'Holy'; }
+            else if (t === TILE.GRASS) { el.classList.add('tile-grass'); el.title = 'Grass'; }
+            else if (t === TILE.ICE) { el.classList.add('tile-ice'); el.title = 'Ice'; }
+            else if (t === TILE.VOLCANO) { el.classList.add('tile-volcano'); el.title = 'Volcano'; }
+            else if (t === TILE.CONV_LEFT) { el.classList.add('tile-conv-left'); el.title = 'Conveyor Left'; }
+            else if (t === TILE.CONV_RIGHT) { el.classList.add('tile-conv-right'); el.title = 'Conveyor Right'; }
+        }
+
+        function openPlanner(row) {
+            const jsonStr = row.getAttribute('data-context');
+            if (!jsonStr) return;
+            
+            try {
+                currentContext = JSON.parse(jsonStr);
+                
+                // Initialize State from "Human Commit"
+                selectedIndices = [...(currentContext.selected_indices || [])];
+                selectedCross = currentContext.selected_cross || 0;
+                if (selectedCross > 10) selectedCross = 0; // fallback if beast emotion passed
+
+                selectedBeast = !!currentContext.window_commit.beast_selected;
+
+                // Render UI
+                renderPlanner();
+                document.getElementById('plannerModal').style.display = 'flex';
+                
+                // Initial Predict
+                runPrediction();
+
+            } catch (e) {
+                console.error("Failed to open planner", e);
+            }
+        }
+
+        function closePlanner(e) {
+            if (e && e.target !== e.currentTarget && e.target.tagName !== 'BUTTON') return;
+            document.getElementById('plannerModal').style.display = 'none';
+        }
+
+        function renderPlanner() {
+            if (!currentContext) return;
+
+            document.getElementById('plannerSubtitle').innerText = `${currentContext.replay_file} | Frame: ${currentContext.frame_open}`;
+            document.getElementById('valPHP').innerText = currentContext.p_hp_start;
+            document.getElementById('valEHP').innerText = currentContext.e_hp_start;
+
+            renderGrid();
+            renderHand();
+            renderCrosses();
+            renderBeast();
+            renderQueue();
+        }
+
+        function renderGrid() {
+            const container = document.getElementById('plannerGrid');
+            container.innerHTML = '';
+            const tiles = currentContext.grid_state || [];
+            const owners = currentContext.grid_owner_state || [];
+            
+            for(let i=0; i<18; i++) {
+                const cell = document.createElement('div');
+                const t = tiles[i] !== undefined ? tiles[i] : 0;
+                const o = owners[i] !== undefined ? owners[i] : 2;
+                
+                _applyTileFill(cell, t, o);
+                
+                // Position Markers
+                if (currentContext.p_grid_idx === i) {
+                    const p = document.createElement('div'); p.className='entity-p'; cell.appendChild(p);
+                }
+                if (currentContext.e_grid_idx === i) {
+                    const e = document.createElement('div'); e.className='entity-e'; cell.appendChild(e);
+                }
+                container.appendChild(cell);
+            }
+        }
+
+        function renderHand() {
+            const container = document.getElementById('plannerHand');
+            container.innerHTML = '';
+            
+            const richHand = currentContext.rich_hand || [];
+            
+            richHand.forEach((chip, idx) => {
+                if (!chip) return; // invisible slot
+                
+                const el = document.createElement('div');
+                const isSel = selectedIndices.includes(idx);
+                const order = selectedIndices.indexOf(idx) + 1;
+                
+                el.className = `chip-slot planner-chip ${isSel ? 'in-hand selected' : ''}`;
+                el.onclick = () => toggleChip(idx);
+                
+                let html = '';
+                if(order > 0) html += `<div class="order-badge">${order}</div>`;
+                if(chip.image_url) html += `<img src="${chip.image_url}" class="chip-img">`;
+                html += `<span class="chip-code">${chip.char_code || '?'}</span>`;
+                
+                el.innerHTML = html;
+                container.appendChild(el);
+            });
+        }
+
+        function renderCrosses() {
+            const container = document.getElementById('plannerCrosses');
+            container.innerHTML = '';
+            
+            const activeForm = currentContext.active_cross_p_open ? currentContext.active_cross_p_open.idx : 0;
+
+            CROSS_NAMES.forEach((name, idx) => {
+                const btn = document.createElement('div');
+                const isActive = (selectedCross === idx);
+                const isDisabled = (idx === activeForm && idx !== 0); 
+                
+                btn.className = `cross-btn ${isActive ? 'active' : ''} ${isDisabled ? 'disabled' : ''}`;
+                btn.innerText = name;
+                
+                if (!isDisabled) {
+                    btn.onclick = () => { selectedCross = idx; renderPlanner(); runPrediction(); };
+                }
+                container.appendChild(btn);
+            });
+        }
+
+        function renderBeast() {
+            const el = document.getElementById('plannerBeast');
+            if (selectedBeast) el.classList.add('active');
+            else el.classList.remove('active');
+        }
+
+        function toggleBeast() {
+            selectedBeast = !selectedBeast;
+            renderBeast();
+            runPrediction();
+        }
+
+        function toggleChip(idx) {
+            const pos = selectedIndices.indexOf(idx);
+            if (pos >= 0) {
+                selectedIndices.splice(pos, 1);
+            } else {
+                if (selectedIndices.length < 5) {
+                    selectedIndices.push(idx);
+                }
+            }
+            renderHand();
+            renderQueue();
+            runPrediction();
+        }
+
+        function renderQueue() {
+            const container = document.getElementById('plannerQueue');
+            container.innerHTML = '';
+            const richHand = currentContext.rich_hand || [];
+
+            selectedIndices.forEach((idx, i) => {
+                const chip = richHand[idx];
+                const row = document.createElement('div');
+                row.style.display = 'flex';
+                row.style.alignItems = 'center';
+                row.style.gap = '10px';
+                row.style.background = '#222';
+                row.style.padding = '5px';
+                row.style.borderRadius = '4px';
+                
+                row.innerHTML = `
+                    <div style="font-weight:bold; color:#4db8ff; width:15px;">${i+1}.</div>
+                    <div style="color:#fff; font-size:12px;">${chip.name || 'Unknown'}</div>
+                    <div style="color:#aaa; font-size:10px;">[${chip.char_code}]</div>
+                `;
+                container.appendChild(row);
+            });
+        }
+
+        function runPrediction() {
+            const resEl = document.getElementById('plannerResult');
+            resEl.style.color = '#888';
+            resEl.innerText = '...';
+
+            if (debounceTimer) clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(async () => {
+                const handIds = currentContext.hand_slots || [];
+                const handCodes = currentContext.hand_codes || [];
+                
+                const newIds = [0,0,0,0,0];
+                const newCodes = [0,0,0,0,0];
+                
+                selectedIndices.forEach((hIdx, i) => {
+                    newIds[i] = handIds[hIdx] || 0;
+                    newCodes[i] = handCodes[hIdx] || 0;
+                });
+
+                const payload = {
+                    ...currentContext,
+                    selected_chips_id: newIds,
+                    selected_chips_code: newCodes,
+                    selected_cross: selectedCross,
+                    beast_selected: selectedBeast
+                };
+
+                try {
+                    const req = await fetch('/api/predict_strategy', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(payload)
+                    });
+                    const res = await req.json();
+                    
+                    const val = res.value;
+                    resEl.innerText = val > 0 ? `+${val.toFixed(0)}` : val.toFixed(0);
+                    
+                    if (val > 10) resEl.style.color = '#00ff00';
+                    else if (val < -10) resEl.style.color = '#ff4d4d';
+                    else resEl.style.color = '#eee';
+                    
+                } catch (e) {
+                    console.error(e);
+                    resEl.innerText = "ERR";
+                }
+            }, 300);
+        }
+    </script>
 </body>
 </html>

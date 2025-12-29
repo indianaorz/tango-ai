@@ -451,7 +451,7 @@ def analyze_flip_owner_based(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("actions_jsonl", type=str)
-    ap.add_argument("--margin", type=float, default=0.03)
+    ap.add_argument("--margin", type=float, default=0.02)
     ap.add_argument("--min-obs", type=int, default=1000, help="minimum player+enemy observations (not frames)")
     ap.add_argument("--center-method", type=str, default="auto", choices=["auto", "quantile", "kmeans"])
     ap.add_argument("--show-all", action="store_true", help="print all hypothesis scores")

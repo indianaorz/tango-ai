@@ -6,9 +6,15 @@ import argparse
 import csv
 import json
 import os
+import multiprocessing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+
+try:
+    from tqdm import tqdm
+except Exception:
+    tqdm = None  # optional
 
 
 # Battle Network panel grid is 6x3.
@@ -120,12 +126,10 @@ def _walk_find_owner_grids(obj: JsonObj) -> List[GridRef]:
     def rec(node: Any) -> None:
         if isinstance(node, dict):
             for k, v in node.items():
-                # Check direct value
                 if _is_candidate_flat_owner_grid(v):
                     found.append(GridRef(parent=node, key=k, shape="flat"))
                 elif _is_candidate_2d_owner_grid(v):
                     found.append(GridRef(parent=node, key=k, shape="2d"))
-                # Recurse
                 if isinstance(v, (dict, list)):
                     rec(v)
         elif isinstance(node, list):
@@ -145,7 +149,6 @@ def _leftmost_column_values(grid: Any, shape: str) -> Optional[List[int]]:
     if shape == "flat":
         if not isinstance(grid, list) or len(grid) != GRID_N:
             return None
-        # flat is row-major: rows 0..H-1, cols 0..W-1
         vals: List[int] = []
         for r in range(GRID_H):
             idx = r * GRID_W + 0
@@ -194,7 +197,6 @@ class ReplayDecision:
 
 
 def _is_battle_frame(fr: Dict[str, Any]) -> bool:
-    # Conservative: if cust_gauge exists and >0, we're in battle flow.
     v = fr.get("cust_gauge", 0)
     try:
         return int(v) > 0
@@ -202,56 +204,86 @@ def _is_battle_frame(fr: Dict[str, Any]) -> bool:
         return False
 
 
-def decide_invert_for_replay(
-    frames: List[Dict[str, Any]],
+def decide_invert_for_replay_streaming(
+    actions_path: Path,
     *,
+    max_bad_lines: int,
     max_scan_frames: int,
     min_votes: int,
     ratio: float,
 ) -> ReplayDecision:
     """
-    Sample battle frames. For each frame, for each detected owner-grid,
-    vote based on leftmost column:
-      - if majority of leftmost tiles are 0 => left0_votes++
-      - if majority are 1 => left1_votes++
-      - ties ignored
-    Decide invert if left1 dominates left0 by `ratio`.
+    Streaming version of decide_invert_for_replay:
+    - Iterates JSONL once
+    - Samples only battle frames
+    - Stops early when:
+        - scanned battle frames hits max_scan_frames (if >0)
+        - OR we already have >= min_votes and dominance is clear
     """
     left0 = 0
     left1 = 0
     scanned = 0
     grids_seen_total = 0
 
-    for fr in frames:
-        if max_scan_frames > 0 and scanned >= max_scan_frames:
-            break
+    # helper to check if either side already dominates enough to stop early
+    def dominance_verdict() -> Optional[str]:
+        total_votes = left0 + left1
+        if total_votes < min_votes:
+            return None
+        if left1 >= int(left0 * ratio + 0.5):
+            return "invert"
+        if left0 >= int(left1 * ratio + 0.5):
+            return "keep"
+        return None
+
+    for fr in iter_jsonl_tolerant(actions_path, max_bad_lines=max_bad_lines):
         if not _is_battle_frame(fr):
             continue
 
+        if max_scan_frames > 0 and scanned >= max_scan_frames:
+            break
+
         grids = _walk_find_owner_grids(fr)
         grids_seen_total += len(grids)
-        if not grids:
-            scanned += 1
-            continue
 
-        # We take a frame-level vote using ALL grids in that frame.
-        # This makes it robust even if you store multiple owner grids (e.g., raw + derived).
-        frame_left_vals: List[int] = []
-        for gref in grids:
-            g = gref.get()
-            vals = _leftmost_column_values(g, gref.shape)
-            if vals:
-                frame_left_vals.extend(vals)
+        if grids:
+            frame_left_vals: List[int] = []
+            for gref in grids:
+                g = gref.get()
+                vals = _leftmost_column_values(g, gref.shape)
+                if vals:
+                    frame_left_vals.extend(vals)
 
-        if frame_left_vals:
-            zeros = sum(1 for v in frame_left_vals if v == 0)
-            ones = sum(1 for v in frame_left_vals if v == 1)
-            if zeros > ones:
-                left0 += 1
-            elif ones > zeros:
-                left1 += 1
+            if frame_left_vals:
+                zeros = sum(1 for v in frame_left_vals if v == 0)
+                ones = sum(1 for v in frame_left_vals if v == 1)
+                if zeros > ones:
+                    left0 += 1
+                elif ones > zeros:
+                    left1 += 1
 
         scanned += 1
+
+        dv = dominance_verdict()
+        if dv is not None:
+            # Early-exit once decisive (saves time on long replays)
+            if dv == "invert":
+                return ReplayDecision(
+                    verdict="invert",
+                    reason=f"early:left1>=left0*{ratio}",
+                    frames_scanned=scanned,
+                    left0_votes=left0,
+                    left1_votes=left1,
+                    grids_seen=grids_seen_total,
+                )
+            return ReplayDecision(
+                verdict="keep",
+                reason=f"early:left0>=left1*{ratio}",
+                frames_scanned=scanned,
+                left0_votes=left0,
+                left1_votes=left1,
+                grids_seen=grids_seen_total,
+            )
 
     total_votes = left0 + left1
     if total_votes < min_votes:
@@ -264,7 +296,6 @@ def decide_invert_for_replay(
             grids_seen=grids_seen_total,
         )
 
-    # If leftmost is mostly 1, invert so leftmost becomes 0.
     if left1 >= int(left0 * ratio + 0.5):
         return ReplayDecision(
             verdict="invert",
@@ -312,12 +343,73 @@ def apply_invert_to_actions_jsonl(actions_path: Path, *, max_bad_lines: int) -> 
 
 
 def find_actions_files(root: Path) -> List[Path]:
-    out: List[Path] = []
-    for dirpath, _, filenames in os.walk(root):
-        if "actions.jsonl" in filenames:
-            out.append(Path(dirpath) / "actions.jsonl")
-    out.sort()
-    return out
+    # recursive: **/actions.jsonl
+    return sorted(root.glob("**/actions.jsonl"))
+
+
+# -----------------------------
+# Parallel worker
+# -----------------------------
+
+@dataclass(frozen=True)
+class WorkerResult:
+    folder: str
+    path: str
+    verdict: str
+    reason: str
+    left0_votes: int
+    left1_votes: int
+    frames_scanned: int
+    grids_seen: int
+    applied: bool
+    error: str
+
+
+def _process_one(args: Tuple[str, bool, int, int, int, float]) -> WorkerResult:
+    path_str, do_apply, max_bad_lines, max_scan_frames, min_votes, ratio = args
+    actions_path = Path(path_str)
+    folder = actions_path.parent.name
+    path_out = str(actions_path).replace("\\", "/")
+
+    try:
+        dec = decide_invert_for_replay_streaming(
+            actions_path,
+            max_bad_lines=max_bad_lines,
+            max_scan_frames=max_scan_frames,
+            min_votes=min_votes,
+            ratio=ratio,
+        )
+
+        applied = False
+        if do_apply and dec.verdict == "invert":
+            apply_invert_to_actions_jsonl(actions_path, max_bad_lines=max_bad_lines)
+            applied = True
+
+        return WorkerResult(
+            folder=folder,
+            path=path_out,
+            verdict=dec.verdict,
+            reason=dec.reason,
+            left0_votes=dec.left0_votes,
+            left1_votes=dec.left1_votes,
+            frames_scanned=dec.frames_scanned,
+            grids_seen=dec.grids_seen,
+            applied=applied,
+            error="",
+        )
+    except Exception as e:
+        return WorkerResult(
+            folder=folder,
+            path=path_out,
+            verdict="error",
+            reason="",
+            left0_votes=0,
+            left1_votes=0,
+            frames_scanned=0,
+            grids_seen=0,
+            applied=False,
+            error=str(e),
+        )
 
 
 # -----------------------------
@@ -334,6 +426,7 @@ def main() -> None:
     ap.add_argument("--max-scan-frames", type=int, default=400, help="battle frames to sample per replay (0 = no limit)")
     ap.add_argument("--min-votes", type=int, default=10, help="min decisive votes needed to decide invert/keep")
     ap.add_argument("--ratio", type=float, default=1.25, help="dominance ratio needed to decide")
+    ap.add_argument("--workers", type=int, default=os.cpu_count() or 1, help="parallel workers")
 
     args = ap.parse_args()
 
@@ -342,68 +435,95 @@ def main() -> None:
     if not files:
         raise SystemExit(f"No actions.jsonl found under {root}")
 
-    report_rows: List[Dict[str, Any]] = []
-    n_invert = 0
-    n_keep = 0
-    n_unclear = 0
+    tasks: List[Tuple[str, bool, int, int, int, float]] = [
+        (str(p), bool(args.apply), int(args.max_bad_lines), int(args.max_scan_frames), int(args.min_votes), float(args.ratio))
+        for p in files
+    ]
 
-    for actions_path in files:
-        replay = actions_path.parent.name
+    results: List[WorkerResult] = []
+    use_parallel = (args.workers or 1) > 1 and len(tasks) > 1
 
-        # Load a sample of frames (tolerant); decision is per replay.
-        frames: List[Dict[str, Any]] = []
-        for fr in iter_jsonl_tolerant(actions_path, max_bad_lines=args.max_bad_lines):
-            frames.append(fr)
-            # Don't hard-cap raw frames here; decide_invert_for_replay handles battle sampling.
-            # Keeping this as full read keeps code simpler and robust for battle-frame filtering.
-
-        dec = decide_invert_for_replay(
-            frames,
-            max_scan_frames=int(args.max_scan_frames),
-            min_votes=int(args.min_votes),
-            ratio=float(args.ratio),
-        )
-
-        if dec.verdict == "invert":
-            n_invert += 1
-        elif dec.verdict == "keep":
-            n_keep += 1
+    def log_line(res: WorkerResult) -> None:
+        prefix = "[APPLY]" if args.apply else "[DRY]"
+        if res.verdict == "error":
+            msg = f"{prefix} {res.folder}: ERROR {res.error}"
         else:
-            n_unclear += 1
+            msg = (
+                f"{prefix} {res.folder}: {res.verdict}  "
+                f"votes(L0={res.left0_votes},L1={res.left1_votes})  "
+                f"scanned={res.frames_scanned}  grids_seen={res.grids_seen}  reason={res.reason}"
+            )
+        if tqdm is not None:
+            tqdm.write(msg)
+        else:
+            print(msg)
 
-        print(
-            f"[{dec.verdict.upper()}] {replay}  "
-            f"votes(L0={dec.left0_votes},L1={dec.left1_votes})  "
-            f"scanned={dec.frames_scanned}  grids_seen={dec.grids_seen}  reason={dec.reason}"
-        )
+    if use_parallel:
+        with multiprocessing.Pool(processes=args.workers) as pool:
+            it = pool.imap_unordered(_process_one, tasks, chunksize=1)
+            if tqdm is not None:
+                it = tqdm(it, total=len(tasks), desc="TileOwner", unit="file")
+            for res in it:
+                results.append(res)
+                log_line(res)
+    else:
+        for t in tasks:
+            res = _process_one(t)
+            results.append(res)
+            log_line(res)
 
-        report_rows.append(
-            {
-                "folder": replay,
-                "path": str(actions_path).replace("\\", "/"),
-                "verdict": dec.verdict,
-                "reason": dec.reason,
-                "left0_votes": dec.left0_votes,
-                "left1_votes": dec.left1_votes,
-                "frames_scanned": dec.frames_scanned,
-                "grids_seen": dec.grids_seen,
-            }
-        )
+    # Stats
+    n_invert = sum(1 for r in results if r.verdict == "invert")
+    n_keep = sum(1 for r in results if r.verdict == "keep")
+    n_unclear = sum(1 for r in results if r.verdict == "unclear")
+    n_error = sum(1 for r in results if r.verdict == "error")
+    n_applied = sum(1 for r in results if r.applied)
 
-        if args.apply and dec.verdict == "invert":
-            apply_invert_to_actions_jsonl(actions_path, max_bad_lines=args.max_bad_lines)
-
+    # Report
     report_path = Path(args.report)
     report_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [
+        "folder",
+        "path",
+        "verdict",
+        "reason",
+        "left0_votes",
+        "left1_votes",
+        "frames_scanned",
+        "grids_seen",
+        "applied",
+        "error",
+    ]
+
     with report_path.open("w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(report_rows[0].keys()))
+        w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
-        w.writerows(report_rows)
+        for r in results:
+            w.writerow(
+                {
+                    "folder": r.folder,
+                    "path": r.path,
+                    "verdict": r.verdict,
+                    "reason": r.reason,
+                    "left0_votes": r.left0_votes,
+                    "left1_votes": r.left1_votes,
+                    "frames_scanned": r.frames_scanned,
+                    "grids_seen": r.grids_seen,
+                    "applied": str(r.applied),
+                    "error": r.error,
+                }
+            )
 
     print("")
-    print(f"Done. files={len(files)}  invert={n_invert}  keep={n_keep}  unclear={n_unclear}")
+    mode = "APPLY" if args.apply else "DRY RUN"
+    print(f"Done ({mode}). files={len(files)}  invert={n_invert}  keep={n_keep}  unclear={n_unclear}  error={n_error}")
+    if args.apply:
+        print(f"Applied rewrites: {n_applied}")
+    print(f"Workers: {args.workers}")
     print(f"Report: {report_path}")
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()

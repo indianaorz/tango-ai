@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
+# scripts/batch_fix_cross_owner.py
 from __future__ import annotations
 
 import argparse
 import csv
 import importlib.util
 import json
+import multiprocessing as mp
+import os
 import sys
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Set
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
+
+from tqdm import tqdm
 
 
 # --------------------------------------------------------------------
@@ -67,7 +74,12 @@ def apply_swap_game_emotion(fr: Dict[str, Any]) -> None:
     fr["player_game_emotion"], fr["enemy_game_emotion"] = fr.get("enemy_game_emotion"), fr.get("player_game_emotion")
 
 
+# --------------------------------------------------------------------
+# Discovery
+# --------------------------------------------------------------------
+
 def find_actions_files(root: Path) -> List[Path]:
+    # Match your other batch scripts: direct children run folders
     out: List[Path] = []
     for child in sorted(root.iterdir()):
         if child.is_dir():
@@ -84,9 +96,130 @@ def _parse_name_set(csv_or_empty: str) -> Set[str]:
     return {x.strip() for x in s.split(",") if x.strip()}
 
 
+# --------------------------------------------------------------------
+# Parallel worker
+# --------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class WorkerArgs:
+    actions_path: str
+    max_bad_lines: int
+
+    pre_mode_frames: int
+    pre_battle_scan: int
+    lead_frames: int
+    early_exit_margin: int
+    min_votes: int
+
+    apply: bool
+
+    force_swap: Set[str]
+    force_keep: Set[str]
+
+    debug_replay: str
+    debug_limit: int
+
+
+@dataclass(frozen=True)
+class WorkerResult:
+    folder: str
+    path: str
+    verdict: str
+    reason: str
+    forced: str  # "", "swap", "keep"
+    modified: bool
+
+    windows: int
+    windows_used: int
+    intent_windows: int
+    no_intent_windows: int
+    votes_keep: int
+    votes_swap: int
+    early_swap_triggered: int
+    early_keep_bonus: int
+    skipped_no_battle_start: int
+    skipped_missing_bases: int
+    skipped_bad_scan: int
+
+
+def _process_one(arg: WorkerArgs) -> WorkerResult:
+    actions_path = Path(arg.actions_path)
+    replay = actions_path.parent.name
+
+    # Enable detector debug only for one replay (avoid interleaved output)
+    debug = bool(arg.debug_replay) and (arg.debug_replay == replay)
+
+    evidence = analyze_actions_jsonl(
+        str(actions_path),
+        allow_bad_lines=True,
+        max_bad_lines=arg.max_bad_lines,
+        pre_mode_frames=arg.pre_mode_frames,
+        pre_battle_scan=arg.pre_battle_scan,
+        lead_frames=arg.lead_frames,
+        early_exit_margin=arg.early_exit_margin,
+        min_votes=arg.min_votes,
+        debug=debug,
+        debug_limit=arg.debug_limit,
+    )
+
+    verdict, reason = decide_cross_owner_swap(evidence)
+
+    forced = ""
+    if replay in arg.force_swap:
+        verdict, reason = ("swap", "forced_swap")
+        forced = "swap"
+    elif replay in arg.force_keep:
+        verdict, reason = ("keep", "forced_keep")
+        forced = "keep"
+
+    modified = False
+    if arg.apply and verdict == "swap":
+        def transformed() -> Iterator[Dict[str, Any]]:
+            for fr in iter_jsonl_tolerant(actions_path, max_bad_lines=arg.max_bad_lines):
+                apply_swap_game_emotion(fr)
+                yield fr
+
+        write_jsonl_atomic(actions_path, transformed())
+        modified = True
+
+    def _i(k: str) -> int:
+        try:
+            return int(evidence.get(k, 0) or 0)
+        except Exception:
+            return 0
+
+    return WorkerResult(
+        folder=replay,
+        path=str(actions_path).replace("\\", "/"),
+        verdict=verdict,
+        reason=str(reason),
+        forced=forced,
+        modified=modified,
+
+        windows=_i("windows"),
+        windows_used=_i("windows_used"),
+        intent_windows=_i("intent_windows"),
+        no_intent_windows=_i("no_intent_windows"),
+        votes_keep=_i("votes_keep"),
+        votes_swap=_i("votes_swap"),
+        early_swap_triggered=_i("early_swap_triggered"),
+        early_keep_bonus=_i("early_keep_bonus"),
+        skipped_no_battle_start=_i("skipped_no_battle_start"),
+        skipped_missing_bases=_i("skipped_missing_bases"),
+        skipped_bad_scan=_i("skipped_bad_scan"),
+    )
+
+
+# --------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", type=str, default="data/dataset")
+
+    # Accept both flags (alias). --root is preferred, --dataset-dir kept for back-compat.
+    ap.add_argument("--root", type=str, default="", help="dataset root containing run folders (preferred)")
+    ap.add_argument("--dataset-dir", type=str, default="", help="alias of --root (back-compat)")
 
     # Detector tunables (same as detect_cross_owner.py)
     ap.add_argument("--pre-mode-frames", type=int, default=12)
@@ -101,7 +234,16 @@ def main() -> None:
 
     ap.add_argument("--force-swap", type=str, default="", help="comma-separated replay folder names to force verdict=swap")
     ap.add_argument("--force-keep", type=str, default="", help="comma-separated replay folder names to force verdict=keep")
+
+    ap.add_argument("--workers", type=int, default=os.cpu_count() or 1, help="parallel worker processes")
+
+    ap.add_argument("--debug-replay", type=str, default="", help="exact replay folder name to print window debug for")
+    ap.add_argument("--debug-limit", type=int, default=0, help="limit number of debug windows printed (0 = all)")
+
     args = ap.parse_args()
+
+    root_str = (args.root or "").strip() or (args.dataset_dir or "").strip() or "data/dataset"
+    root = Path(root_str)
 
     force_swap = _parse_name_set(args.force_swap)
     force_keep = _parse_name_set(args.force_keep)
@@ -109,89 +251,90 @@ def main() -> None:
     if overlap:
         raise SystemExit(f"Same replay listed in both --force-swap and --force-keep: {sorted(overlap)}")
 
-    root = Path(args.root)
     files = find_actions_files(root)
     if not files:
         raise SystemExit(f"No actions.jsonl found under {root}")
 
-    report_rows: List[Dict[str, Any]] = []
-    n_swap = 0
-    n_keep = 0
-    n_unclear = 0
-    n_forced = 0
+    # If debug is requested, force workers=1 so debug output is readable and deterministic.
+    workers = int(args.workers)
+    if args.debug_replay:
+        workers = 1
 
-    for actions_path in files:
-        replay = actions_path.parent.name
+    task_args: List[WorkerArgs] = [
+        WorkerArgs(
+            actions_path=str(p),
+            max_bad_lines=int(args.max_bad_lines),
+            pre_mode_frames=int(args.pre_mode_frames),
+            pre_battle_scan=int(args.pre_battle_scan),
+            lead_frames=int(args.lead_frames),
+            early_exit_margin=int(args.early_exit_margin),
+            min_votes=int(args.min_votes),
+            apply=bool(args.apply),
+            force_swap=force_swap,
+            force_keep=force_keep,
+            debug_replay=str(args.debug_replay),
+            debug_limit=int(args.debug_limit),
+        )
+        for p in files
+    ]
 
-        evidence = analyze_actions_jsonl(
-            str(actions_path),
-            allow_bad_lines=True,
-            max_bad_lines=args.max_bad_lines,
-            pre_mode_frames=args.pre_mode_frames,
-            pre_battle_scan=args.pre_battle_scan,
-            lead_frames=args.lead_frames,
-            early_exit_margin=args.early_exit_margin,
-            min_votes=args.min_votes,
+    t0 = time.time()
+
+    # Run
+    results: List[WorkerResult] = []
+    if workers <= 1:
+        for a in tqdm(task_args, total=len(task_args), desc="CrossOwner", unit="file"):
+            results.append(_process_one(a))
+    else:
+        with mp.Pool(processes=workers) as pool:
+            it = pool.imap_unordered(_process_one, task_args, chunksize=1)
+            for r in tqdm(it, total=len(task_args), desc="CrossOwner", unit="file"):
+                results.append(r)
+
+    # Deterministic report order by folder
+    results.sort(key=lambda r: r.folder)
+
+    # Summary counts
+    n_swap = sum(1 for r in results if r.verdict == "swap")
+    n_keep = sum(1 for r in results if r.verdict == "keep")
+    n_unclear = sum(1 for r in results if r.verdict == "unclear")
+    n_forced = sum(1 for r in results if r.forced)
+
+    # Console output (compact)
+    for r in results:
+        prefix = "[APPLY]" if args.apply else "[DRY]"
+        forced = f"  [FORCED:{r.forced.upper()}]" if r.forced else ""
+        print(
+            f"{prefix} [{r.verdict.upper()}] {r.folder}  "
+            f"used={r.windows_used}  intent={r.intent_windows}  no_intent={r.no_intent_windows}  "
+            f"votes(K={r.votes_keep},S={r.votes_swap})  early_swap={r.early_swap_triggered}"
+            f"{forced}"
         )
 
-        verdict, reason = decide_cross_owner_swap(evidence)
-
-        forced = ""
-        if replay in force_swap:
-            verdict, reason = ("swap", "forced_swap")
-            forced = "swap"
-            n_forced += 1
-        elif replay in force_keep:
-            verdict, reason = ("keep", "forced_keep")
-            forced = "keep"
-            n_forced += 1
-
-        if verdict == "swap":
-            n_swap += 1
-        elif verdict == "keep":
-            n_keep += 1
-        else:
-            n_unclear += 1
-
+    # Write report
+    report_rows: List[Dict[str, Any]] = []
+    for r in results:
         report_rows.append(
             {
-                "folder": replay,
-                "path": str(actions_path).replace("\\", "/"),
-                "verdict": verdict,
-                "reason": reason,
-                "forced": forced,
+                "folder": r.folder,
+                "path": r.path,
+                "verdict": r.verdict,
+                "reason": r.reason,
+                "forced": r.forced,
 
-                "windows": int(evidence.get("windows", 0) or 0),
-                "windows_used": int(evidence.get("windows_used", 0) or 0),
-                "intent_windows": int(evidence.get("intent_windows", 0) or 0),
-                "no_intent_windows": int(evidence.get("no_intent_windows", 0) or 0),
-                "votes_keep": int(evidence.get("votes_keep", 0) or 0),
-                "votes_swap": int(evidence.get("votes_swap", 0) or 0),
-                "early_swap_triggered": int(evidence.get("early_swap_triggered", 0) or 0),
-                "early_keep_bonus": int(evidence.get("early_keep_bonus", 0) or 0),
-                "skipped_no_battle_start": int(evidence.get("skipped_no_battle_start", 0) or 0),
-                "skipped_missing_bases": int(evidence.get("skipped_missing_bases", 0) or 0),
-                "skipped_bad_scan": int(evidence.get("skipped_bad_scan", 0) or 0),
+                "windows": r.windows,
+                "windows_used": r.windows_used,
+                "intent_windows": r.intent_windows,
+                "no_intent_windows": r.no_intent_windows,
+                "votes_keep": r.votes_keep,
+                "votes_swap": r.votes_swap,
+                "early_swap_triggered": r.early_swap_triggered,
+                "early_keep_bonus": r.early_keep_bonus,
+                "skipped_no_battle_start": r.skipped_no_battle_start,
+                "skipped_missing_bases": r.skipped_missing_bases,
+                "skipped_bad_scan": r.skipped_bad_scan,
             }
         )
-
-        print(
-            f"[{verdict.upper()}] {replay}  "
-            f"used={evidence.get('windows_used',0)}  "
-            f"intent={evidence.get('intent_windows',0)}  "
-            f"no_intent={evidence.get('no_intent_windows',0)}  "
-            f"votes(K={evidence.get('votes_keep',0)},S={evidence.get('votes_swap',0)})  "
-            f"early_swap={evidence.get('early_swap_triggered',0)}"
-            + (f"  [FORCED:{forced.upper()}]" if forced else "")
-        )
-
-        if args.apply and verdict == "swap":
-            def transformed() -> Iterator[Dict[str, Any]]:
-                for fr in iter_jsonl_tolerant(actions_path, max_bad_lines=args.max_bad_lines):
-                    apply_swap_game_emotion(fr)
-                    yield fr
-
-            write_jsonl_atomic(actions_path, transformed())
 
     report_path = Path(args.report)
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -200,10 +343,12 @@ def main() -> None:
         w.writeheader()
         w.writerows(report_rows)
 
+    dt = time.time() - t0
     print("")
-    print(f"Done. files={len(files)}  swap={n_swap}  keep={n_keep}  unclear={n_unclear}  forced={n_forced}")
+    print(f"Done. files={len(results)}  swap={n_swap}  keep={n_keep}  unclear={n_unclear}  forced={n_forced}  workers={workers}  dt={dt:.2f}s")
     print(f"Report: {report_path}")
 
 
 if __name__ == "__main__":
+    mp.freeze_support()
     main()

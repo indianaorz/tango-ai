@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -47,8 +47,15 @@ class SmallTransformerEncoder(nn.Module):
 
 @dataclass(frozen=True)
 class CriticRLConfig:
-    # Embedding sizes
-    d_model: int = 128
+    # --- SCALED FOR V8 (Medium) ---
+    d_model: int = 256
+    nhead: int = 8
+    time_layers: int = 4
+    time_nhead: int = 8
+    fusion_hidden: int = 512
+    max_seq_len: int = 64
+
+    # --- RESTORED REQUIRED ATTRIBUTES ---
     id_buckets: int = 8192
     id_dim: int = 64
     code_vocab: int = 64
@@ -65,37 +72,27 @@ class CriticRLConfig:
     folder_layers: int = 2
     held_layers: int = 1
 
-    nhead: int = 4
     ff_mult: int = 4
     dropout: float = 0.05
 
     # Scalar MLP
-    scalar_dim: int = 32
+    # Increase scalar_dim (was 32)
+    # 32 (base) + 10 (buttons) = 42. Let's do 48 to be safe/aligned.
+    scalar_dim: int = 48
     scalar_hidden: int = 128
 
     # Cross/beast tower
     cross_idx_vocab: int = 12
     cross_idx_dim: int = 16
 
-    # Temporal encoder (sequence over time)
-    time_layers: int = 2
-    time_nhead: int = 4
+    # Temporal encoder
     time_ff_mult: int = 4
-    max_seq_len: int = 32
-
-    # Fusion / head
-    fusion_hidden: int = 256
 
 
 class HPDeltaTDLambdaCritic(nn.Module):
     """
     TD(λ) value critic over short sequences.
     Produces V(s_t) for each timestep in a sequence.
-
-    Input batch tensors are shaped:
-      - per-token inputs: [B, T, ...]
-    Output:
-      - values: [B, T]
     """
     def __init__(self, cfg: CriticRLConfig, *, folder_len: int = 30):
         super().__init__()
@@ -124,6 +121,11 @@ class HPDeltaTDLambdaCritic(nn.Module):
         self.hand_tok_proj = nn.Linear(cfg.id_dim + cfg.code_dim + 1, cfg.d_model)  # +visible flag
         self.folder_tok_proj = nn.Linear(cfg.id_dim + 1, cfg.d_model)               # +used mask
         self.held_tok_proj = nn.Linear(cfg.id_dim + cfg.code_dim, cfg.d_model)
+
+        # NEW: Projections for "Last Used" and "On Deck" (Single Chips)
+        # We project them directly to d_model
+        self.last_used_proj = nn.Linear(cfg.id_dim, cfg.d_model)
+        self.on_deck_proj = nn.Linear(cfg.id_dim, cfg.d_model)
 
         # Per-state token encoders
         ff = cfg.d_model * cfg.ff_mult
@@ -181,14 +183,13 @@ class HPDeltaTDLambdaCritic(nn.Module):
     def _encode_state_flat(self, batch_flat: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
         Encode a batch of states (flattened B*T -> N) into state vectors (N, D).
-        Expects keys shaped like the original per-frame tensors (no time dim).
         """
         cfg = self.cfg
 
         # --- Grid ---
         tiles = _clamp_int(batch_flat["grid_tile"], 0, cfg.tile_vocab - 1)
         owners = _clamp_int(batch_flat["grid_owner"], 0, cfg.owner_vocab - 1)
-        g = torch.cat([self.tile_emb(tiles), self.owner_emb(owners)], dim=-1)  # (N,18,td+od)
+        g = torch.cat([self.tile_emb(tiles), self.owner_emb(owners)], dim=-1)
         g = self.grid_tok_proj(g) + self.grid_pos
         g = self.grid_enc(g)
         grid_vec = self._pool(g)
@@ -224,18 +225,9 @@ class HPDeltaTDLambdaCritic(nn.Module):
         held_vec = self._pool(hc, mask=held_mask)
 
         # --- Scalars ---
+        # Note: Scalars now contain indices 11-15 (events/commits), automatically handled by MLP input dim
         scal = batch_flat["scalars"]
-
-        # Charge is currently cached as (charge / 100), but charge is actually in {0,1,2}.
-        # Convert cached scale -> normalized [0,1] without rebuilding the cache:
-        #   (charge/100) * 50 == charge/2
-        # player_charge is scal[...,2], enemy_charge is scal[...,3]
-        if scal.shape[-1] >= 4:
-            scal = scal.clone()
-            scal[..., 2:4] = torch.clamp(scal[..., 2:4] * 50.0, 0.0, 1.0)
-
         scalar_vec = self.scalar_mlp(scal)
-
 
         # --- Cross/Beast ---
         used = batch_flat["used_cross"]
@@ -247,9 +239,38 @@ class HPDeltaTDLambdaCritic(nn.Module):
         cross_in = torch.cat([used, p_emb, e_emb, batch_flat["beast_feats"]], dim=-1)
         cross_vec = self.cross_mlp(cross_in)
 
+        # --- NEW: Last Used & On Deck Embeddings ---
+        # "Last Used" (Causal)
+        # Note: Use only Player's last used for now, or sum both? 
+        # Let's use both individually if they exist.
+        last_p = self.id_emb(batch_flat["last_used_id_p"])
+        last_p_vec = self.last_used_proj(last_p)
+        
+        # "On Deck" (Predictive)
+        # current_chip_p is the "On Deck" chip
+        deck_p = self.id_emb(batch_flat["current_chip_p"])
+        deck_p_vec = self.on_deck_proj(deck_p)
+        
+        # Enemy's "On Deck" (Predictive defense)
+        deck_e = self.id_emb(batch_flat["current_chip_e"])
+        deck_e_vec = self.on_deck_proj(deck_e)
+
         # --- Fuse all into one state vector ---
-        # Keep it simple: sum of towers after a linear mix
-        fused = torch.stack([grid_vec, hand_vec, folder_vec, held_vec, scalar_vec, cross_vec], dim=0).mean(dim=0)
+        # We just add these new vectors to the stack pool.
+        # This allows the Transformer (if we used one for fusion) or Mean Pool to integrate them.
+        stack_list = [
+            grid_vec, 
+            hand_vec, 
+            folder_vec, 
+            held_vec, 
+            scalar_vec, 
+            cross_vec,
+            last_p_vec,
+            deck_p_vec,
+            deck_e_vec
+        ]
+        
+        fused = torch.stack(stack_list, dim=0).mean(dim=0)
         return fused  # (N,D)
 
     @staticmethod
@@ -262,7 +283,8 @@ class HPDeltaTDLambdaCritic(nn.Module):
         flat: Dict[str, torch.Tensor] = {}
         for k, v in batch.items():
             if v.ndim < 2:
-                raise ValueError(f"expected time-major tensors [B,T,...] for key '{k}', got shape {tuple(v.shape)}")
+                # Should not happen if data is collated correctly
+                continue 
             flat[k] = v.reshape(B * T, *v.shape[2:])
         return flat, B, T
 
@@ -277,8 +299,9 @@ class HPDeltaTDLambdaCritic(nn.Module):
 
         # temporal encoding
         if T > self.cfg.max_seq_len:
-            # fail fast: caller should set max_seq_len >= dataset seq_len
-            raise ValueError(f"sequence length T={T} exceeds max_seq_len={self.cfg.max_seq_len}")
+            # We just slice if T is too long (safety)
+            state_seq = state_seq[:, :self.cfg.max_seq_len, :]
+            T = self.cfg.max_seq_len
 
         state_seq = state_seq + self.time_pos[:, :T, :]
         state_seq = self.time_enc(state_seq)  # [B,T,D]

@@ -12,12 +12,12 @@ app = Flask(__name__)
 
 # --- CONFIG ---
 # Each MODE points at a ROOT directory that contains multiple runs (subfolders).
+# We use os.path.abspath/normpath later to ensure Windows compatibility.
 LOG_DIRS = {
     "Battle": "logs/battle",
     "Planning": "logs/planning",
     "RL": "logs/rl_battle",
     "Critic": "checkpoints/critic_hpdelta",
-    # Add your new critic_rl root here (adjust path to match your project)
     "Critic_RL": "checkpoints/critic_rl",
 }
 
@@ -32,34 +32,30 @@ _STAT_TAGS_BY_MODE: Dict[str, List[str]] = {
     "Battle": ["Train/Loss"],
     "Planning": ["Train/Loss"],
     "RL": ["Train/WeightedLoss", "Train/Loss"],
-    "Critic": ["Val/RMSE", "Val/MAE", "Train/HuberLoss_avg", "Train/HuberLoss", "Train/TDLoss_avg", "Train/TDLoss"],
-    "Critic_RL": ["Val/RMSE", "Val/MAE", "Train/TDLoss_avg", "Train/TDLoss", "Train/HuberLoss_avg", "Train/HuberLoss"],
+    "Critic": ["Val/RMSE", "Val/MAE", "Train/HuberLoss_avg", "Train/HuberLoss"],
+    "Critic_RL": ["Train/HuberLoss", "Val/RMSE", "Val/MAE", "Train/LR"],
 }
 
 # Prefer which tags to plot by default per mode.
+# MOVED TRAIN TAGS TO TOP so graphs appear immediately during Epoch 1
 _PREFER_BY_MODE: Dict[str, List[str]] = {
     "Battle": ["Train/Loss", "Loss", "loss"],
     "Planning": ["Train/Loss", "Loss", "loss"],
     "RL": ["Train/WeightedLoss", "WeightedLoss", "Train/Loss", "Loss", "loss"],
     "Critic": [
+        "Train/HuberLoss",
         "Val/RMSE",
         "Train/HuberLoss_avg",
-        "Train/TDLoss_avg",
-        "Train/HuberLoss",
-        "Train/TDLoss",
         "Val/MAE",
         "Loss",
-        "loss",
     ],
     "Critic_RL": [
-        "Val/RMSE",
-        "Train/TDLoss_avg",
+        "Train/HuberLoss",      # <--- Priority 1: Shows up immediately
         "Train/HuberLoss_avg",
+        "Val/RMSE",             # <--- Priority 3: Shows up after epoch
         "Train/TDLoss",
-        "Train/HuberLoss",
         "Val/MAE",
         "Loss",
-        "loss",
     ],
 }
 
@@ -403,14 +399,11 @@ HTML_TEMPLATE = """
                 return;
             }
 
-            // Server may auto-select a run even if client passed none.
             if (data.run != null) {
                 const serverRun = String(data.run);
                 document.getElementById('curr-run').innerText = `run: ${serverRun || "(auto)"}`;
-                // If client was on auto, keep it auto in the dropdown BUT show which run server picked.
-                // If user explicitly chose a run, don't override their dropdown.
                 if (!runSelect.value && serverRun) {
-                    // don't change dropdown value; just display it
+                    // auto selection
                 }
             }
 
@@ -489,8 +482,13 @@ def _safe_int(v: str, default: int) -> int:
 
 
 def _list_event_files_recursive(log_root: str) -> List[str]:
+    # Robust path handling for Windows
     if not log_root or not os.path.exists(log_root):
         return []
+    
+    # Use normpath to standardize slashes
+    log_root = os.path.normpath(log_root)
+    
     out: List[str] = []
     for root, _, files in os.walk(log_root):
         for fn in files:
@@ -504,15 +502,16 @@ def _list_runs(log_root: str) -> List[str]:
     A "run" is any directory under log_root that contains at least one TB event file.
     Return run_ids as paths relative to log_root.
     """
+    log_root = os.path.normpath(os.path.abspath(log_root))
     files = _list_event_files_recursive(log_root)
     if not files:
         return []
-    root_abs = os.path.abspath(log_root)
+    
     run_dirs = set()
     for p in files:
         d = os.path.dirname(p)
         try:
-            rel = os.path.relpath(d, root_abs)
+            rel = os.path.relpath(d, log_root)
         except Exception:
             rel = d
         run_dirs.add(rel)
@@ -550,6 +549,7 @@ def _score_event_file(p: str, prefer_tag_substrings: List[str]) -> Optional[Tupl
         if prefer_hit:
             break
 
+    # Fallbacks if preference not found
     if picked_tag is None:
         for t in non_hparam:
             if "WeightedLoss" in t:
@@ -561,6 +561,7 @@ def _score_event_file(p: str, prefer_tag_substrings: List[str]) -> Optional[Tupl
                     picked_tag = t
                     break
         if picked_tag is None:
+            # Just take the first valid tag
             picked_tag = non_hparam[0]
 
     last_step = 0
@@ -643,35 +644,26 @@ class _CacheState:
 
 
 class TensorboardScalarCache:
-    """
-    Cache for one pinned run directory.
-
-    - Pins a run_id (relative subdir under log_root)
-    - Picks best event file *within that run*
-    - Serves scalars for selected tag, plus a few extra stat tags
-    """
-
     def __init__(self, log_root: str, *, prefer_tag_substrings: List[str], stat_tags: List[str]):
-        self._log_root = log_root
+        # Ensure log_root is absolute and normalized for Windows
+        self._log_root = os.path.normpath(os.path.abspath(log_root))
         self._prefer = [str(x) for x in (prefer_tag_substrings or [])]
         self._stat_tags = [str(x) for x in (stat_tags or [])]
         self._lock = threading.Lock()
         self._st = _CacheState()
-        self._series: Dict[str, Tuple[List[int], List[float], int]] = {}  # tag -> (steps, values, last_seen_step)
+        self._series: Dict[str, Tuple[List[int], List[float], int]] = {}
         self._known_tags: List[str] = []
-        self._last_pin_time = 0.0  # for auto pin stability
+        self._last_pin_time = 0.0
 
     def _abs_run_dir(self, run_id: str) -> str:
-        return os.path.abspath(os.path.join(self._log_root, run_id)) if run_id else os.path.abspath(self._log_root)
+        if not run_id:
+            return self._log_root
+        # Handle mixed slashes if run_id comes from UI
+        return os.path.join(self._log_root, os.path.normpath(run_id))
 
     def _auto_pick_run(self) -> str:
-        """
-        Choose best run under log_root, but keep it stable for AUTO_PIN_SECONDS
-        unless current pinned run disappears.
-        """
         now = time.monotonic()
         if self._st.run_id and (now - self._last_pin_time) < AUTO_PIN_SECONDS:
-            # keep pinned
             if os.path.exists(self._abs_run_dir(self._st.run_id)):
                 return self._st.run_id
 
@@ -679,7 +671,6 @@ class TensorboardScalarCache:
         if not runs:
             return ""
 
-        # Score each run by its best event file score
         best: Optional[Tuple[Tuple[int, int, int, float], str]] = None
         for run_id in runs:
             run_dir = self._abs_run_dir(run_id)
@@ -697,16 +688,12 @@ class TensorboardScalarCache:
         return picked
 
     def _pin_run(self, run_id: str) -> bool:
-        """
-        Ensure internal state is pinned to run_id. Returns True if state reset.
-        """
         run_id = str(run_id or "")
         if not run_id:
             run_id = self._auto_pick_run()
 
         run_dir_abs = self._abs_run_dir(run_id)
         if run_id and not os.path.exists(run_dir_abs):
-            # requested run missing -> reset and fall back to auto
             self._reset_state()
             run_id = self._auto_pick_run()
             run_dir_abs = self._abs_run_dir(run_id)
@@ -719,9 +706,6 @@ class TensorboardScalarCache:
         return False
 
     def _maybe_switch_event_file(self) -> bool:
-        """
-        Within the pinned run dir, choose best event file (avoid hparam-only).
-        """
         if not self._st.run_dir_abs:
             return False
 
@@ -738,7 +722,6 @@ class TensorboardScalarCache:
             mtime_ns = 0
 
         if self._st.log_file != latest:
-            # switching files within same run
             self._series = {}
             self._known_tags = []
             self._st.log_file = latest
@@ -781,10 +764,13 @@ class TensorboardScalarCache:
     def _choose_default_tag(self, tags: List[str]) -> Optional[str]:
         if not tags:
             return None
+        # Try exact preferred matches first
         for pat in self._prefer:
             for t in tags:
                 if pat in t:
                     return t
+        
+        # Fallbacks
         for t in tags:
             if "WeightedLoss" in t:
                 return t
@@ -809,6 +795,8 @@ class TensorboardScalarCache:
         if not events:
             return
 
+        # Optimization: only process events strictly after last_seen
+        # TB events are usually sorted, but we check to be safe
         for e in events:
             if e.step <= last_seen:
                 continue
@@ -855,6 +843,7 @@ class TensorboardScalarCache:
             if not steps:
                 return reset, self._st.run_id, [], [], None, tag, {}, []
 
+            # Populate Stats
             latest: Dict[str, Dict[str, float]] = {}
             for st_tag in self._stat_tags:
                 if st_tag in self._known_tags:
@@ -883,7 +872,6 @@ class TensorboardScalarCache:
 
             last_available = steps2[-1]
 
-            # stale cursor protection
             if since_step is not None and since_step >= last_available:
                 ds_steps, ds_vals = _downsample_stride(steps2, vals2, max_points)
                 return True, self._st.run_id, ds_steps, ds_vals, (ds_steps[-1] if ds_steps else None), tag, latest, latest_extras
@@ -903,6 +891,7 @@ class TensorboardScalarCache:
 
 
 # --- INIT CACHES (one per MODE) ---
+# We configure the caches, which will perform absolute path resolution on init
 _caches: Dict[str, TensorboardScalarCache] = {
     mode: TensorboardScalarCache(
         root,
@@ -999,8 +988,11 @@ if __name__ == "__main__":
     print(f"\n📊 Monitor running at:")
     print(f"   👉 http://127.0.0.1:{PORT}")
     print(f"   👉 http://{local_ip}:{PORT} (Local Network)\n")
-    print(f"   Watching modes: {list(LOG_DIRS.keys())}")
+    print(f"   Watching modes:")
     for k, v in LOG_DIRS.items():
-        print(f"   - {k}: {v}")
+        # Print the resolved absolute path so user can verify
+        abs_path = os.path.normpath(os.path.abspath(v))
+        exists = "✅" if os.path.exists(abs_path) else "❌ (Folder not found)"
+        print(f"   - {k}: {abs_path} {exists}")
 
     app.run(host=HOST, port=PORT, debug=False, threaded=True)

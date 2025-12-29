@@ -4,12 +4,19 @@ import argparse
 import csv
 import json
 import os
+import sys
+import multiprocessing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import importlib.util
-import sys
+
+try:
+    from tqdm import tqdm
+except Exception:
+    tqdm = None  # optional
+
 
 # Robustly import scripts/detect_grid_flip.py even when scripts/ is not a package.
 _SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -26,7 +33,6 @@ _spec.loader.exec_module(_detect)
 GRID_W = int(_detect.GRID_W)
 GRID_H = int(_detect.GRID_H)
 analyze_flip_owner_based = _detect.analyze_flip_owner_based
-
 
 
 # -----------------------------
@@ -58,7 +64,6 @@ def iter_jsonl(path: Path, *, allow_bad_lines: bool = True, max_bad_lines: int =
             if isinstance(obj, dict):
                 yield obj
             else:
-                # Non-dict JSON lines are unexpected; treat as bad.
                 bad += 1
                 if bad <= 5:
                     print(f"[WARN] {path} non-dict json at line {line_no} (skipping)")
@@ -120,11 +125,9 @@ def swap_player_enemy_keys(frame: Dict[str, Any]) -> None:
     Swap any 'player_*' <-> 'enemy_*' pairs if both exist.
     Also swap 'player' <-> 'enemy' if both exist.
     """
-    # Swap dict-level "player"/"enemy" if present
     if "player" in frame and "enemy" in frame:
         frame["player"], frame["enemy"] = frame["enemy"], frame["player"]
 
-    # Collect suffixes for paired keys
     to_swap: List[Tuple[str, str]] = []
     for k in list(frame.keys()):
         if k.startswith("player_"):
@@ -133,7 +136,6 @@ def swap_player_enemy_keys(frame: Dict[str, Any]) -> None:
             if ek in frame:
                 to_swap.append((k, ek))
 
-    # Perform swaps (avoid double-swapping)
     swapped = set()
     for pk, ek in to_swap:
         if pk in swapped or ek in swapped:
@@ -177,14 +179,8 @@ def apply_fix_in_place(frame: Dict[str, Any], plan: FixPlan) -> None:
 # -----------------------------
 
 def find_actions_files(root: Path) -> List[Path]:
-    out: List[Path] = []
-    for child in sorted(root.iterdir()):
-        if not child.is_dir():
-            continue
-        p = child / "actions.jsonl"
-        if p.is_file():
-            out.append(p)
-    return out
+    # Match fix_all_datasets.py: recursive search for **/actions.jsonl
+    return sorted(root.glob("**/actions.jsonl"))
 
 
 def load_for_detection(path: Path, *, max_frames: int) -> List[Dict[str, Any]]:
@@ -192,22 +188,96 @@ def load_for_detection(path: Path, *, max_frames: int) -> List[Dict[str, Any]]:
     Detection needs a list of frames. Keep it bounded for huge files.
     """
     frames: List[Dict[str, Any]] = []
-    for i, fr in enumerate(iter_jsonl(path, allow_bad_lines=True)):
+    for fr in iter_jsonl(path, allow_bad_lines=True):
         frames.append(fr)
         if len(frames) >= max_frames:
             break
     return frames
 
 
+@dataclass(frozen=True)
+class WorkerResult:
+    row: Dict[str, Any]
+    decision: str
+    applied: bool
+    err: Optional[str] = None
+
+
+def _process_one(args: Tuple[str, float, int, str, int, bool]) -> WorkerResult:
+    path_str, margin, min_obs, center_method, max_frames, apply = args
+    actions_path = Path(path_str)
+
+    try:
+        frames = load_for_detection(actions_path, max_frames=max_frames)
+
+        x_centers, y_centers, best_normal, best_flipped, all_scores, decision, chosen_method = analyze_flip_owner_based(
+            frames,
+            margin=margin,
+            min_obs=min_obs,
+            center_method=center_method,
+        )
+
+        plan = FixPlan(
+            mirror=best_flipped.mirror,
+            swap_owner=best_flipped.swap_owner,
+            swap_entities=best_flipped.swap_entities,
+        )
+
+        applied = False
+        if apply and decision == "flip":
+            def transformed() -> Iterator[Dict[str, Any]]:
+                for fr in iter_jsonl(actions_path, allow_bad_lines=True):
+                    apply_fix_in_place(fr, plan)
+                    yield fr
+
+            write_jsonl_atomic(actions_path, transformed())
+            applied = True
+
+        row = {
+            "folder": actions_path.parent.name,
+            "path": str(actions_path).replace("\\", "/"),
+            "decision": decision,
+            "center_method": chosen_method,
+            "best_normal_rate": f"{best_normal.match_rate:.6f}",
+            "best_flipped_rate": f"{best_flipped.match_rate:.6f}",
+            "best_normal_label": best_normal.label(),
+            "best_flipped_label": best_flipped.label(),
+            "apply_mirror": str(plan.mirror),
+            "apply_swap_owner": str(plan.swap_owner),
+            "apply_swap_entities": str(plan.swap_entities),
+            "applied": str(applied),
+        }
+        return WorkerResult(row=row, decision=decision, applied=applied, err=None)
+
+    except Exception as e:
+        row = {
+            "folder": actions_path.parent.name if actions_path.parent else "",
+            "path": str(actions_path).replace("\\", "/"),
+            "decision": "error",
+            "center_method": "",
+            "best_normal_rate": "",
+            "best_flipped_rate": "",
+            "best_normal_label": "",
+            "best_flipped_label": "",
+            "apply_mirror": "",
+            "apply_swap_owner": "",
+            "apply_swap_entities": "",
+            "applied": "False",
+            "error": str(e),
+        }
+        return WorkerResult(row=row, decision="error", applied=False, err=str(e))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", type=str, default="data/dataset", help="dataset root containing run folders")
-    ap.add_argument("--margin", type=float, default=0.03)
+    ap.add_argument("--margin", type=float, default=0.01)
     ap.add_argument("--min-obs", type=int, default=1000)
     ap.add_argument("--center-method", type=str, default="auto", choices=["auto", "quantile", "kmeans"])
     ap.add_argument("--max-frames", type=int, default=250_000, help="cap frames loaded for detection per file")
     ap.add_argument("--apply", action="store_true", help="actually rewrite actions.jsonl (otherwise dry-run)")
     ap.add_argument("--report", type=str, default="grid_flip_report.csv")
+    ap.add_argument("--workers", type=int, default=os.cpu_count() or 1, help="number of parallel processes")
     args = ap.parse_args()
 
     root = Path(args.root)
@@ -217,77 +287,102 @@ def main() -> None:
 
     report_path = Path(args.report)
 
-    rows: List[Dict[str, Any]] = []
     n_flip = 0
     n_unclear = 0
     n_normal = 0
+    n_error = 0
+    n_applied = 0
 
-    for actions_path in files:
-        frames = load_for_detection(actions_path, max_frames=args.max_frames)
+    tasks: List[Tuple[str, float, int, str, int, bool]] = [
+        (str(p), args.margin, args.min_obs, args.center_method, args.max_frames, args.apply)
+        for p in files
+    ]
 
-        x_centers, y_centers, best_normal, best_flipped, all_scores, decision, chosen_method = analyze_flip_owner_based(
-            frames,
-            margin=args.margin,
-            min_obs=args.min_obs,
-            center_method=args.center_method,
-        )
+    # Process (parallel by default)
+    results: List[WorkerResult] = []
 
-        # Decide plan:
-        # - If decision == "flip": apply *best_flipped* transforms to canonicalize to normal.
-        # - Otherwise: no rewrite.
-        plan = FixPlan(
-            mirror=best_flipped.mirror,
-            swap_owner=best_flipped.swap_owner,
-            swap_entities=best_flipped.swap_entities,
-        )
+    use_parallel = (args.workers or 1) > 1 and len(tasks) > 1
+    if use_parallel:
+        with multiprocessing.Pool(processes=args.workers) as pool:
+            it = pool.imap_unordered(_process_one, tasks, chunksize=1)
+            if tqdm is not None:
+                it = tqdm(it, total=len(tasks), desc="GridFlip", unit="file")
+                for res in it:
+                    results.append(res)
+                    status = "APPLIED" if res.applied else "DRY"
+                    if res.decision == "error":
+                        status = "ERROR"
+                    elif res.decision == "flip" and not res.applied:
+                        status = "NEEDS FIX"
+                    if tqdm is not None:
+                        # keep progress bar intact
+                        tqdm.write(f"[{status}] {Path(res.row['path']).parent.name}: {res.row.get('decision')}")
+            else:
+                for res in it:
+                    results.append(res)
+                    status = "APPLIED" if res.applied else "DRY"
+                    if res.decision == "error":
+                        status = "ERROR"
+                    print(f"[{status}] {Path(res.row['path']).parent.name}: {res.row.get('decision')}")
+    else:
+        for t in tasks:
+            res = _process_one(t)
+            results.append(res)
+            status = "APPLIED" if res.applied else "DRY"
+            if res.decision == "error":
+                status = "ERROR"
+            print(f"[{status}] {Path(res.row['path']).parent.name}: {res.row.get('decision')}")
 
-        if decision == "flip":
+    # Aggregate stats + rows
+    rows: List[Dict[str, Any]] = []
+    for res in results:
+        rows.append(res.row)
+        if res.decision == "flip":
             n_flip += 1
-        elif decision == "normal":
+        elif res.decision == "normal":
             n_normal += 1
-        else:
+        elif res.decision == "unclear" or (res.decision or "").startswith("unknown"):
             n_unclear += 1
+        elif res.decision == "error":
+            n_error += 1
+        if res.applied:
+            n_applied += 1
 
-        rows.append(
-            {
-                "folder": actions_path.parent.name,
-                "path": str(actions_path).replace("\\", "/"),
-                "decision": decision,
-                "center_method": chosen_method,
-                "best_normal_rate": f"{best_normal.match_rate:.6f}",
-                "best_flipped_rate": f"{best_flipped.match_rate:.6f}",
-                "best_normal_label": best_normal.label(),
-                "best_flipped_label": best_flipped.label(),
-                "apply_mirror": str(plan.mirror),
-                "apply_swap_owner": str(plan.swap_owner),
-                "apply_swap_entities": str(plan.swap_entities),
-            }
-        )
-
-        if args.apply and decision == "flip":
-            # Stream read + transform + atomic replace
-            def transformed() -> Iterator[Dict[str, Any]]:
-                for fr in iter_jsonl(actions_path, allow_bad_lines=True):
-                    apply_fix_in_place(fr, plan)
-                    yield fr
-
-            write_jsonl_atomic(actions_path, transformed())
-
-            print(f"[FLIP] {actions_path.parent.name}  ({best_flipped.match_rate:.3f} vs {best_normal.match_rate:.3f})")
-        else:
-            print(f"[SKIP:{decision.upper()}] {actions_path.parent.name}  ({best_flipped.match_rate:.3f} vs {best_normal.match_rate:.3f})")
-
-    # Write report
+    # Write report (single writer, deterministic)
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    # Ensure consistent columns even if errors occurred
+    fieldnames = [
+        "folder",
+        "path",
+        "decision",
+        "center_method",
+        "best_normal_rate",
+        "best_flipped_rate",
+        "best_normal_label",
+        "best_flipped_label",
+        "apply_mirror",
+        "apply_swap_owner",
+        "apply_swap_entities",
+        "applied",
+        "error",
+    ]
     with report_path.open("w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
-        w.writerows(rows)
+        for r in rows:
+            # normalize missing keys
+            out = {k: r.get(k, "") for k in fieldnames}
+            w.writerow(out)
 
     print("")
-    print(f"Done. files={len(files)}  flip={n_flip}  normal={n_normal}  unclear={n_unclear}")
+    mode = "APPLY" if args.apply else "DRY RUN"
+    print(f"Done ({mode}). files={len(files)}  flip={n_flip}  normal={n_normal}  unclear={n_unclear}  error={n_error}")
+    if args.apply:
+        print(f"Applied rewrites: {n_applied}")
+    print(f"Workers: {args.workers}")
     print(f"Report: {report_path}")
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()

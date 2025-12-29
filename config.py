@@ -24,6 +24,7 @@ def get_project_root() -> str:
 PROJECT_ROOT = get_project_root()
 APP_PATH     = os.path.join(PROJECT_ROOT, "dist", "tango-x86_64-linux.AppImage")
 
+CRITIC_CKPT_PATH os.path.join(PROJECT_ROOT, "checkpoints", "critic_rl", "tdlam_complete_v5_final", "last.pt")
 # =============================================================================
 # Instance orchestration
 # =============================================================================
