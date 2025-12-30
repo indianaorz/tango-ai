@@ -28,8 +28,8 @@ BASE_CONFIG = {
     "device": "cuda" if torch.cuda.is_available() else "cpu",
     "batch_size": 96,
     "lr": 1e-4,
-    "epochs": 50,
-    "save_every": 100,
+    "epochs": 1000,
+    "save_every": 1000,
     "num_workers": 8,
     "max_keep_ckpts": 3,
     "base_ckpt": "weights/ng.pt",
@@ -95,7 +95,6 @@ def _suggest_norm_factor_from_manifest(manifest: Optional[Dict[str, Any]]) -> Op
 class ValueWeightCfg:
     """
     Turns per-sample value (Bellman return) into a positive weight.
-    Default is a tanh shaping centered at 0:
 
         w = 1 + scale * tanh( clamp(value / norm_factor, [-tanh_clip, tanh_clip]) )
 
@@ -103,23 +102,16 @@ class ValueWeightCfg:
       - big positive value => weight up
       - big negative value => weight down
       - near 0 => ~1
-
-    If you want to "not learn from bad actions" hard, you can also set
-    min_weight very low (e.g. 0.05) or use --positive_only_weights.
     """
     norm_factor: float = 100.0
     tanh_clip: float = 5.0
     scale: float = 2.0
     min_weight: float = 0.1
     max_weight: float = 10.0
-    positive_only_weights: bool = False  # if True: negative values do not reduce weights (clamp value>=0)
+    positive_only_weights: bool = False  # if True: negative values do not reduce weights
 
 
 def compute_value_weights(values: torch.Tensor, cfg: ValueWeightCfg) -> torch.Tensor:
-    """
-    values: [B] float32 (Bellman return per sample)
-    returns: [B] float32 weights
-    """
     v = values.to(torch.float32)
     if cfg.positive_only_weights:
         v = torch.clamp(v, min=0.0)
@@ -132,11 +124,6 @@ def compute_value_weights(values: torch.Tensor, cfg: ValueWeightCfg) -> torch.Te
 
 
 def weighted_mean(loss_per_sample: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-    """
-    loss_per_sample: [B'] float
-    weights: [B'] float
-    returns scalar
-    """
     w = weights.to(loss_per_sample.dtype).clamp_min(1e-8)
     return (w * loss_per_sample).sum() / w.sum()
 
@@ -308,6 +295,72 @@ def _save_ckpt(
 
 
 # -----------------------------------------------------------------------------
+# Collate/tokenize in workers (Windows-safe: top-level picklable class)
+# -----------------------------------------------------------------------------
+def _stack_if_possible(xs: List[Any]) -> Any:
+    if not xs:
+        return xs
+    x0 = xs[0]
+    if torch.is_tensor(x0):
+        try:
+            return torch.stack(xs, dim=0)
+        except Exception:
+            return xs
+    if isinstance(x0, (int, float, bool)):
+        return torch.tensor(xs)
+    return xs
+
+
+class CollateAndEncode:
+    """
+    Picklable collate_fn for Windows spawn.
+
+    We pass tokenizer_cfg (usually a pydantic/dataclass config) which is picklable.
+    Each worker process gets its own instance (and we lazily create the tokenizer).
+    """
+
+    def __init__(self, tokenizer_cfg: Any) -> None:
+        self._tokenizer_cfg = tokenizer_cfg
+        self._tok: Optional[NitrogenTokenizer] = None
+
+    def _get_tok(self) -> NitrogenTokenizer:
+        if self._tok is None:
+            tok = NitrogenTokenizer(self._tokenizer_cfg)
+            tok.train()
+            self._tok = tok
+        return self._tok
+
+    def __call__(self, samples: List[Dict[str, Any]]) -> Dict[str, Any]:
+        tok = self._get_tok()
+
+        encoded: List[Dict[str, Any]] = []
+        values: List[torch.Tensor] = []
+        games: List[str] = []
+
+        for s in samples:
+            # tokenizer.encode mutates input, so build a fresh dict
+            d = {
+                "frames": s["frames"].unsqueeze(0) if s["frames"].ndim == 4 else s["frames"],
+                "j_left": s["j_left"].unsqueeze(0) if s["j_left"].ndim == 2 else s["j_left"],
+                "j_right": s["j_right"].unsqueeze(0) if s["j_right"].ndim == 2 else s["j_right"],
+                "buttons": s["buttons"].unsqueeze(0) if s["buttons"].ndim == 2 else s["buttons"],
+                "dropped_frames": s["dropped_frames"].unsqueeze(0) if s["dropped_frames"].ndim == 1 else s["dropped_frames"],
+                "game": s["game"],
+            }
+            enc = tok.encode(d)
+            if enc:
+                encoded.append(enc)
+                values.append(s["value"] if torch.is_tensor(s["value"]) else torch.as_tensor(s["value"], dtype=torch.float32))
+                games.append(s["game"])
+
+        if not encoded:
+            return {"encoded": [], "value": torch.empty((0,), dtype=torch.float32), "game": []}
+
+        v = _stack_if_possible(values).to(torch.float32)
+        return {"encoded": encoded, "value": v, "game": games}
+
+
+# -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
 def main() -> None:
@@ -337,6 +390,10 @@ def main() -> None:
     parser.add_argument("--base_ckpt", type=str, default=BASE_CONFIG["base_ckpt"])
     parser.add_argument("--device", type=str, default=BASE_CONFIG["device"])
 
+    # Perf knobs
+    parser.add_argument("--tf32", action="store_true", help="Enable TF32 matmul (Ampere+), usually faster.")
+    parser.add_argument("--compile", action="store_true", help="torch.compile(model) (PyTorch 2.x). Helps if GPU-bound.")
+
     # Shuffle controls
     parser.add_argument("--no_shuffle_files", action="store_true")
     parser.add_argument("--no_shuffle_within_file", action="store_true")
@@ -352,11 +409,19 @@ def main() -> None:
 
     device = torch.device(args.device)
 
+    if args.tf32 and device.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+
     print("🚀 Nitrogen battle training (bellman-cache value-weighted)")
     print(f"   cache_dir: {cache_dir}")
     print(f"   ckpt_dir:  {ckpt_dir}")
     print(f"   log_dir:   {log_dir}")
     print(f"   device:    {device}")
+    if args.tf32:
+        print("   tf32:      enabled")
+    if args.compile:
+        print("   compile:   enabled")
 
     manifest = _load_manifest(cache_dir)
     total_batches = _estimate_total_batches(cache_dir, int(args.batch_size))
@@ -425,12 +490,16 @@ def main() -> None:
         game="bn6",
     )
 
+    # IMPORTANT: pass config, not a closure
+    collate_fn = CollateAndEncode(loaded.tokenizer_cfg)
+
     dl_kwargs: Dict[str, Any] = dict(
         batch_size=int(args.batch_size),
         shuffle=False,  # IterableDataset should not use DataLoader shuffle
         num_workers=int(args.num_workers),
         pin_memory=True,
         persistent_workers=(int(args.num_workers) > 0),
+        collate_fn=collate_fn,
     )
     if int(args.num_workers) > 0:
         dl_kwargs["prefetch_factor"] = int(BASE_CONFIG["prefetch_factor"])
@@ -440,6 +509,12 @@ def main() -> None:
     # --- Model / optim ---
     model = loaded.model
     model.train()
+
+    if args.compile:
+        try:
+            model = torch.compile(model)
+        except Exception as e:
+            print(f"⚠️ torch.compile failed, continuing without compile: {e}")
 
     # Optional: freeze vision tower
     for name, p in model.named_parameters():
@@ -463,9 +538,11 @@ def main() -> None:
     else:
         print("   epoch batches: (unknown; manifest missing or empty)")
 
-    print(f"   weights: norm_factor={weight_cfg.norm_factor} ({norm_src}) tanh_clip={weight_cfg.tanh_clip} "
-          f"scale={weight_cfg.scale} clamp=[{weight_cfg.min_weight},{weight_cfg.max_weight}] "
-          f"positive_only_weights={weight_cfg.positive_only_weights}")
+    print(
+        f"   weights: norm_factor={weight_cfg.norm_factor} ({norm_src}) tanh_clip={weight_cfg.tanh_clip} "
+        f"scale={weight_cfg.scale} clamp=[{weight_cfg.min_weight},{weight_cfg.max_weight}] "
+        f"positive_only_weights={weight_cfg.positive_only_weights}"
+    )
     print(f"🔥 Training Loop Start (continuing from step={step})")
 
     interrupted = False
@@ -484,34 +561,14 @@ def main() -> None:
             for batch in pbar:
                 step += 1
 
-                values = batch["value"].to(torch.float32)  # [B]
-                w_full = compute_value_weights(values, weight_cfg)  # [B]
-
-                encoded_list: List[Dict[str, Any]] = []
-                weights_list: List[torch.Tensor] = []
-
-                # Tokenizer encode is per-sample, so we keep this loop.
-                # If/when you add a batch_encode API, you can vectorize.
-                bs = int(batch["frames"].shape[0])
-                for i in range(bs):
-                    sample = {
-                        "frames": batch["frames"][i].unsqueeze(0),  # [1, V, 3, H, W]
-                        "j_left": batch["j_left"][i].unsqueeze(0),
-                        "j_right": batch["j_right"][i].unsqueeze(0),
-                        "buttons": batch["buttons"][i].unsqueeze(0),
-                        "dropped_frames": batch["dropped_frames"][i].unsqueeze(0),
-                        "game": batch["game"][i] if isinstance(batch["game"], list) else "bn6",
-                    }
-                    enc = tokenizer.encode(sample)
-                    if enc:
-                        encoded_list.append(enc)
-                        weights_list.append(w_full[i])
-
+                encoded_list: List[Dict[str, Any]] = batch["encoded"]
                 if not encoded_list:
                     continue
 
+                values = batch["value"].to(torch.float32)  # [B']
+                w = compute_value_weights(values, weight_cfg).to(device=device, dtype=torch.float32)  # [B']
+
                 model_input = U.collate_encoded(encoded_list, device=device)
-                w = torch.stack(weights_list, dim=0).to(device=device, dtype=torch.float32)  # [B']
 
                 optimizer.zero_grad(set_to_none=True)
 
@@ -576,7 +633,6 @@ def main() -> None:
         print("\n🛑 Interrupted (Ctrl+C). Saving an interrupt checkpoint...")
 
     finally:
-        # Always try to save something useful on interrupt
         if interrupted:
             try:
                 save_path = ckpt_dir / f"interrupt_step_{step}_{_now_tag()}.pt"

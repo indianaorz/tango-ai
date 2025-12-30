@@ -477,8 +477,18 @@ def process_replay(
 
     pad = torch.zeros((H - 1, D), dtype=all_actions_tensor.dtype)
     actions_padded = torch.cat([all_actions_tensor, pad], dim=0)  # [T+H-1, D]
-    all_windows = actions_padded.unfold(0, H, 1)  # [T, H, D]
+
+    # unfold(0, H, 1) returns [T, D, H] for a 2D tensor; permute to [T, H, D]
+    all_windows = actions_padded.unfold(0, H, 1).permute(0, 2, 1).contiguous()  # [T, H, D]
+
     final_actions = all_windows.index_select(0, battle_action_indices).contiguous()
+
+    # fail fast if anything is off
+    if final_actions.shape[1] != H or final_actions.shape[2] != D:
+        raise RuntimeError(
+            f"Bad window shape for {name}: got {tuple(final_actions.shape)}, expected [N,{H},{D}]"
+        )
+
 
     final_values = all_values_tensor.index_select(0, battle_action_indices).contiguous()
     value_stats = _tensor_stats_1d(final_values)
