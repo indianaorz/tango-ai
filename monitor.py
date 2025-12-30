@@ -14,7 +14,7 @@ app = Flask(__name__)
 # Each MODE points at a ROOT directory that contains multiple runs (subfolders).
 # We use os.path.abspath/normpath later to ensure Windows compatibility.
 LOG_DIRS = {
-    "Battle": "logs/battle",
+    "Battle": "logs/nitrogen_battle_cache_bellman",
     "Planning": "logs/planning",
     "RL": "logs/rl_battle",
     "Critic": "checkpoints/critic_hpdelta",

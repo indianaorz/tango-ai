@@ -8,6 +8,7 @@ import math
 import io
 import base64
 import subprocess
+import copy
 from dataclasses import dataclass
 from functools import lru_cache
 from fractions import Fraction
@@ -65,10 +66,13 @@ CACHE_DIRS: Dict[str, str] = {
 }
 
 # Checkpoint Locations
-CKPT_ROOT = ""  # e.g. os.path.join(parent_dir, "checkpoints")
-PLANNING_CKPT_DIR = ""  # e.g. os.path.join(CKPT_ROOT, "planning")
-BATTLE_CKPT_DIR = ""  # e.g. os.path.join(CKPT_ROOT, "battle")
-
+CKPT_ROOT = os.path.join(parent_dir, "checkpoints")
+#pring to validate
+# print(f"Checkpoint root: {CKPT_ROOT}")
+PLANNING_CKPT_DIR = ""#os.path.join(CKPT_ROOT, "planning")
+BATTLE_CKPT_DIR = os.path.join(CKPT_ROOT, "nitrogen_battle_critic")
+#validate battle
+# print(f"Battle Checkpoint dir: {BATTLE_CKPT_DIR}")
 # Strategy & RL Paths
 STRATEGY_DB_PATH = os.path.join(parent_dir, "data/chipwindows_v2/strategy_v2.jsonl")
 STRATEGY_MODEL_PATH = os.path.join(parent_dir, "checkpoints_strategy/strategy_model.pt")
@@ -1001,7 +1005,21 @@ def index():
 
 @app.route("/view/<path:replay_name>")
 def view_replay(replay_name):
-    return render_template("view.html", replay_name=replay_name)
+    # Get sorted list of all replays to find neighbors
+    replays = sorted([d for d in os.listdir(DATASET_DIR) if os.path.isdir(os.path.join(DATASET_DIR, d))])
+    
+    try:
+        idx = replays.index(replay_name)
+        prev_replay = replays[idx - 1] if idx > 0 else None
+        next_replay = replays[idx + 1] if idx < len(replays) - 1 else None
+    except ValueError:
+        prev_replay = None
+        next_replay = None
+
+    return render_template("view.html", 
+                           replay_name=replay_name, 
+                           prev_replay=prev_replay, 
+                           next_replay=next_replay)
 
 
 @app.route("/video/<path:replay_name>")
@@ -1111,9 +1129,283 @@ def _compute_selected_indices_v2(
             out.append(found)
 
     return out
+# viewer/app.py (Partial - replace the solver section)
+
+# ... imports ... (ensure copy is imported)
+
+# =============================================================================
+# STRATEGY SOLVER LOGIC
+# =============================================================================
+
+# =============================================================================
+# STRATEGY SOLVER LOGIC
+# =============================================================================
+
+WILDCARD_CODE = 26  # * Code
+MAX_SLOTS = 5
+MAX_CANDIDATES_LIMIT = 20000 
+
+def _is_chain_valid(chain_indices: List[int], all_ids: List[int], all_codes: List[int]) -> bool:
+    """
+    Validates if a specific sequence of chips is legal.
+    CRITICAL FIX: Normalizes codes (c // 2) so 8 and 9 are treated as the same letter.
+    """
+    if not chain_indices:
+        return True
+        
+    c_ids = [all_ids[i] for i in chain_indices]
+    
+    # 1. Check "Same ID" Rule (Overrides Code rules)
+    first_id = c_ids[0]
+    if all(idn == first_id for idn in c_ids):
+        return True
+        
+    # 2. Check "Same Code" Rule (with Wildcards)
+    c_codes = [all_codes[i] for i in chain_indices]
+    active_code_idx = None  # We track the NORMALIZED index (0-26)
+    
+    for raw_c in c_codes:
+        c_idx = raw_c // 2  # Normalize: 8->4, 9->4
+        
+        if c_idx == WILDCARD_CODE:
+            continue
+            
+        if active_code_idx is None:
+            active_code_idx = c_idx
+        elif c_idx != active_code_idx:
+            # Real mismatch (e.g. 4 vs 5)
+            return False
+            
+    return True
+
+def _generate_chip_chains(ids: List[int], codes: List[int], valid_indices: List[int]) -> List[List[int]]:
+    """
+    Generates all valid permutations of chips up to MAX_SLOTS.
+    """
+    # We use a stack for DFS: (current_chain_list, used_indices_set)
+    stack = []
+    
+    # Init with single chips
+    for i in valid_indices:
+        stack.append(([i], {i}))
+        
+    valid_chains = [[]] # Empty hand is always an option
+    
+    # Optimization: To prevent 20,000 permutations of the same 5 chips just reordered 
+    # (if they are all compatible), we might hit the limit. 
+    # But MMBN order matters, so A->B is distinct from B->A. We must keep them.
+    
+    while stack:
+        if len(valid_chains) >= MAX_CANDIDATES_LIMIT:
+            print(f"[Solver] Hit safety limit of {MAX_CANDIDATES_LIMIT} chains.")
+            break
+            
+        curr_chain, used = stack.pop()
+        
+        # Add to results
+        valid_chains.append(curr_chain)
+        
+        if len(curr_chain) >= MAX_SLOTS:
+            continue
+            
+        # Try to extend
+        for i in valid_indices:
+            if i in used:
+                continue
+            
+            # Optimization: Pre-check validity before adding to stack
+            # This prunes the tree significantly compared to generating then checking.
+            
+            # Check if adding 'i' to 'curr_chain' maintains validity
+            # We only need to check the LAST transition constraint relative to the whole group.
+            # Actually, because "Same ID" allows ANY code, and "Same Code" allows DIFFERENT IDs,
+            # the rule is global to the hand, not just the transition.
+            # So we effectively check: Is (curr_chain + [i]) valid?
+            
+            test_chain = curr_chain + [i]
+            
+            if _is_chain_valid(test_chain, ids, codes):
+                new_used = used.copy()
+                new_used.add(i)
+                stack.append((test_chain, new_used))
+                
+    return valid_chains
+
+def _solve_combinations(game_state):
+    """
+    Generates all valid moves (Chips + Crosses + Beast) and prepares 
+    the SIMULATED game state dictionaries for the Critic.
+    """
+    # --- 1. Parse Hand ---
+    hand_slots = [int(x) for x in game_state.get("hand_slots", [])]
+    hand_codes = [int(x) for x in game_state.get("hand_codes", [])]
+    
+    # --- 2. Generate Chip Chains ---
+    valid_indices = [i for i, x in enumerate(hand_slots) if x > 0 and x != 255 and x != 65535]
+    chains = _generate_chip_chains(hand_slots, hand_codes, valid_indices)
+    
+    # --- 3. Generate Valid Forms (Crosses) ---
+    derived_p = game_state.get("derived", {}).get("player", {})
+    used_mask = derived_p.get("used_cross_mask", [])
+    current_cross = int(derived_p.get("active_cross", {}).get("idx", 0))
+    
+    if len(used_mask) < 11:
+        used_mask = used_mask + [False] * (11 - len(used_mask))
+
+    has_gregar_history = any(used_mask[1:6])
+    has_falzar_history = any(used_mask[6:11])
+    
+    if 1 <= current_cross <= 5: has_gregar_history = True
+    if 6 <= current_cross <= 10: has_falzar_history = True
+
+    # 0 is always allowed. It means "No Selection" (Stay in current form).
+    valid_cross_selections = [0] 
+
+    # Pool of potential NEW crosses
+    pool_indices = []
+    if has_gregar_history and not has_falzar_history:
+        pool_indices = [1, 2, 3, 4, 5]
+    elif has_falzar_history and not has_gregar_history:
+        pool_indices = [6, 7, 8, 9, 10]
+    else:
+        # Ambiguous/Start: Check all
+        pool_indices = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    for i in pool_indices:
+        # Validity Rule:
+        # 1. New Cross must not be used yet.
+        # 2. New Cross cannot be the current one (that's what 0 is for).
+        if i != current_cross and not used_mask[i]:
+            valid_cross_selections.append(i)
+            
+    # --- 4. Generate Valid Beast Options ---
+    beast_state = derived_p.get("beast", {})
+    is_beast_active = beast_state.get("active", False)
+    has_beasted_ever = beast_state.get("ever", False)
+    
+    beast_opts = []
+    
+    if is_beast_active:
+        # If ALREADY in Beast, we cannot press the button again.
+        # The 'beast_selected' action must be False.
+        # (The Critic will infer we are still in Beast via derived state).
+        beast_opts = [False]
+    elif has_beasted_ever:
+        # If used previously and finished, we cannot use it again.
+        beast_opts = [False]
+    else:
+        # Available to toggle
+        beast_opts = [False, True]
+
+    # --- 5. Cartesian Product ---
+    candidates = []
+    
+    for ch in chains:
+        for cr in valid_cross_selections:
+            for b in beast_opts:
+                
+                # CONSTRAINT: Cannot Change Cross AND Beast Out in same turn
+                # cr > 0 means we are actively selecting a new cross.
+                # b=True means we are pressing the Beast Button.
+                if cr > 0 and b:
+                    continue
+                
+                # Rule: Beast Out consumes 1 chip slot (limits hand to 4)
+                # Only applies if we are PERFORMING the Beast Out action now.
+                # If we are already in beast (b=False, is_beast_active=True), standard limits apply.
+                # Actually, standard limit is always 5 unless selecting beast reduces it.
+                # Wait: Does being IN Beast reduce slots? No, usually just the turn you pick it.
+                
+                max_allowed = MAX_SLOTS
+                if b is True: # Action: Beast Out
+                    max_allowed -= 1
+                
+                if len(ch) <= max_allowed:
+                    candidates.append({
+                        "chain": ch,
+                        "cross_idx": cr,
+                        "do_beast": b
+                    })
+    
+    # --- 6. Build Simulated Rows ---
+    sim_rows = []
+    
+    for cand in candidates:
+        chain_idxs = cand["chain"]
+        
+        sim_ids = [hand_slots[i] for i in chain_idxs]
+        sim_codes = [hand_codes[i] for i in chain_idxs]
+        
+        sim_ids_padded = sim_ids + [0] * (5 - len(sim_ids))
+        sim_codes_padded = sim_codes + [0] * (5 - len(sim_codes))
+        
+        sim_row = game_state.copy()
+        
+        sim_row['selected_chips_id'] = sim_ids_padded
+        sim_row['selected_chips_code'] = sim_codes_padded
+        sim_row['selected_cross'] = cand['cross_idx']
+        sim_row['beast_selected'] = cand['do_beast']
+        
+        if 'window_hand_id' not in sim_row: sim_row['window_hand_id'] = sim_row.get('hand_slots', [])
+        if 'window_hand_code' not in sim_row: sim_row['window_hand_code'] = sim_row.get('hand_codes', [])
+        if 'window_hand_vis' not in sim_row:
+             sim_row['window_hand_vis'] = [1.0 if x > 0 else 0.0 for x in hand_slots]
+
+        sim_rows.append(sim_row)
+        
+    return candidates, sim_rows
 
 
+@app.route("/api/solve_strategy", methods=["POST"])
+def api_solve_strategy():
+    if not _PLANNING_CRITIC:
+        return jsonify({"error": "Critic not loaded"}), 500
 
+    try:
+        game_state = request.json
+        
+        # 1. Generate Candidates
+        candidates, sim_rows = _solve_combinations(game_state)
+        
+        count = len(candidates)
+        if count == 0:
+            return jsonify({"results": [], "count": 0})
+            
+        print(f"[API] Evaluating {count} permutations...")
+
+        # 2. Run Inference
+        preds = _PLANNING_CRITIC.infer_rows(sim_rows)
+            
+        # 3. Combine
+        results = []
+        rich_hand = game_state.get("rich_hand", [])
+        
+        for i, cand in enumerate(candidates):
+            chips_ui = []
+            for idx in cand["chain"]:
+                if idx < len(rich_hand) and rich_hand[idx]:
+                    chips_ui.append(rich_hand[idx])
+            
+            results.append({
+                "value": float(preds[i]),
+                "chain_indices": cand["chain"],
+                "chips": chips_ui,
+                "cross": cand["cross_idx"],
+                "beast": cand["do_beast"]
+            })
+            
+        # 4. Sort Descending
+        results.sort(key=lambda x: x["value"], reverse=True)
+        
+        return jsonify({
+            "results": results[:2000],
+            "total_evaluated": count
+        }) 
+        
+    except Exception as e:
+        print(f"[API] Solve failed: {e}")
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 def _decorate_strategy_v2_row(raw_turn: Dict[str, Any]) -> Dict[str, Any]:
@@ -1429,33 +1721,198 @@ def view_strategy():
         print(f"Error reading strategy DB: {e}")
 
     return render_template("view_strategy.html", turns=turns[::-1])
-
-
+import math
 import os
 import json
 import time
 import gc
 import torch
-from typing import Dict, Any
+import orjson
+from collections import OrderedDict
+from typing import Any, Dict, List, Optional, Union
 from flask import Flask, jsonify
 
 from derived_state import compute_derived
 
+# -----------------------------------------------------------------------------
+# Critic smoothing helpers (masked to match training: only when cust_gauge > 0)
+# -----------------------------------------------------------------------------
+
+def _is_finite(x: Any) -> bool:
+    try:
+        if x is None:
+            return False
+        xf = float(x)
+        return math.isfinite(xf)
+    except Exception:
+        return False
+
+
+def _coerce_values_by_frame(
+    values_by_frame: Union[List[Any], Dict[Any, Any]],
+    n_frames: int,
+) -> List[Optional[float]]:
+    """
+    Normalize CriticRunner output into a dense list of length n_frames containing
+    floats or None (no NaN/inf).
+    Supports:
+      - list/tuple of per-frame values (may include None/NaN)
+      - dict mapping frame_idx -> value
+    """
+    out: List[Optional[float]] = [None] * n_frames
+
+    if isinstance(values_by_frame, dict):
+        for k, v in values_by_frame.items():
+            try:
+                i = int(k)
+            except Exception:
+                continue
+            if 0 <= i < n_frames and _is_finite(v):
+                out[i] = float(v)
+        return out
+
+    # list-like
+    try:
+        m = min(len(values_by_frame), n_frames)
+        for i in range(m):
+            v = values_by_frame[i]
+            if _is_finite(v):
+                out[i] = float(v)
+        return out
+    except Exception:
+        return out
+
+
+def _densify_linear_masked(values: List[Optional[float]], mask: List[bool]) -> List[Optional[float]]:
+    """
+    Linear densify, but ONLY within contiguous True segments of mask.
+    Outside mask => forced None.
+    Inside mask:
+      - interpolate between known points
+      - lead/trail filled with nearest known (within that segment)
+      - if a segment has no known points, it stays all None
+    """
+    n = len(values)
+    if n == 0:
+        return values
+    if len(mask) != n:
+        raise ValueError(f"mask len {len(mask)} != values len {n}")
+
+    out = list(values)
+
+    # Collect known points only inside mask
+    known = [i for i, v in enumerate(out) if mask[i] and v is not None]
+
+    # Ensure masked-out frames are None
+    for i in range(n):
+        if not mask[i]:
+            out[i] = None
+
+    if not known:
+        return out
+
+    # Fill each contiguous True segment independently
+    i = 0
+    while i < n:
+        if not mask[i]:
+            i += 1
+            continue
+
+        j = i
+        while j < n and mask[j]:
+            j += 1
+
+        seg_known = [k for k in known if i <= k < j]
+        if seg_known:
+            # leading
+            first = seg_known[0]
+            for t in range(i, first):
+                out[t] = out[first]
+
+            # middle gaps
+            for a, b in zip(seg_known, seg_known[1:]):
+                va, vb = out[a], out[b]
+                if va is None or vb is None:
+                    continue
+                gap = b - a
+                if gap > 1:
+                    for t in range(a + 1, b):
+                        u = (t - a) / gap
+                        out[t] = (1.0 - u) * va + u * vb
+
+            # trailing
+            last = seg_known[-1]
+            for t in range(last + 1, j):
+                out[t] = out[last]
+        else:
+            # No known values in this segment
+            for t in range(i, j):
+                out[t] = None
+
+        i = j
+
+    return out
+
+
+def _ema_smooth_masked(values: List[Optional[float]], mask: List[bool], alpha: float) -> List[Optional[float]]:
+    """
+    EMA smoothing but ONLY inside mask. Leaving mask hard-resets EMA so we don't
+    "bleed" values into cust_gauge==0 regions.
+    """
+    if not (0.0 < alpha <= 1.0):
+        raise ValueError(f"alpha must be in (0,1], got {alpha}")
+    if len(mask) != len(values):
+        raise ValueError("mask length mismatch")
+
+    out: List[Optional[float]] = [None] * len(values)
+    ema: Optional[float] = None
+
+    for i, v in enumerate(values):
+        if not mask[i]:
+            ema = None
+            out[i] = None
+            continue
+
+        if v is None:
+            out[i] = ema if ema is not None else None
+            continue
+
+        ema = v if ema is None else (alpha * v + (1.0 - alpha) * ema)
+        out[i] = ema
+
+    return out
+
+
+def _densify_and_smooth_masked(
+    sparse: Union[List[Any], Dict[Any, Any]],
+    n_frames: int,
+    *,
+    mask: List[bool],
+    ema_alpha: float,
+) -> List[Optional[float]]:
+    """
+    (1) coerce -> dense (None where missing / NaN)
+    (2) linear densify within mask segments
+    (3) EMA smooth within mask segments, resetting at mask boundaries
+    """
+    dense = _coerce_values_by_frame(sparse, n_frames)
+    dense = _densify_linear_masked(dense, mask)
+    dense = _ema_smooth_masked(dense, mask, alpha=ema_alpha)
+    return dense
+
+
+# -----------------------------------------------------------------------------
+# Critic init
+# -----------------------------------------------------------------------------
+
 _CRITIC = None
 _CRITIC_ERR = None
 
-# ---------------------------------------------------------------------------
-# Critic config
-# ---------------------------------------------------------------------------
-
-_DEFAULT_CRITIC_CKPT = "C:\\Users\\leeor\\FFCO\\ai\\tango-ai\\checkpoints\\critic_rl\\tdlam_complete_v5_final\\last.pt"
+_DEFAULT_CRITIC_CKPT = r"C:\Users\leeor\FFCO\ai\tango-ai\checkpoints\critic_rl\v10_full\last.pt"
 _DEFAULT_CRITIC_DEVICE = "cuda"
+_DEFAULT_BATCH_SEQS = 256
 
-# Increase batch size significantly to saturate GPU
-_DEFAULT_BATCH_SEQS = 256  
-
-
-def _init_critic():
+def _init_critic() -> None:
     global _CRITIC, _CRITIC_ERR
     try:
         from critic_infer import CriticRunner
@@ -1468,7 +1925,6 @@ def _init_critic():
             return
 
         print(f"[Critic] Loading model from: {ckpt} on {device}...")
-        # Use a large batch size for inference speed
         _CRITIC = CriticRunner(ckpt_path=ckpt, device=device, use_amp=True, batch_seqs=_DEFAULT_BATCH_SEQS)
         _CRITIC_ERR = None
         print("[Critic] Model loaded successfully.")
@@ -1477,74 +1933,454 @@ def _init_critic():
         _CRITIC_ERR = str(e)
         print(f"[Critic] Failed to load model: {e}")
 
-
 _init_critic()
 
+
+# -----------------------------------------------------------------------------
+# Cache
+# -----------------------------------------------------------------------------
+
+INPUT_CACHE = OrderedDict()
+MAX_CACHE_SIZE = 5
+# --- Critic aux cache for exact probe matching (NOT sent to UI) ---
+CRITIC_AUX_CACHE = OrderedDict()  # replay -> {"mask": [...], "densified": [...], "ema_alpha": float, "stride": int, "seq_len": int}
+
+
+# -----------------------------------------------------------------------------
+# Route
+# -----------------------------------------------------------------------------
+def _safe_int(v: Any, default: int = 0) -> int:
+    try:
+        if v is None:
+            return default
+        if isinstance(v, (list, tuple)) and v:
+            return int(v[0])
+        return int(v)
+    except Exception:
+        return default
+
+
+def _compute_hp_reward(frames: List[Dict[str, Any]]) -> List[float]:
+    """
+    Per-frame reward based purely on observed HP deltas:
+      r_t = (enemy_hp[t-1] - enemy_hp[t]) - (player_hp[t-1] - player_hp[t])
+    i.e. damage dealt minus damage taken.
+    """
+    n = len(frames)
+    if n == 0:
+        return []
+    r = [0.0] * n
+    prev_p = _safe_int(frames[0].get("player_health"), 0)
+    prev_e = _safe_int(frames[0].get("enemy_health"), 0)
+    for t in range(1, n):
+        p = _safe_int(frames[t].get("player_health"), prev_p)
+        e = _safe_int(frames[t].get("enemy_health"), prev_e)
+        dp = max(0, prev_p - p)  # damage taken
+        de = max(0, prev_e - e)  # damage dealt
+        r[t] = float(de - dp)
+        prev_p, prev_e = p, e
+    return r
+
+
+def _bellman_return(rewards: List[float], gamma: float) -> List[float]:
+    """
+    Backward discounted return:
+      G_t = r_t + gamma * G_{t+1}
+    """
+    n = len(rewards)
+    out = [0.0] * n
+    g = 0.0
+    for t in range(n - 1, -1, -1):
+        g = float(rewards[t]) + float(gamma) * g
+        out[t] = g
+    return out
+def _chip_use_events(chip: List[int]) -> tuple[List[bool], List[int]]:
+    """
+    Telemetry semantics (your script):
+      - chip[t] is on-deck chip (fires on next A)
+      - NO_CHIP means none
+      - "use" when on-deck chip changes away from a previous non-NO_CHIP chip
+    Returns:
+      used_mask[t], used_chip_id[t] (prev chip id)
+    """
+    n = len(chip)
+    used = [False] * n
+    used_id = [NO_CHIP] * n
+    if n <= 1:
+        return used, used_id
+
+    for t in range(1, n):
+        prev = int(chip[t - 1])
+        cur = int(chip[t])
+        if prev != NO_CHIP and cur != prev:
+            used[t] = True
+            used_id[t] = prev
+    return used, used_id
+
+
+def _charge_release_events(charge: List[int], threshold: int) -> List[bool]:
+    """
+    True at t when charge[t-1] >= threshold and charge[t] == 0.
+    """
+    n = len(charge)
+    out = [False] * n
+    if n <= 1:
+        return out
+    for t in range(1, n):
+        if int(charge[t - 1]) >= int(threshold) and int(charge[t]) == 0:
+            out[t] = True
+    return out
+def _spread_add(buf: List[float], start: int, end_inclusive: int, amt: float, mode: str) -> None:
+    """
+    Add 'amt' across [start..end_inclusive].
+    uniform: split evenly
+    ramp: more weight near event frame
+    """
+    n = len(buf)
+    a = max(0, min(int(start), n - 1))
+    b = max(0, min(int(end_inclusive), n - 1))
+    if b < a:
+        return
+
+    L = (b - a + 1)
+    if L <= 0:
+        return
+
+    if mode == "ramp" and L > 1:
+        # linear ramp 1..L
+        denom = (L * (L + 1)) / 2.0
+        for k in range(L):
+            w = (k + 1) / denom
+            buf[a + k] += amt * w
+    else:
+        each = amt / float(L)
+        for i in range(a, b + 1):
+            buf[i] += each
+def _compute_commit_shaping(frames: List[Dict[str, Any]], cfg: ShapingCfg) -> List[float]:
+    """
+    Dense per-frame shaping reward built from commit events.
+    We look forward LOOKAHEAD frames to measure:
+      - player_damage_taken (from player HP drops)
+      - enemy_damage_taken  (from enemy HP drops)
+    Then assign shaped reward to the PRE_EVENT_FRAMES leading into the commit frame.
+    """
+    n = len(frames)
+    if n == 0:
+        return []
+
+    # --- pull series ---
+    p_hp = [_safe_int(f.get("player_health"), 0) for f in frames]
+    e_hp = [_safe_int(f.get("enemy_health"), 0) for f in frames]
+
+    p_charge = [_safe_int(f.get("player_charge"), 0) for f in frames]
+    e_charge = [_safe_int(f.get("enemy_charge"), 0) for f in frames]
+
+    p_chip = [_safe_int(f.get("player_chip"), NO_CHIP) for f in frames]
+    e_chip = [_safe_int(f.get("enemy_chip"), NO_CHIP) for f in frames]
+
+    # per-frame damage (same as your dataset script)
+    p_dmg = [0] * n
+    e_dmg = [0] * n
+    for t in range(1, n):
+        p_dmg[t] = max(0, p_hp[t - 1] - p_hp[t])  # damage taken by player
+        e_dmg[t] = max(0, e_hp[t - 1] - e_hp[t])  # damage taken by enemy
+
+    # event masks
+    p_chip_use, _ = _chip_use_events(p_chip)
+    e_chip_use, _ = _chip_use_events(e_chip)
+    p_charge_rel = _charge_release_events(p_charge, cfg.charge_threshold)
+    e_charge_rel = _charge_release_events(e_charge, cfg.charge_threshold)
+
+    shaped = [0.0] * n
+
+    def sum_window(arr: List[int], t0: int, t1_excl: int) -> int:
+        a = max(0, min(int(t0), n))
+        b = max(0, min(int(t1_excl), n))
+        if b <= a:
+            return 0
+        return int(sum(arr[a:b]))
+
+    def apply_actor_event(*, actor: str, t: int) -> None:
+        # window
+        start = max(0, t - cfg.pre_event_frames)
+        end = min(n, t + cfg.lookahead_frames)  # exclusive
+
+        dmg_taken = sum_window(p_dmg, t, end)   # player got hit?
+        dmg_dealt = sum_window(e_dmg, t, end)   # player dealt dmg?
+
+        if actor == "enemy":
+            # enemy committed: reward if you dodged, punish if you got hit
+            amt = cfg.enemy_dodge_bonus if dmg_taken == 0 else cfg.enemy_hit_penalty
+            _spread_add(shaped, start, t, amt, cfg.spread_mode)
+
+        elif actor == "player":
+            # player committed: punish if no damage dealt (your request)
+            if dmg_dealt <= 0:
+                amt = cfg.player_miss_penalty
+            else:
+                # dealt damage: reward clean, penalize trades
+                if dmg_taken == 0:
+                    amt = cfg.player_clean_bonus
+                else:
+                    amt = cfg.player_trade_penalty
+            _spread_add(shaped, start, t, amt, cfg.spread_mode)
+
+    # apply for all commits (chip + charge)
+    for t in range(1, n):
+        if p_chip_use[t] or p_charge_rel[t]:
+            apply_actor_event(actor="player", t=t)
+        if e_chip_use[t] or e_charge_rel[t]:
+            apply_actor_event(actor="enemy", t=t)
+
+    return shaped
+
+# -----------------------------------------------------------------------------
+# Route
+# -----------------------------------------------------------------------------
+from dataclasses import dataclass
+NO_CHIP = 65535
+
+@dataclass(frozen=True)
+class ShapingCfg:
+    fps: int = 60
+    lookahead_frames: int = 4 * 60      # 4 seconds
+    pre_event_frames: int = 18
+    charge_threshold: int = 2
+
+    # enemy commit shaping
+    enemy_dodge_bonus: float = 40.0
+    enemy_hit_penalty: float = -40.0
+
+    # player commit shaping
+    player_clean_bonus: float = 20.0
+    player_trade_penalty: float = -15.0
+    player_miss_penalty: float = -25.0
+
+    # how to smear reward over [t-pre .. t]
+    spread_mode: str = "uniform"  # "uniform" | "ramp"
+
 @app.route("/inputs/<path:replay_name>")
-def serve_inputs(replay_name):
+def serve_inputs(replay_name: str):
+    # 1) Memory Cache (Fastest)
+    if replay_name in INPUT_CACHE:
+        print(f"[Cache] Serving {replay_name} from memory...")
+        INPUT_CACHE.move_to_end(replay_name)
+        return jsonify(INPUT_CACHE[replay_name])
+
     print(f"\n[Serve] Loading replay: {replay_name}")
     replay_path = os.path.join(DATASET_DIR, replay_name)
     jsonl_path = os.path.join(replay_path, "actions.jsonl")
     static_path = os.path.join(replay_path, "static_data.json")
+
     response: Dict[str, Any] = {"frames": [], "static": None, "derived": []}
 
+    # 2) Load frames
     if os.path.exists(jsonl_path):
         try:
-            with open(jsonl_path, "r") as f:
+            with open(jsonl_path, "rb") as f:
                 for line in f:
                     if line.strip():
                         try:
-                            response["frames"].append(json.loads(line))
+                            response["frames"].append(orjson.loads(line))
                         except Exception:
                             continue
         except Exception:
             pass
-    
+
     print(f"[Serve] Loaded {len(response['frames'])} frames.")
 
+
+    # --- Bellman HP-return (deterministic baseline) ---
+    try:
+        gamma = float(os.environ.get("BELL_GAMMA", "0.997").strip() or "0.997")  # ~1s half-life-ish at 60fps
+    except Exception:
+        gamma = 0.997
+
+    hp_r = _compute_hp_reward(response["frames"])
+    hp_G = _bellman_return(hp_r, gamma=gamma)
+
+    # --- Shaping ---
+    cfg = ShapingCfg(
+        fps=60,
+        lookahead_frames=int(os.environ.get("SHAPE_LOOKAHEAD", str(4 * 60))),
+        pre_event_frames=int(os.environ.get("SHAPE_PRE", "18")),
+        charge_threshold=int(os.environ.get("SHAPE_CHARGE_THR", "2")),
+        enemy_dodge_bonus=float(os.environ.get("SHAPE_ENEMY_DODGE_BONUS", "40.0")),
+        enemy_hit_penalty=float(os.environ.get("SHAPE_ENEMY_HIT_PENALTY", "-40.0")),
+        player_clean_bonus=float(os.environ.get("SHAPE_PLAYER_CLEAN_BONUS", "20.0")),
+        player_trade_penalty=float(os.environ.get("SHAPE_PLAYER_TRADE_PENALTY", "-15.0")),
+        player_miss_penalty=float(os.environ.get("SHAPE_PLAYER_MISS_PENALTY", "-25.0")),
+        spread_mode=str(os.environ.get("SHAPE_SPREAD", "uniform")),
+    )
+
+    shape_r = _compute_commit_shaping(response["frames"], cfg)
+
+    # Combined reward (dense)
+    combo_r = [float(hr) + float(sr) for hr, sr in zip(hp_r, shape_r)]
+
+    # Bellman on combined reward
+    combo_G = _bellman_return(combo_r, gamma=gamma)
+
+    response["bellman"] = {
+        "gamma": gamma,
+        "values_by_frame": combo_G,
+        "reward_by_frame": combo_r,
+        "reward_hp_by_frame": hp_r,
+        "reward_shape_by_frame": shape_r,
+        "shape_cfg": {
+            "lookahead_frames": cfg.lookahead_frames,
+            "pre_event_frames": cfg.pre_event_frames,
+            "charge_threshold": cfg.charge_threshold,
+            "enemy_dodge_bonus": cfg.enemy_dodge_bonus,
+            "enemy_hit_penalty": cfg.enemy_hit_penalty,
+            "player_clean_bonus": cfg.player_clean_bonus,
+            "player_trade_penalty": cfg.player_trade_penalty,
+            "player_miss_penalty": cfg.player_miss_penalty,
+            "spread_mode": cfg.spread_mode,
+        },
+    }
+
+
+
+    # 3) Load static
     if os.path.exists(static_path):
         try:
-            with open(static_path, "r") as f:
-                response["static"] = json.load(f)
+            with open(static_path, "rb") as f:
+                response["static"] = orjson.loads(f.read())
         except Exception:
             pass
 
-    # 1) Compute Derived State
+    # 4) Derived
     try:
         t0 = time.time()
         derived_data = compute_derived(response["frames"], response["static"])
-        print(f"[Serve] Derived state computed in {time.time()-t0:.3f}s")
+        print(f"[Serve] Derived state computed in {time.time() - t0:.3f}s")
     except Exception as e:
         derived_data = []
         print(f"⚠️ derived_state compute failed: {e}")
 
-    critic_values = None
-    critic_meta = None
+    critic_values: Optional[List[Optional[float]]] = None
+    critic_meta: Optional[Dict[str, Any]] = None
+    n_frames = len(derived_data)
 
-    # 2) Critic Inference
-    if _CRITIC is not None and derived_data:
+    # -------------------------------------------------------------------------
+    # NEW: Check Disk Cache (Nitrogen Pre-computed)
+    # -------------------------------------------------------------------------
+    # We look for the .pt file generated by nitrogen/precache.py
+    # If found, we use those values instead of running slow inference.
+    cache_dir = os.environ.get("NITROGEN_BATTLE_CACHE_DIR", os.path.join("data", "nitrogen_battle_cache_bellman"))
+    cache_pt_path = os.path.join(cache_dir, f"{replay_name}.pt")
+    cache_hit = False
+
+    if os.path.exists(cache_pt_path):
         try:
-            # We trust the model's seq_len, but force stride 1 for visualization
-            trained_seq_len = getattr(_CRITIC, "trained_seq_len", 16)
-            stride = 1 
+            print(f"[Serve] Found disk cache: {cache_pt_path}")
+            payload = torch.load(cache_pt_path, map_location="cpu")
 
-            print(f"[Serve] Inferencing Critic (stride={stride}, seq_len={trained_seq_len})...")
-            
+            # values are per cached sample
+            values_t = payload.get("values", None)
+            if values_t is None:
+                raise KeyError("cache missing key: values")
+
+            # NEW format uses action_indices (preferred)
+            # OLD format used original_indices
+            idx_t = payload.get("action_indices", None)
+            idx_key = "action_indices"
+            if idx_t is None:
+                idx_t = payload.get("original_indices", None)
+                idx_key = "original_indices"
+
+            if idx_t is None:
+                raise KeyError("cache missing key: action_indices (or original_indices)")
+
+            vals = values_t.detach().to(torch.float32).cpu().numpy()
+            idxs = idx_t.detach().to(torch.long).cpu().numpy()
+
+            if len(vals) != len(idxs):
+                raise ValueError(f"cache mismatch: len(values)={len(vals)} != len({idx_key})={len(idxs)}")
+
+            # Map cached (battle-only) values back onto full replay timeline (action/derived index space)
+            critic_values = [None] * n_frames
+            inserted = 0
+            for idx, val in zip(idxs, vals):
+                j = int(idx)
+                if 0 <= j < n_frames:
+                    critic_values[j] = float(val)
+                    inserted += 1
+
+            critic_meta = {
+                "source": "nitrogen_cache",
+                "path": cache_pt_path,
+                "index_key": idx_key,
+                "cached_samples": int(len(idxs)),
+                "inserted": int(inserted),
+                "n_frames": int(n_frames),
+            }
+
+            cache_hit = True
+            print(f"[Serve] Loaded {len(idxs)} critic values from disk cache ({idx_key}); inserted={inserted}.")
+
+        except Exception as e:
+            print(f"⚠️ Failed to load disk cache: {e}")
+            cache_hit = False
+
+
+    # 5) Critic inference (ONLY if cache missed)
+    if not cache_hit and _CRITIC is not None and derived_data:
+        try:
+            # Canonical mask: exactly what training filtered on (raw frame cust_gauge > 0)
+            cust_mask = [(int((f or {}).get("cust_gauge") or 0) > 0) for f in response["frames"]]
+            if len(cust_mask) != n_frames:
+                cust_mask = cust_mask[:n_frames] + [False] * max(0, n_frames - len(cust_mask))
+
+            stride = int(os.environ.get("CRITIC_RL_STRIDE", "2").strip() or "2")
+            trained_seq_len = getattr(_CRITIC, "trained_seq_len", None) or getattr(_CRITIC, "trained_seq_len", None)
+            seq_len = int(os.environ.get("CRITIC_RL_SEQ_LEN", str(trained_seq_len or 64)).strip())
+            ema_alpha = float(os.environ.get("CRITIC_RL_EMA_ALPHA", "0.25").strip() or "0.25")
+
+            print(f"[Serve] Inferencing Critic (stride={stride}, seq_len={seq_len}, ema_alpha={ema_alpha})...")
+
             t0 = time.time()
             res = _CRITIC.infer_from_derived(
                 frames=response["frames"],
                 static=response["static"],
                 derived=derived_data,
                 stride=stride,
-                seq_len=trained_seq_len,
-                require_cust_gt0=False 
+                seq_len=seq_len,
+                require_cust_gt0=None, 
             )
             dt = time.time() - t0
 
-            critic_values = res.values_by_frame
-            critic_meta = res.meta
-            
-            print(f"[Serve] Inference complete in {dt:.3f}s. Coverage: {res.meta.get('coverage_frames')} frames.")
+            # 1) sparse -> dense (None where missing)
+            dense_raw = _coerce_values_by_frame(res.values_by_frame, n_frames)
+
+            # 2) densify/interpolate ONLY within cust_mask segments
+            densified = _densify_linear_masked(dense_raw, cust_mask)
+
+            # 3) EMA smooth ONLY within cust_mask segments
+            critic_values = _ema_smooth_masked(densified, cust_mask, alpha=ema_alpha)
+
+            # Store aux for probe
+            CRITIC_AUX_CACHE[replay_name] = {
+                "mask": cust_mask,
+                "densified": densified,
+                "ema_alpha": float(ema_alpha),
+                "stride": int(stride),
+                "seq_len": int(seq_len),
+            }
+            CRITIC_AUX_CACHE.move_to_end(replay_name)
+            if len(CRITIC_AUX_CACHE) > MAX_CACHE_SIZE:
+                CRITIC_AUX_CACHE.popitem(last=False)
+
+            critic_meta = dict(res.meta or {})
+            critic_meta.update({
+                "source": "inference",
+                "stride": stride,
+                "seq_len": seq_len,
+                "ema_alpha": ema_alpha,
+            })
+
+            print(f"[Serve] Inference complete in {dt:.3f}s.")
 
         except Exception as e:
             critic_values = None
@@ -1552,19 +2388,22 @@ def serve_inputs(replay_name):
             print(f"[Serve] Critic inference failed: {e}")
             import traceback
             traceback.print_exc()
-        
-        # --- VRAM CLEANUP ---
+
+        # VRAM cleanup
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # 3) Attach
-    if critic_values:
-        if len(critic_values) == len(derived_data):
-            for i, val in enumerate(critic_values):
-                derived_data[i]["critic_v"] = val
-        else:
-            print(f"⚠️ Mismatch: derived len {len(derived_data)} vs critic len {len(critic_values)}")
+    # 6) Attach critic_v
+    if critic_values is not None:
+        m = min(len(critic_values), len(derived_data))
+        for i in range(m):
+            v = critic_values[i]
+            # Only attach if finite and present
+            if v is not None and _is_finite(v):
+                derived_data[i]["critic_v"] = float(v)
+            else:
+                derived_data[i].pop("critic_v", None)
 
     response["derived"] = derived_data
     response["critic"] = {
@@ -1573,7 +2412,384 @@ def serve_inputs(replay_name):
         "meta": critic_meta,
     }
 
+    # 7) Cache store/evict
+    INPUT_CACHE[replay_name] = response
+    if len(INPUT_CACHE) > MAX_CACHE_SIZE:
+        evicted = INPUT_CACHE.popitem(last=False)
+        # Clean aux cache if it exists for this item
+        CRITIC_AUX_CACHE.pop(evicted[0], None)
+        print(f"[Cache] Evicted {evicted[0]} to free up memory.")
+
     return jsonify(response)
+
+def _as_button_value(x) -> float:
+    """Normalize incoming 0/1-ish values to 0.0/1.0 floats."""
+    try:
+        v = float(x)
+    except Exception:
+        return 0.0
+    return 1.0 if v > 0.5 else 0.0
+
+
+def _apply_button_overrides(frame: dict, overrides: dict) -> dict:
+    """
+    Return a shallow-copied frame with controller button fields overridden.
+
+    Preserves original shape: if the existing value is a list (e.g. [0.0]),
+    we keep it as a single-element list. Otherwise we store a scalar.
+    """
+    out = dict(frame)
+    for k, raw in (overrides or {}).items():
+        v = _as_button_value(raw)
+        if k in out and isinstance(out[k], list):
+            out[k] = [v]
+        else:
+            out[k] = v
+    return out
+
+
+def _load_replay_frames_for_probe(replay_name: str) -> list:
+    """
+    Reuse the SAME source of truth as your /inputs/<replay> route.
+    If you already have a function that loads frames, call it here.
+
+    EXPECTATION: returns list[dict] where each dict is a frame record.
+    """
+    # ---- OPTION A (recommended): call your existing loader used by /inputs/<replay> ----
+    # return load_inputs_for_replay(replay_name)["frames"]
+
+    # ---- OPTION B: if /inputs/<replay> already reads from a JSON file in replay dir ----
+    # Replace this with your actual path logic.
+    import json
+    from pathlib import Path
+
+    replay_dir = Path(DATASET_DIR) / replay_name
+    frames_path = replay_dir / "actions.jsonl"
+    if not frames_path.exists():
+        raise FileNotFoundError(f"actions file not found: {frames_path}")
+
+    frames: list[dict] = []
+    with frames_path.open("r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            s = line.strip()
+            if not s:
+                continue
+            try:
+                obj = json.loads(s)
+            except Exception as e:
+                raise ValueError(f"invalid JSON on line {line_no}: {e}") from e
+            if not isinstance(obj, dict):
+                raise ValueError(f"expected JSON object on line {line_no}, got {type(obj).__name__}")
+            frames.append(obj)
+
+    if not frames:
+        raise ValueError(f"no frames parsed from: {frames_path}")
+
+    return frames
+
+def _ema_value_at_idx(
+    *,
+    densified: List[Optional[float]],
+    mask: List[bool],
+    alpha: float,
+    idx: int,
+    override_value: Optional[float] = None,
+) -> Optional[float]:
+    """
+    Compute the exact EMA-smoothed value at `idx` using the SAME rules as /inputs:
+      - EMA resets whenever mask is False
+      - uses densified values inside mask segments
+    If override_value is provided, it is used at idx instead of densified[idx].
+    """
+    n = len(densified)
+    if n == 0 or idx < 0 or idx >= n:
+        return None
+    if len(mask) != n:
+        return None
+    if not mask[idx]:
+        return None
+
+    # Find segment start (mask transitions from False->True)
+    s = idx
+    while s > 0 and mask[s - 1]:
+        s -= 1
+
+    ema: Optional[float] = None
+    out: Optional[float] = None
+
+    for i in range(s, idx + 1):
+        v = override_value if (override_value is not None and i == idx) else densified[i]
+
+        if v is None:
+            out = ema
+            continue
+
+        ema = v if ema is None else (alpha * v + (1.0 - alpha) * ema)
+        out = ema
+
+    return out
+
+
+def _critic_probe_last_value(
+    runner,
+    *,
+    frames_window: list[dict],
+    static: dict | None,
+    seq_len: int,
+) -> float:
+    """
+    Probe path that matches /inputs/<replay>: infer_from_derived().
+    We pass a *pre-sampled* window (length == seq_len), so we use stride=1.
+    Returns the value for the last frame in frames_window.
+    """
+    if not hasattr(runner, "infer_from_derived"):
+        raise RuntimeError("CriticRunner missing infer_from_derived(); probe cannot run.")
+
+    # Derived must align 1:1 with frames_window
+    derived_window = compute_derived(frames_window, static)
+
+    res = runner.infer_from_derived(
+        frames=frames_window,
+        static=static,
+        derived=derived_window,
+        stride=1,                 # window already sampled
+        seq_len=int(seq_len),
+        require_cust_gt0=None,    # keep checkpoint-trained behavior
+    )
+
+    values = getattr(res, "values_by_frame", None)
+    if values is None:
+        raise RuntimeError("infer_from_derived returned no values_by_frame")
+
+    last_i = len(frames_window) - 1
+
+    v = None
+    if isinstance(values, dict):
+        v = values.get(last_i)
+    elif isinstance(values, (list, tuple)) and 0 <= last_i < len(values):
+        v = values[last_i]
+
+    if v is None or not _is_finite(v):
+        raise RuntimeError("probe produced no finite value for last frame")
+
+    return float(v)
+
+
+
+@app.route("/api/critic_probe", methods=["POST"])
+def api_critic_probe():
+    """
+    Probe V(s) at a specific frame with overridden controller button states.
+    Body: { replay: str, frame_idx: int, buttons: {KEY:0/1,...} }
+    Response: { critic_v: float, note?: str }
+    """
+    global _CRITIC, _CRITIC_ERR
+
+    payload = request.get_json(silent=True) or {}
+    replay = payload.get("replay", "")
+    frame_idx = payload.get("frame_idx", None)
+    buttons = payload.get("buttons", {}) or {}
+
+    if not isinstance(replay, str) or not replay.strip():
+        return jsonify({"critic_v": None, "note": "bad request: missing replay"}), 400
+    if not isinstance(frame_idx, int):
+        try:
+            frame_idx = int(frame_idx)
+        except Exception:
+            return jsonify({"critic_v": None, "note": "bad request: frame_idx must be int"}), 400
+    if not isinstance(buttons, dict):
+        return jsonify({"critic_v": None, "note": "bad request: buttons must be object/dict"}), 400
+
+    # Ensure critic is initialized
+    if _CRITIC is None and _CRITIC_ERR is None:
+        _init_critic()
+
+    if _CRITIC is None:
+        err = _CRITIC_ERR or "critic not available"
+        return jsonify({"critic_v": None, "note": f"critic init error: {err}"}), 500
+
+    try:
+        frames = _load_replay_frames_for_probe(replay)
+    except Exception as e:
+        return jsonify({"critic_v": None, "note": f"load frames error: {e}"}), 500
+
+    n = len(frames)
+    if n == 0:
+        return jsonify({"critic_v": None, "note": "no frames"}), 400
+    if frame_idx < 0:
+        frame_idx = 0
+    if frame_idx >= n:
+        frame_idx = n - 1
+
+    # --- Match /inputs/<replay> config ---
+    try:
+        stride = int(os.environ.get("CRITIC_RL_STRIDE", "2").strip() or "2")
+    except Exception:
+        stride = 2
+
+    trained_seq_len = getattr(_CRITIC, "trained_seq_len", None)
+    try:
+        seq_len = int(os.environ.get("CRITIC_RL_SEQ_LEN", str(trained_seq_len or 64)).strip())
+    except Exception:
+        seq_len = int(trained_seq_len or 64)
+
+    try:
+        ema_alpha = float(os.environ.get("CRITIC_RL_EMA_ALPHA", "0.25").strip() or "0.25")
+    except Exception:
+        ema_alpha = 0.25
+
+    if stride <= 0:
+        return jsonify({"critic_v": None, "note": f"bad request: stride<=0 ({stride})"}), 400
+    if seq_len <= 1:
+        return jsonify({"critic_v": None, "note": f"bad request: seq_len<=1 ({seq_len})"}), 400
+
+    # --- Build probe window from base frames with stride sampling (same as normal) ---
+    requested_end = int(frame_idx)
+    # IMPORTANT: match /inputs sampling grid. /inputs only has "known" raw points on stride-aligned frames.
+    end = requested_end - (requested_end % int(stride))
+    start = end - (int(seq_len) - 1) * int(stride)
+
+    window: list[dict] = []
+    window_src_indices: list[int] = []
+    for t in range(int(seq_len)):
+        src_i = start + t * int(stride)
+        if src_i < 0:
+            src_i = 0
+        if src_i >= n:
+            src_i = n - 1
+        row = frames[src_i]
+        if not isinstance(row, dict):
+            row = {}
+        window.append(row)
+        window_src_indices.append(int(src_i))
+
+    # Apply overrides ONLY to the last element (the probed frame)
+    window[-1] = _apply_button_overrides(window[-1], buttons)
+
+    # Load static_data.json (same as /inputs/<replay>)
+    static = None
+    try:
+        from pathlib import Path
+        static_path = Path(DATASET_DIR) / replay / "static_data.json"
+        if static_path.exists():
+            static = json.loads(static_path.read_text(encoding="utf-8"))
+    except Exception:
+        static = None
+
+    # --- Run critic on the window ---
+    try:
+        # IMPORTANT:
+        # compute_derived is HISTORY-DEPENDENT. For a probe at frame_idx, we must use
+        # derived state computed on the FULL replay (or cached /inputs output), not
+        # recompute derived on the clipped window.
+
+        full_frames: Optional[list] = None
+        full_derived: Optional[list] = None
+        full_static: Any = static
+
+        # Prefer the /inputs cache if present (it already computed full derived correctly).
+        cached = INPUT_CACHE.get(replay)
+        if cached and isinstance(cached.get("frames"), list) and isinstance(cached.get("derived"), list):
+            full_frames = cached["frames"]
+            full_derived = cached["derived"]
+            if cached.get("static") is not None:
+                full_static = cached["static"]
+
+        if full_frames is None or full_derived is None or len(full_frames) != len(full_derived):
+            # Fallback: compute full derived ONCE for this probe request.
+            # (This is expensive, but correct.)
+            full_frames = frames
+            full_static = full_static
+            full_derived = compute_derived(full_frames, full_static)
+
+        # Build derived window aligned to the SAME sampled indices as `window`.
+        derived_window: list[dict] = []
+        for src_i in window_src_indices:
+            d = full_derived[src_i] if (0 <= src_i < len(full_derived)) else {}
+            if not isinstance(d, dict):
+                d = {}
+            # Ensure we don't accidentally feed critic_v back into the critic.
+            if "critic_v" in d:
+                d = dict(d)
+                d.pop("critic_v", None)
+            derived_window.append(d)
+
+        res = _CRITIC.infer_from_derived(
+            frames=window,
+            static=full_static,
+            derived=derived_window,
+            stride=1,                  # window is stride-sampled already
+            seq_len=int(seq_len),
+            require_cust_gt0=None,
+        )
+
+
+        # raw value for last frame in the WINDOW coordinate system
+        raw_dense = _coerce_values_by_frame(getattr(res, "values_by_frame", []), int(seq_len))
+        raw_last = raw_dense[-1] if raw_dense else None
+
+        # --- Match /inputs/<replay> postprocess: cust_gauge>0 mask + densify + EMA ---
+        aux = CRITIC_AUX_CACHE.get(replay)
+        if not aux:
+            raise RuntimeError("probe needs /inputs to be loaded first (missing CRITIC_AUX_CACHE).")
+
+        full_mask = aux["mask"]
+        full_densified = aux["densified"]
+        full_alpha = float(aux["ema_alpha"])
+
+        # `end` is the stride-aligned frame we are actually probing.
+        # raw_last is the model output for that endpoint (in WINDOW coordinates),
+        # but it corresponds to absolute frame `end`.
+        override_raw = float(raw_last) if (raw_last is not None and _is_finite(raw_last)) else None
+
+        smooth_at_end = _ema_value_at_idx(
+            densified=full_densified,
+            mask=full_mask,
+            alpha=full_alpha,
+            idx=int(end),
+            override_value=override_raw,
+        )
+
+
+
+        # --- If /inputs cached this replay, also return the normal value at frame_idx ---
+        cached_v = None
+        try:
+            cached2 = INPUT_CACHE.get(replay)
+            if cached2 and isinstance(cached2.get("derived"), list):
+                di = int(frame_idx)
+                if 0 <= di < len(cached2["derived"]) and isinstance(cached2["derived"][di], dict):
+                    cached_v = cached2["derived"][di].get("critic_v", None)
+        except Exception:
+            cached_v = None
+
+
+        return jsonify(
+            {
+                "critic_v": float(smooth_at_end) if (smooth_at_end is not None and _is_finite(smooth_at_end)) else None,
+                "critic_v_smoothed": float(smooth_at_end) if (smooth_at_end is not None and _is_finite(smooth_at_end)) else None,
+                "critic_v_raw": float(raw_last) if (raw_last is not None and _is_finite(raw_last)) else None,
+                "critic_v_cached": float(cached_v) if (cached_v is not None and _is_finite(cached_v)) else None,
+                "meta": {
+                    "stride": int(stride),
+                    "seq_len": int(seq_len),
+                    "ema_alpha": float(ema_alpha),
+                    "requested_frame": int(frame_idx),
+                    "effective_frame": int(end),
+                    "cust_mask_at_effective": bool(aux["mask"][int(end)]) if (0 <= int(end) < len(aux["mask"])) else False,
+                    "window_src_start": int(window_src_indices[0]) if window_src_indices else None,
+                    "window_src_end": int(window_src_indices[-1]) if window_src_indices else None,
+                },
+                "note": "" if int(end) == int(frame_idx) else "probe snapped to stride grid for exact match",
+            }
+        )
+
+
+    except Exception as e:
+        return jsonify({"critic_v": None, "note": f"probe error: {e}"}), 500
+
+
+
 
 @app.route("/api/cache_meta/<path:filename>")
 def cache_meta(filename):

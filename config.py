@@ -101,7 +101,7 @@ DISCRETE_ACTIONS = [
 RANDOM_ACTION_KEYS_FOR_SKIP_STRATEGY = ["B", "DOWN", "UP", "LEFT", "RIGHT", "A"]
 
 _CKPT_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
-_BATTLE_DIR = os.path.join(_CKPT_DIR, "battle")
+_BATTLE_DIR = os.path.join(_CKPT_DIR, "nitrogen_battle_critic")
 _PLAN_DIR = os.path.join(_CKPT_DIR, "planning")
 
 def _get_latest_checkpoint(ckpt_dir: str, default: str = "ng.pt") -> str:

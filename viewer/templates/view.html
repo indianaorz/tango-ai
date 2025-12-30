@@ -89,6 +89,23 @@
             transition: background 0.05s;
         }
 
+        /* Probe controller is interactive */
+        #probe-controller .probe-btn {
+            cursor: pointer;
+        }
+
+        /* While waiting for server response */
+        #probe-controller.pending {
+            outline: 2px solid rgba(255, 255, 255, 0.15);
+            box-shadow: 0 0 12px rgba(255, 255, 255, 0.08);
+        }
+
+        #probe-controller.pending .probe-btn {
+            pointer-events: none;
+            opacity: 0.85;
+        }
+
+
         .btn.active {
             background: #00ff00 !important;
             box-shadow: 0 0 10px #00ff00;
@@ -639,9 +656,70 @@
             </div>
 
             <div class="panel" style="width: 100%; max-width: 720px;">
-                <h4>Critic Signal</h4>
+                <h4>Signal (Critic vs Bellman HP Return)</h4>
+
+                <div
+                    style="display:flex; gap:12px; align-items:center; justify-content:center; margin-bottom:6px; font-size:10px; color:#aaa;">
+                    <span><span
+                            style="display:inline-block;width:10px;height:2px;background:#00e5ff;vertical-align:middle;margin-right:6px;"></span>critic/cache
+                        (blue)</span>
+                    <span><span
+                            style="display:inline-block;width:10px;height:2px;background:#ff4d4d;vertical-align:middle;margin-right:6px;"></span>bellman
+                        hp-return (red)</span>
+                </div>
+
                 <canvas id="critic-canvas" height="80"></canvas>
+
+                <div class="kv" style="margin-top:6px;">
+                    <span>Critic V(s)</span><strong id="critic-v">—</strong>
+                    <span style="margin-left:auto;">Bellman</span><strong id="bellman-v"
+                        style="margin-left:6px;">—</strong>
+                </div>
+                <div style="margin-top:6px; font-size:10px; color:#777;" id="critic-note"></div>
             </div>
+
+
+            <div class="panel" style="width: 100%; max-width: 720px;">
+                <h4>Probe Controller (click to toggle)</h4>
+                <div style="display:flex; flex-direction:column; gap:10px; align-items:center;">
+                    <div id="probe-controller" class="controller"
+                        style="transform: scale(0.90); transform-origin: top center;">
+                        <div class="btn l probe-btn" data-action="LEFT_SHOULDER" id="probe-btn-L"></div>
+                        <div class="btn r probe-btn" data-action="RIGHT_SHOULDER" id="probe-btn-R"></div>
+
+                        <div class="dpad">
+                            <div class="dpad-center"></div>
+                            <div class="btn up probe-btn" data-action="DPAD_UP" id="probe-btn-UP"></div>
+                            <div class="btn down probe-btn" data-action="DPAD_DOWN" id="probe-btn-DOWN"></div>
+                            <div class="btn left probe-btn" data-action="DPAD_LEFT" id="probe-btn-LEFT"></div>
+                            <div class="btn right probe-btn" data-action="DPAD_RIGHT" id="probe-btn-RIGHT"></div>
+                        </div>
+
+                        <div class="btn b probe-btn" data-action="SOUTH" id="probe-btn-B">B</div>
+                        <div class="btn a probe-btn" data-action="EAST" id="probe-btn-A">A</div>
+                        <div class="btn select probe-btn" data-action="BACK" id="probe-btn-SELECT"></div>
+                        <div class="btn start probe-btn" data-action="START" id="probe-btn-START"></div>
+                    </div>
+
+                    <div class="kv" style="width:100%; max-width:560px;">
+                        <span>Probe V(s)</span>
+                        <strong id="probe-critic-v">—</strong>
+                    </div>
+                    <div id="probe-note" style="font-size:10px; color:#777; width:100%; max-width:560px;"></div>
+
+                    <div style="display:flex; gap:10px; justify-content:center; width:100%; max-width:560px;">
+                        <button id="probe-reset"
+                            style="background:#222; border:1px solid #444; color:#ddd; padding:6px 10px; border-radius:6px; cursor:pointer;">
+                            Reset to frame
+                        </button>
+                        <button id="probe-clear"
+                            style="background:#222; border:1px solid #444; color:#ddd; padding:6px 10px; border-radius:6px; cursor:pointer;">
+                            Clear all
+                        </button>
+                    </div>
+                </div>
+            </div>
+
         </div>
 
         <div class="sidebar">
@@ -789,16 +867,18 @@
         const vid = document.getElementById('vid');
         let actions = [];
         let derived = [];
-        let criticValues = [];
+        let criticValues = [];          // numbers or nulls (null = missing)
         let criticMin = -100;
         let criticMax = 100;
         let CHIP_LIB = {};
         let criticMeta = null;
+        let bellmanValues = [];        // numbers or nulls
+        let graphMin = -100;
+        let graphMax = 100;
 
         // Canvas for critic
         const criticCanvas = document.getElementById('critic-canvas');
         const ctxCritic = criticCanvas.getContext('2d');
-
 
         const KEYS = {
             'DPAD_UP': 'btn-UP', 'DPAD_DOWN': 'btn-DOWN', 'DPAD_LEFT': 'btn-LEFT', 'DPAD_RIGHT': 'btn-RIGHT',
@@ -812,6 +892,7 @@
         };
         const HORIZON = 18;
         const CODE_INDEXES = "ABCDEFGHIJKLMNOPQRSTUVWXYZ*";
+
         // ---------------------------------------------------------------------
         // Tile types (grid_state indices you provided)
         // ---------------------------------------------------------------------
@@ -829,6 +910,190 @@
             CONV_RIGHT: 12,
         };
 
+        let custZeroRuns = []; // [{a,b}] spans with cust_gauge==0, b is exclusive
+        // ---------------------------------------------------------------------
+        // Probe Controller -> toggle buttons -> server critic probe
+        // ---------------------------------------------------------------------
+
+        const PROBE_KEYS = [
+            'DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT',
+            'EAST', 'SOUTH', 'LEFT_SHOULDER', 'RIGHT_SHOULDER',
+            'BACK', 'START'
+        ];
+
+        let currentIdx = 0;                 // keep track of current frame index
+        let probeState = null;              // {KEY: 0/1}
+        let probeBaseline = null;           // baseline from frame at currentIdx
+
+        const probeCtlEl = document.getElementById('probe-controller');
+        const probeValEl = document.getElementById('probe-critic-v');
+        const probeNoteEl = document.getElementById('probe-note');
+        const probeResetBtn = document.getElementById('probe-reset');
+        const probeClearBtn = document.getElementById('probe-clear');
+
+        function _frameButtonValue(frame, k) {
+            const v = frame ? frame[k] : 0;
+            const x = Array.isArray(v) ? v[0] : v;
+            return (typeof x === "number" && Number.isFinite(x) && x > 0.5) ? 1 : 0;
+        }
+
+        function buildProbeBaselineFromFrame(idx) {
+            const f = actions[idx] || null;
+            const st = {};
+            for (const k of PROBE_KEYS) st[k] = _frameButtonValue(f, k);
+            return st;
+        }
+
+        function cloneProbeState(st) {
+            const o = {};
+            for (const k of PROBE_KEYS) o[k] = st && (st[k] ? 1 : 0);
+            return o;
+        }
+
+        function renderProbeController() {
+            if (!probeState) return;
+
+            // map keys -> element ids
+            const map = {
+                'DPAD_UP': 'probe-btn-UP',
+                'DPAD_DOWN': 'probe-btn-DOWN',
+                'DPAD_LEFT': 'probe-btn-LEFT',
+                'DPAD_RIGHT': 'probe-btn-RIGHT',
+                'EAST': 'probe-btn-A',
+                'SOUTH': 'probe-btn-B',
+                'LEFT_SHOULDER': 'probe-btn-L',
+                'RIGHT_SHOULDER': 'probe-btn-R',
+                'BACK': 'probe-btn-SELECT',
+                'START': 'probe-btn-START',
+            };
+
+            for (const k of PROBE_KEYS) {
+                const id = map[k];
+                const el = document.getElementById(id);
+                if (!el) continue;
+                if (probeState[k]) el.classList.add('active');
+                else el.classList.remove('active');
+            }
+        }
+
+        function setProbePending(on) {
+            if (!probeCtlEl) return;
+            if (on) probeCtlEl.classList.add('pending');
+            else probeCtlEl.classList.remove('pending');
+        }
+
+        function setProbeUIValue(val, note) {
+            if (probeValEl) probeValEl.textContent = (typeof val === "number" && Number.isFinite(val)) ? val.toFixed(6) : "—";
+            if (probeNoteEl) probeNoteEl.textContent = note || "";
+        }
+
+        async function runCriticProbe() {
+            if (!probeState) return;
+
+            setProbePending(true);
+            setProbeUIValue(null, "probing…");
+
+            // Build payload: baseline frame + overrides
+            // Server should apply these button values for the *current* frame only.
+            const payload = {
+                replay: "{{ replay_name }}",
+                frame_idx: currentIdx,
+                // Provide only the keys we’re probing.
+                buttons: cloneProbeState(probeState),
+            };
+
+            try {
+                const res = await fetch("/api/critic_probe", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                });
+
+                if (!res.ok) {
+                    const txt = await res.text();
+                    throw new Error(`HTTP ${res.status}: ${txt.slice(0, 300)}`);
+                }
+
+                const out = await res.json();
+                // Expect: { critic_v: number, note?: string }
+                const v = out && typeof out.critic_v === "number" ? out.critic_v : null;
+                const note = out && out.note ? String(out.note) : "";
+                setProbeUIValue(v, note);
+            } catch (err) {
+                setProbeUIValue(null, `probe error: ${err && err.message ? err.message : String(err)}`);
+            } finally {
+                setProbePending(false);
+            }
+        }
+
+        function ensureProbeInitializedForIdx(idx) {
+            currentIdx = idx;
+
+            // baseline from actual frame
+            probeBaseline = buildProbeBaselineFromFrame(idx);
+
+            // if probeState is null OR we want to always track frame, reset it here:
+            // - by default: reset whenever frame changes (keeps “current controller state” accurate)
+            probeState = cloneProbeState(probeBaseline);
+            renderProbeController();
+            setProbeUIValue(null, "");
+        }
+
+        // Click toggles
+        if (probeCtlEl) {
+            probeCtlEl.addEventListener("click", (e) => {
+                const t = e.target;
+                if (!t || !t.classList || !t.classList.contains("probe-btn")) return;
+
+                const k = t.getAttribute("data-action");
+                if (!k || !probeState || !(k in probeState)) return;
+
+                probeState[k] = probeState[k] ? 0 : 1;
+                renderProbeController();
+                runCriticProbe();
+            });
+        }
+
+        // Reset / Clear
+        if (probeResetBtn) {
+            probeResetBtn.addEventListener("click", () => {
+                if (!probeBaseline) return;
+                probeState = cloneProbeState(probeBaseline);
+                renderProbeController();
+                setProbeUIValue(null, "");
+            });
+        }
+        if (probeClearBtn) {
+            probeClearBtn.addEventListener("click", () => {
+                if (!probeState) return;
+                for (const k of PROBE_KEYS) probeState[k] = 0;
+                renderProbeController();
+                runCriticProbe();
+            });
+        }
+
+        function buildCustZeroRunsFromActions(frames) {
+            const runs = [];
+            if (!Array.isArray(frames) || frames.length === 0) return runs;
+
+            let start = -1;
+            for (let i = 0; i < frames.length; i++) {
+                const cg = Number(frames[i]?.cust_gauge ?? 0);
+                const isZero = !(Number.isFinite(cg) && cg > 0);
+
+                if (isZero) {
+                    if (start < 0) start = i;
+                } else {
+                    if (start >= 0) {
+                        runs.push({ a: start, b: i });
+                        start = -1;
+                    }
+                }
+            }
+            if (start >= 0) runs.push({ a: start, b: frames.length });
+            return runs;
+        }
+
         function _clearTileClasses(el) {
             el.classList.remove(
                 'tile-permahole', 'tile-hole', 'tile-basic', 'tile-cracked',
@@ -840,7 +1105,6 @@
         function _applyTileFill(el, tileVal) {
             _clearTileClasses(el);
 
-            // perma hole: treat explicit null as perma-hole
             if (tileVal === null) {
                 el.classList.add('tile-permahole');
                 el.textContent = '';
@@ -849,54 +1113,29 @@
             }
 
             const t = Number.isFinite(Number(tileVal)) ? Number(tileVal) : 0;
-
-            // default: unknown tile => leave base fill, show number for debugging
             el.title = `Tile: ${t}`;
 
             if (t === TILE.HOLE) {
-                el.classList.add('tile-hole');
-                el.textContent = '';
-                el.title = 'Hole';
+                el.classList.add('tile-hole'); el.textContent = ''; el.title = 'Hole';
             } else if (t === TILE.BASIC) {
-                el.classList.add('tile-basic');
-                el.textContent = '';
-                el.title = 'Basic';
+                el.classList.add('tile-basic'); el.textContent = ''; el.title = 'Basic';
             } else if (t === TILE.CRACKED) {
-                el.classList.add('tile-cracked');
-                el.textContent = '';
-                el.title = 'Cracked';
+                el.classList.add('tile-cracked'); el.textContent = ''; el.title = 'Cracked';
             } else if (t === TILE.POISON) {
-                el.classList.add('tile-poison');
-                el.textContent = '';
-                el.title = 'Poison';
+                el.classList.add('tile-poison'); el.textContent = ''; el.title = 'Poison';
             } else if (t === TILE.HOLY) {
-                el.classList.add('tile-holy');
-                el.textContent = '';
-                el.title = 'Holy';
+                el.classList.add('tile-holy'); el.textContent = ''; el.title = 'Holy';
             } else if (t === TILE.GRASS) {
-                el.classList.add('tile-grass');
-                el.textContent = '';
-                el.title = 'Grass';
+                el.classList.add('tile-grass'); el.textContent = ''; el.title = 'Grass';
             } else if (t === TILE.ICE) {
-                el.classList.add('tile-ice');
-                el.textContent = '';
-                el.title = 'Ice';
+                el.classList.add('tile-ice'); el.textContent = ''; el.title = 'Ice';
             } else if (t === TILE.VOLCANO) {
-                el.classList.add('tile-volcano');
-                el.textContent = '';
-                el.title = 'Volcano';
+                el.classList.add('tile-volcano'); el.textContent = ''; el.title = 'Volcano';
             } else if (t === TILE.CONV_LEFT) {
-                el.classList.add('tile-conv-left');
-                el.textContent = '▶'; // fixed
-                el.title = 'Conveyor Left';
+                el.classList.add('tile-conv-left'); el.textContent = '▶'; el.title = 'Conveyor Left';
             } else if (t === TILE.CONV_RIGHT) {
-                el.classList.add('tile-conv-right');
-                el.textContent = '◀'; // fixed
-                el.title = 'Conveyor Right';
-            }
-            else {
-                // Unknown (or 0): keep visible debug value (optional).
-                // If you prefer totally clean UI, set to '' instead.
+                el.classList.add('tile-conv-right'); el.textContent = '◀'; el.title = 'Conveyor Right';
+            } else {
                 el.textContent = (t !== 0) ? String(t) : '';
             }
         }
@@ -919,18 +1158,15 @@
 
         speedEl.addEventListener('input', () => setPlaybackRate(speedEl.value));
         vid.addEventListener('ratechange', () => {
-            // Keep UI consistent if something else changes playbackRate.
             const r = clamp(vid.playbackRate, 0.10, 1.00);
             speedEl.value = fmt2(r);
             speedValEl.textContent = `${fmt2(r)}×`;
         });
 
-        // default
         setPlaybackRate(1.00);
 
         // ---------------------------------------------------------------------
-        // Cross mapping (player_game_emotion / enemy_game_emotion)
-        // Mirrors scripts/create_rl_dataset.py _emotion_to_form_type()
+        // Cross mapping
         // ---------------------------------------------------------------------
         const CROSS_ROWS = [
             { type: "Normal", normal: 0, beast: 11 },
@@ -946,9 +1182,7 @@
             { type: "Dust", normal: 10, beast: 22 },
         ];
 
-        const CROSS_IDX_TO_NAME = [
-            "Normal", "Fire", "Elec", "Slash", "Erase", "Charge", "Aqua", "Thawk", "Tengu", "Grnd", "Dust"
-        ];
+        const CROSS_IDX_TO_NAME = ["Normal", "Fire", "Elec", "Slash", "Erase", "Charge", "Aqua", "Thawk", "Tengu", "Grnd", "Dust"];
 
         function fmtActiveCross(ac) {
             if (!ac) return "—";
@@ -962,8 +1196,6 @@
 
             const m = Array.isArray(mask) ? mask : [];
             let html = "";
-
-            // idx 1..10 are real crosses (exclude 0 Normal)
             for (let idx = 1; idx <= 10; idx++) {
                 const used = !!m[idx];
                 const name = CROSS_IDX_TO_NAME[idx] || `#${idx}`;
@@ -976,15 +1208,12 @@
             if (!beastObj) return "—";
             const active = !!beastObj.active;
             const ever = !!beastObj.ever;
-
             if (!ever && !active) return "No";
             if (active) return "YES (active)";
-
             const ts = beastObj.turns_since;
             if (typeof ts === "number") return `Yes (${ts} turns ago)`;
             return "Yes";
         }
-
 
         function gameEmotionToCrossName(v) {
             const id = Number.isFinite(Number(v)) ? Number(v) : 0;
@@ -1000,29 +1229,18 @@
         // ---------------------------------------------------------------------
         for (let i = 0; i < 18; i++) document.getElementById('grid').innerHTML += `<div class="grid-cell" id="c-${i}"></div>`;
 
-        // Init Hand Slots
         const handEl = document.getElementById('hand');
         handEl.innerHTML = '';
-        for (let i = 0; i < 10; i++) {
-            handEl.innerHTML += `<div class="chip-slot" id="h-${i}"></div>`;
-        }
+        for (let i = 0; i < 10; i++) handEl.innerHTML += `<div class="chip-slot" id="h-${i}"></div>`;
 
-        // Init Queue Slots
         const queueEl = document.getElementById('queue');
         queueEl.innerHTML = '';
-        for (let i = 0; i < 5; i++) {
-            queueEl.innerHTML += `<div class="queue-slot-wrap"><div class="chip-slot" id="q-${i}"></div></div>`;
-        }
+        for (let i = 0; i < 5; i++) queueEl.innerHTML += `<div class="queue-slot-wrap"><div class="chip-slot" id="q-${i}"></div></div>`;
 
-        // Init Held Slots (Carry)
         const heldEl = document.getElementById('held');
         heldEl.innerHTML = '';
-        for (let i = 0; i < 5; i++) {
-            heldEl.innerHTML += `<div class="queue-slot-wrap"><div class="chip-slot" id="hold-${i}"></div></div>`;
-        }
+        for (let i = 0; i < 5; i++) heldEl.innerHTML += `<div class="queue-slot-wrap"><div class="chip-slot" id="hold-${i}"></div></div>`;
 
-
-        // Init Timeline
         const tlGrid = document.getElementById('timeline-grid');
         TIMELINE_KEYS.forEach(key => {
             const lbl = document.createElement('div');
@@ -1039,21 +1257,14 @@
 
         // ---------------------------------------------------------------------
         // Video sync (NO FPS ASSUMPTIONS)
-        // actions.jsonl lines == encoded video frames => drift-free mapping.
         // ---------------------------------------------------------------------
         let _videoSyncStarted = false;
-
-        function _clamp01(x) {
-            if (!Number.isFinite(x)) return 0;
-            return Math.max(0, Math.min(1, x));
-        }
 
         function _idxFromMediaTime(mediaTime) {
             if (!actions.length) return 0;
             const dur = vid.duration;
             if (!Number.isFinite(dur) || dur <= 0) return 0;
-
-            const frac = _clamp01(mediaTime / dur);
+            const frac = Math.max(0, Math.min(1, mediaTime / dur));
             let idx = Math.round(frac * (actions.length - 1));
             if (idx < 0) idx = 0;
             if (idx >= actions.length) idx = actions.length - 1;
@@ -1070,17 +1281,11 @@
             if (_videoSyncStarted) return;
             _videoSyncStarted = true;
 
-            // Render on seek/scrub immediately (even if paused).
             vid.addEventListener('seeked', _renderFromVideoTime);
 
-            // Ensure we render once metadata is ready.
-            if (vid.readyState >= 1) {
-                _renderFromVideoTime();
-            } else {
-                vid.addEventListener('loadedmetadata', _renderFromVideoTime, { once: true });
-            }
+            if (vid.readyState >= 1) _renderFromVideoTime();
+            else vid.addEventListener('loadedmetadata', _renderFromVideoTime, { once: true });
 
-            // Best sync: render on the *presented* video frame callback.
             if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
                 const cb = (_now, meta) => {
                     if (actions.length) {
@@ -1091,11 +1296,8 @@
                 };
                 vid.requestVideoFrameCallback(cb);
             } else {
-                // Fallback: RAF with normalized mapping (still drift-free).
                 const raf = () => {
-                    if (actions.length) {
-                        _renderFromVideoTime();
-                    }
+                    if (actions.length) _renderFromVideoTime();
                     requestAnimationFrame(raf);
                 };
                 requestAnimationFrame(raf);
@@ -1111,65 +1313,49 @@
         }).then(r => r.json()).then(data => {
             actions = data.frames || [];
             derived = data.derived || [];
+            bellmanValues = (data.bellman && Array.isArray(data.bellman.values_by_frame))
+                ? data.bellman.values_by_frame
+                : [];
+
+            custZeroRuns = buildCustZeroRunsFromActions(actions);
+
             criticMeta = (data.critic && data.critic.meta) ? data.critic.meta : null;
-            const staticData = data.static || {};
-            renderStatic(staticData);
 
-            // Prepare critic graph data
-            if (derived.length > 0) {
-                // 1. Extract values
-                const vals = [];
-                let allSmall = true; // Flag to detect if we need to scale up
+            renderStatic(data.static || {});
 
-                for (let i = 0; i < derived.length; i++) {
-                    const v = derived[i].critic_v;
-                    const val = (v !== null && v !== undefined) ? v : 0;
-                    vals.push(val);
+            // Build critic series (from derived[].critic_v) + bellman series (from server)
+            // and compute a shared graph range.
+            const n = derived.length || actions.length || 0;
 
-                    // If any value is > 5.0, assume it's OLD model (Raw HP)
-                    if (Math.abs(val) > 5.0) allSmall = false;
-                }
+            criticValues = new Array(n).fill(null);
+            bellmanValues = (bellmanValues && bellmanValues.length) ? bellmanValues : new Array(n).fill(null);
 
-                // 2. Normalize to HP if needed (New Model -> Scale x100)
-                if (allSmall && vals.length > 0) {
-                    for (let i = 0; i < vals.length; i++) {
-                        vals[i] = vals[i] * 100;
-                    }
-                }
+            let min = Infinity, max = -Infinity;
 
-                criticValues = vals;
+            for (let i = 0; i < n; i++) {
+                const cv = derived[i]?.critic_v;
+                const c = (typeof cv === "number" && Number.isFinite(cv)) ? cv : null;
+                criticValues[i] = c;
 
-                // 3. Calc Range
-                let min = Infinity, max = -Infinity;
-                for (const v of vals) {
-                    if (v < min) min = v;
-                    if (v > max) max = v;
-                }
+                const bv = bellmanValues[i];
+                const b = (typeof bv === "number" && Number.isFinite(bv)) ? bv : null;
+                bellmanValues[i] = b;
 
-                // Fallback for empty/flat
-                if (min === Infinity) { min = -10; max = 10; }
-
-                let span = max - min;
-
-                // Only pad if it's truly a flatline (span 0), not just "small"
-                if (span === 0) {
-                    max += 10;
-                    min -= 10;
-                } else {
-                    // Add 10% breathing room top/bottom
-                    const pad = span * 0.1;
-                    min -= pad;
-                    max += pad;
-                }
-
-                criticMin = min;
-                criticMax = max;
+                if (c !== null) { min = Math.min(min, c); max = Math.max(max, c); }
+                if (b !== null) { min = Math.min(min, b); max = Math.max(max, b); }
             }
+
+            if (min !== Infinity) {
+                const span = max - min;
+                const pad = (span === 0) ? 10 : span * 0.1;
+                graphMin = min - pad;
+                graphMax = max + pad;
+            }
+
 
             if (actions.length) render(actions[0], 0);
             startVideoSync();
         });
-
 
         function resolveChip(id, rawCode) {
             if (id === 255 || id === undefined) return null;
@@ -1187,56 +1373,43 @@
         }
 
         function renderStatic(s) {
-            // --------------------
-            // Player folder
-            // --------------------
             const pFolderEl = document.getElementById('p-folder');
             if (s && s.player_folder_ids) {
                 let html = "";
                 s.player_folder_ids.forEach((id, idx) => {
                     const code = s.player_folder_codes ? s.player_folder_codes[idx] : "?";
                     html += `
-              <div class="folder-item" id="pf-${idx}" data-chip-id="${id}">
-                <span>${idx + 1}. ID:${id}</span>
-                <span>Code:${code}</span>
-              </div>`;
+          <div class="folder-item" id="pf-${idx}" data-chip-id="${id}">
+            <span>${idx + 1}. ID:${id}</span>
+            <span>Code:${code}</span>
+          </div>`;
                 });
                 pFolderEl.innerHTML = html;
             } else {
                 pFolderEl.innerHTML = "No Static Data";
             }
 
-            if (s && s.player_navi_cust) {
-                document.getElementById('p-navi').innerText = JSON.stringify(s.player_navi_cust);
-            } else {
-                document.getElementById('p-navi').innerText = "";
-            }
+            document.getElementById('p-navi').innerText = (s && s.player_navi_cust) ? JSON.stringify(s.player_navi_cust) : "";
 
-            // --------------------
-            // Enemy folder
-            // --------------------
             const eFolderEl = document.getElementById('e-folder');
             if (s && s.enemy_folder_ids) {
                 let html = "";
                 s.enemy_folder_ids.forEach((id, idx) => {
                     const code = s.enemy_folder_codes ? s.enemy_folder_codes[idx] : "?";
                     html += `
-              <div class="folder-item" id="ef-${idx}" data-chip-id="${id}">
-                <span>${idx + 1}. ID:${id}</span>
-                <span>Code:${code}</span>
-              </div>`;
+          <div class="folder-item" id="ef-${idx}" data-chip-id="${id}">
+            <span>${idx + 1}. ID:${id}</span>
+            <span>Code:${code}</span>
+          </div>`;
                 });
                 eFolderEl.innerHTML = html;
             } else {
                 eFolderEl.innerHTML = "No Static Data";
             }
 
-            if (s && s.enemy_navi_cust) {
-                document.getElementById('e-navi').innerText = JSON.stringify(s.enemy_navi_cust);
-            } else {
-                document.getElementById('e-navi').innerText = "";
-            }
+            document.getElementById('e-navi').innerText = (s && s.enemy_navi_cust) ? JSON.stringify(s.enemy_navi_cust) : "";
         }
+
         function applyDerived(idx) {
             if (!derived || idx < 0 || idx >= derived.length) return;
 
@@ -1246,30 +1419,21 @@
 
             const cvEl = document.getElementById("critic-v");
             const noteEl = document.getElementById("critic-note");
-            const cv = d && (d.critic_v !== undefined) ? d.critic_v : null;
+            const cv = (typeof d.critic_v === "number" && Number.isFinite(d.critic_v)) ? d.critic_v : null;
 
-            if (cvEl) {
-                if (typeof cv === "number" && Number.isFinite(cv)) {
-                    // NEW: Check magnitude. If it looks scaled (small), multiply back to HP.
-                    // If it looks like raw HP (big), leave it alone (backwards compatibility).
-                    let val = cv;
-                    if (Math.abs(val) <= 5.0) {
-                        val = val * 100;
-                    }
-                    cvEl.textContent = val.toFixed(1); // Show 1 decimal place (e.g. "23.5")
-                } else {
-                    cvEl.textContent = "—";
-                }
-            }
+            const bellEl = document.getElementById("bellman-v");
+            const bv = (bellmanValues && typeof bellmanValues[idx] === "number" && Number.isFinite(bellmanValues[idx]))
+                ? bellmanValues[idx]
+                : null;
+            if (bellEl) bellEl.textContent = (bv !== null) ? bv.toFixed(3) : "—";
+
+
+            if (cvEl) cvEl.textContent = (cv !== null) ? cv.toFixed(3) : "—";
             if (noteEl) {
                 const err = criticMeta && criticMeta.error ? criticMeta.error : null;
                 noteEl.textContent = err ? `critic: ${err}` : "";
             }
 
-
-            // --------------------
-            // Folder masks
-            // --------------------
             if (p) {
                 const mask = p.folder_used_mask || [];
                 for (let i = 0; i < mask.length; i++) {
@@ -1290,28 +1454,21 @@
                 }
             }
 
-            // --------------------
-            // Held chips (carry)
-            // --------------------
             const held = (p && p.held_chips) ? p.held_chips : [];
             for (let i = 0; i < 5; i++) {
                 const el = document.getElementById(`hold-${i}`);
                 if (!el) continue;
-
                 if (i < held.length) {
                     const h = held[i];
-                    const chipInfo = resolveChip(h.id, h.code);
-                    renderChipSlot(el, chipInfo, 1.0);
+                    renderChipSlot(el, resolveChip(h.id, h.code), 1.0);
                 } else {
                     renderChipSlot(el, null, 0.2);
                 }
             }
 
-            // Mode label: only meaningful on window close frames
             const modeEl = document.getElementById('held-mode');
             const usedEl = document.getElementById('held-used');
 
-            // NEW
             if (modeEl) {
                 const wc = p && p.window_commit ? p.window_commit : null;
                 if (wc && wc.happened) {
@@ -1322,67 +1479,72 @@
                         modeEl.textContent = "KEEP: No selection (carry held chips)";
                         modeEl.style.color = "#66ffcc";
                     }
-
-                    // Debug: show whether we committed from snapshot or fallback
-                    if (wc.source) {
-                        modeEl.textContent += ` [${wc.source}]`;
-                    }
+                    if (wc.source) modeEl.textContent += ` [${wc.source}]`;
                 } else {
                     modeEl.textContent = "—";
                     modeEl.style.color = "#aaa";
                 }
             }
 
-
             if (usedEl) {
                 const usedId = p ? p.used_chip_id : null;
                 usedEl.textContent = (usedId !== null && usedId !== undefined) ? `Used: ${usedId}` : "";
             }
 
-            // Turn
             const tEl = document.getElementById("turn-idx");
             if (tEl) tEl.textContent = (typeof d.turn_index === "number") ? String(d.turn_index) : "0";
 
-            // Active cross
             const pAct = document.getElementById("p-active-cross");
             const eAct = document.getElementById("e-active-cross");
             if (pAct) pAct.textContent = fmtActiveCross(p && p.active_cross);
             if (eAct) eAct.textContent = fmtActiveCross(e && e.active_cross);
 
-            // Beast status
             const pBe = document.getElementById("p-beast");
             const eBe = document.getElementById("e-beast");
             if (pBe) pBe.textContent = fmtBeast(p && p.beast);
             if (eBe) eBe.textContent = fmtBeast(e && e.beast);
 
-            // Used crosses badges
             renderUsedCrosses("p-used-crosses", p && p.used_cross_mask);
             renderUsedCrosses("e-used-crosses", e && e.used_cross_mask);
-
         }
 
         function drawCriticGraph(currentIdx) {
+            // NOTE: simplest possible: use CSS pixel sizing (like your original).
+            // If you want crisp lines on HiDPI, we can add DPR scaling later.
             const w = criticCanvas.width = criticCanvas.offsetWidth;
             const h = criticCanvas.height = criticCanvas.offsetHeight;
             const ctx = ctxCritic;
 
             ctx.clearRect(0, 0, w, h);
 
-            if (!criticValues || criticValues.length === 0) return;
-
+            if (!criticValues || criticValues.length <= 1) return;
             const n = criticValues.length;
-            const range = criticMax - criticMin;
 
-            // Helper: value -> y coordinate
-            // invert y so max is top
+            // Shade cust_gauge==0 spans (fixes your "Cannot access 'n' before initialization" bug)
+            if (custZeroRuns && custZeroRuns.length) {
+                for (const r of custZeroRuns) {
+                    const a = Math.max(0, Math.min(n - 1, r.a));
+                    const b = Math.max(0, Math.min(n, r.b)); // exclusive
+                    if (b <= a) continue;
+
+                    const x0 = (a / (n - 1)) * w;
+                    const x1 = ((b - 1) / (n - 1)) * w;
+                    const ww = Math.max(1, x1 - x0);
+
+                    ctx.fillStyle = "rgba(255, 255, 255, 0.05)";
+                    ctx.fillRect(x0, 0, ww, h);
+                }
+            }
+
+            const range = graphMax - graphMin;
+            if (!Number.isFinite(range) || range === 0) return;
+
             function getY(val) {
-                // normalize 0..1
-                const norm = (val - criticMin) / range;
-                // flip for canvas y (0 is top)
+                const norm = (val - graphMin) / range;
                 return h - (norm * h);
             }
 
-            // 1. Draw Zero Line (Neutral)
+            // Zero line
             const y0 = getY(0);
             ctx.beginPath();
             ctx.strokeStyle = "#444";
@@ -1391,30 +1553,43 @@
             ctx.lineTo(w, y0);
             ctx.stroke();
 
-            // 2. Draw Graph Path
+            // Graph path (skip nulls; don't connect across gaps)
             ctx.beginPath();
-            ctx.strokeStyle = "#00e5ff"; // Cyan neon
+            ctx.strokeStyle = "#00e5ff";
             ctx.lineWidth = 2;
 
-            // We step through X pixels to save draw calls if N is huge
-            // but just drawing lineTo for every point is usually fine for <10k on modern gpu
-            ctx.moveTo(0, getY(criticValues[0]));
-
-            for (let i = 1; i < n; i++) {
+            let started = false;
+            for (let i = 0; i < n; i++) {
+                const v = criticValues[i];
+                if (!(typeof v === "number" && Number.isFinite(v))) {
+                    started = false;
+                    continue;
+                }
                 const x = (i / (n - 1)) * w;
-                const y = getY(criticValues[i]);
-                ctx.lineTo(x, y);
+                const y = getY(v);
+                if (!started) { ctx.moveTo(x, y); started = true; }
+                else ctx.lineTo(x, y);
             }
             ctx.stroke();
 
-            // Fill under curve? Optional but nice
-            ctx.fillStyle = "rgba(0, 229, 255, 0.1)";
-            ctx.lineTo(w, getY(0)); // go to zero level at right
-            ctx.lineTo(0, getY(0)); // go to zero level at left
-            ctx.closePath();
-            ctx.fill();
+            // Bellman path (red)
+            ctx.beginPath();
+            ctx.strokeStyle = "#ff4d4d";
+            ctx.lineWidth = 2;
 
-            // 3. Draw Playhead
+            let startedB = false;
+            for (let i = 0; i < n; i++) {
+                const v = bellmanValues[i];
+                if (!(typeof v === "number" && Number.isFinite(v))) { startedB = false; continue; }
+                const x = (i / (n - 1)) * w;
+                const y = getY(v);
+                if (!startedB) { ctx.moveTo(x, y); startedB = true; }
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+
+            // Playhead
             const xHead = (currentIdx / (n - 1)) * w;
             ctx.beginPath();
             ctx.strokeStyle = "#fff";
@@ -1423,7 +1598,6 @@
             ctx.lineTo(xHead, h);
             ctx.stroke();
         }
-
 
         function renderChipSlot(el, chipInfo, opacity) {
             if (!chipInfo) {
@@ -1437,16 +1611,16 @@
             el.title = chipInfo.name;
 
             let html = "";
-            if (chipInfo.img) {
-                html += `<img src="${chipInfo.img}" class="chip-img">`;
-            } else {
-                html += `<span class="chip-fallback-id">${chipInfo.id}</span>`;
-            }
+            if (chipInfo.img) html += `<img src="${chipInfo.img}" class="chip-img">`;
+            else html += `<span class="chip-fallback-id">${chipInfo.id}</span>`;
             html += `<span class="chip-code">${chipInfo.code}</span>`;
             el.innerHTML = html;
         }
 
         function render(d, idx) {
+            currentIdx = idx;                 // NEW: track current index
+            ensureProbeInitializedForIdx(idx);// NEW: keep probe controller == current frame state
+
             document.getElementById('frame').innerText = d.frame_idx;
 
             // Controller
@@ -1518,11 +1692,9 @@
                     if (owner === 0) c.classList.add('cell-p1');
                     else if (owner === 1) c.classList.add('cell-p2');
 
-                    const tileVal = d.grid_state[i];
-                    _applyTileFill(c, tileVal);
+                    _applyTileFill(c, d.grid_state[i]);
                 }
             }
-
 
             // Hand (Visual)
             if (d.chip_slots) {
@@ -1555,8 +1727,7 @@
                         if (handIdx !== 255 && handIdx !== undefined && d.chip_slots && handIdx < d.chip_slots.length) {
                             const id = d.chip_slots[handIdx];
                             const code = d.chip_codes ? d.chip_codes[handIdx] : 0;
-                            const chipInfo = resolveChip(id, code);
-                            renderChipSlot(el, chipInfo, 1.0);
+                            renderChipSlot(el, resolveChip(id, code), 1.0);
                         } else {
                             renderChipSlot(el, null, 0.2);
                         }
@@ -1565,10 +1736,44 @@
                     }
                 }
             }
+
             applyDerived(idx);
             drawCriticGraph(idx);
         }
+
+        // --- Navigation & Auto-Seek Logic ---
+        const prevReplay = "{{ prev_replay }}";
+        const nextReplay = "{{ next_replay }}";
+
+        window.addEventListener('keydown', (e) => {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+            if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                const target = (e.key === 'ArrowLeft') ? prevReplay : nextReplay;
+                if (target && target !== "None" && target !== "") {
+                    const currentTime = vid.currentTime;
+                    window.location.href = `/view/${target}?t=${currentTime}`;
+                }
+            }
+        });
+
+        window.addEventListener('DOMContentLoaded', () => {
+            const params = new URLSearchParams(window.location.search);
+            const seekTime = params.get('t');
+
+            if (seekTime) {
+                const jumpToTime = () => {
+                    vid.currentTime = parseFloat(seekTime);
+                    vid.pause();
+                };
+
+                if (vid.readyState >= 1) jumpToTime();
+                else vid.addEventListener('loadedmetadata', jumpToTime, { once: true });
+            }
+        });
     </script>
+
+
 </body>
 
 </html>

@@ -885,7 +885,7 @@ def main() -> None:
     ap.add_argument("--pre-mode-frames", type=int, default=12)
     ap.add_argument("--pre-battle-scan", type=int, default=180)
     ap.add_argument("--lead-frames", type=int, default=2)
-    ap.add_argument("--early-exit-margin", type=int, default=2)
+    ap.add_argument("--early-exit-margin", type=int, default=3)
     ap.add_argument("--min-votes", type=int, default=2)
 
     ap.add_argument("--ok-menu-index", type=int, default=10)

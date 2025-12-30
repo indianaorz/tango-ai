@@ -469,6 +469,9 @@ def compute_derived(
         cur_enemy_chip = f.get("enemy_chip")
 
         if not inside:
+            # -------------------------
+            # Player chip usage tracking
+            # -------------------------
             curp_valid: Optional[int] = _as_int(cur_player_chip) if _chip_valid(cur_player_chip) else None
 
             if prev_player_chip is None:
@@ -481,16 +484,31 @@ def compute_derived(
                     _remove_from_held(held, used_player_chip_id)
                 prev_player_chip = curp_valid
 
-            # Modifier-chain rule
+            # Modifier-chain rule (player only; depends on held[])
             if curp_valid is not None and held:
                 dropped_ids = _drop_held_prefix_until_current(held, curp_valid)
                 for did in dropped_ids:
                     _mark_used_in_folder(player_folder.ids, player_folder.used_mask, did)
 
-            # Empty-hand rule (battle-only)
+            # Empty-hand rule (player only; clears held when gauge refilling and no chip)
             cust = _as_int(f.get("cust_gauge"), 0)
             if cust > 0 and _as_int(cur_player_chip, 65535) == 65535:
                 held.clear()
+
+            # -------------------------
+            # Enemy chip usage tracking
+            # -------------------------
+            cure_valid: Optional[int] = _as_int(cur_enemy_chip) if _chip_valid(cur_enemy_chip) else None
+
+            if prev_enemy_chip is None:
+                if cure_valid is not None:
+                    prev_enemy_chip = cure_valid
+            else:
+                if cure_valid != prev_enemy_chip:
+                    used_enemy_chip_id = prev_enemy_chip
+                    _mark_used_in_folder(enemy_folder.ids, enemy_folder.used_mask, used_enemy_chip_id)
+                prev_enemy_chip = cure_valid
+
 
         # --- Detect chip-window close: inside_window True -> False ---
         window_commit: Dict[str, Any] = {

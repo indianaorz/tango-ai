@@ -5,312 +5,100 @@
     <meta charset="utf-8" />
     <title>Tango Strategy Analyzer</title>
     <style>
-        body {
-            background: #111;
-            color: #eee;
-            font-family: 'Consolas', monospace;
-            padding: 20px;
-        }
+        body { background: #111; color: #eee; font-family: 'Consolas', monospace; padding: 20px; }
+        h2 { color: #4db8ff; border-bottom: 1px solid #333; padding-bottom: 10px; }
+        a { color: #888; text-decoration: none; }
+        a:hover { color: #fff; }
 
-        h2 {
-            color: #4db8ff;
-            border-bottom: 1px solid #333;
-            padding-bottom: 10px;
-        }
+        /* TABLE */
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 12px; }
+        th { text-align: left; color: #666; border-bottom: 2px solid #444; padding: 10px; text-transform: uppercase; letter-spacing: 1px; }
+        td { border-bottom: 1px solid #222; padding: 12px 10px; vertical-align: top; }
+        tr.turn-row:hover { background: #1a1a1a; cursor: pointer; }
+        tr.turn-row:active { background: #222; }
 
-        a {
-            color: #888;
-            text-decoration: none;
-        }
-
-        a:hover {
-            color: #fff;
-        }
-
-        /* --- TABLE STYLES --- */
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 20px;
-            font-size: 12px;
-        }
-
-        th {
-            text-align: left;
-            color: #666;
-            border-bottom: 2px solid #444;
-            padding: 10px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-
-        td {
-            border-bottom: 1px solid #222;
-            padding: 12px 10px;
-            vertical-align: top;
-        }
-
-        tr.turn-row:hover {
-            background: #1a1a1a;
-            cursor: pointer;
-        }
-
-        tr.turn-row:active {
-            background: #222;
-        }
-
-        /* --- VISUALS --- */
-        .chip-slot {
-            width: 40px;
-            height: 50px;
-            background: #222;
-            border: 1px solid #444;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: flex-end;
-            border-radius: 4px;
-            position: relative;
-            overflow: hidden;
-            transition: all 0.1s;
-        }
-
-        .chip-img {
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-            position: absolute;
-            top: 0;
-            left: 0;
-            z-index: 0;
-        }
-
-        .chip-code {
-            font-size: 10px;
-            color: #fff;
-            font-weight: bold;
-            background: rgba(0, 0, 0, 0.7);
-            width: 100%;
-            text-align: center;
-            padding: 2px 0;
-            z-index: 1;
-            position: relative;
-        }
-
-        .hand-container, .queue-container {
-            display: flex;
-            gap: 4px;
-            flex-wrap: wrap;
-            max-width: 260px;
-        }
-
+        /* CHIPS */
+        .chip-slot { width: 40px; height: 50px; background: #222; border: 1px solid #444; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; border-radius: 4px; position: relative; overflow: hidden; transition: all 0.1s; }
+        .chip-img { width: 100%; height: 100%; object-fit: contain; position: absolute; top: 0; left: 0; z-index: 0; }
+        .chip-code { font-size: 10px; color: #fff; font-weight: bold; background: rgba(0, 0, 0, 0.7); width: 100%; text-align: center; padding: 2px 0; z-index: 1; position: relative; }
+        .hand-container, .queue-container { display: flex; gap: 4px; flex-wrap: wrap; max-width: 260px; }
         .chip-slot.in-hand { opacity: 0.6; filter: grayscale(0.6); }
-        .chip-slot.in-hand.selected {
-            opacity: 1.0; filter: grayscale(0);
-            border-color: #4db8ff; background: #223344;
-            box-shadow: 0 0 5px rgba(77, 184, 255, 0.4);
-            transform: translateY(-2px);
-        }
-        
+        .chip-slot.in-hand.selected { opacity: 1.0; filter: grayscale(0); border-color: #4db8ff; background: #223344; box-shadow: 0 0 5px rgba(77, 184, 255, 0.4); transform: translateY(-2px); }
         .chip-slot.in-queue { border-color: #00ff00; box-shadow: 0 0 8px rgba(0, 255, 0, 0.15); }
         .chip-slot.ai-queue { border-color: #ff00ff; box-shadow: 0 0 8px rgba(255, 0, 255, 0.20); }
-        
-        .chip-slot.beast-card {
-            border-color: #8855ff; background: #220044;
-            box-shadow: 0 0 8px rgba(136, 85, 255, 0.40);
-            justify-content: center;
-        }
+        .chip-slot.beast-card { border-color: #8855ff; background: #220044; box-shadow: 0 0 8px rgba(136, 85, 255, 0.40); justify-content: center; }
         .beast-text { color: #fff; font-weight: bold; font-size: 9px; text-align: center; line-height: 1.2; text-shadow: 0 0 4px #aa00ff; }
+        .order-badge { position: absolute; top: 0; right: 0; background: #4db8ff; color: #000; font-size: 9px; font-weight: bold; width: 12px; height: 12px; display: flex; align-items: center; justify-content: center; z-index: 2; }
 
-        .order-badge {
-            position: absolute; top: 0; right: 0;
-            background: #4db8ff; color: #000;
-            font-size: 9px; font-weight: bold;
-            width: 12px; height: 12px;
-            display: flex; align-items: center; justify-content: center;
-            z-index: 2;
-        }
-
-        /* --- STATS & TEXT --- */
+        /* TAGS */
         .kv { font-size: 10px; color: #aaa; line-height: 1.35; margin-top: 4px; }
         .kv b { color: #ddd; font-weight: 700; }
-        .muted { color: #666; }
-        .warn { color: #ffcc66; }
-        .ok { color: #66ffcc; }
-        .yield-pos { color: #00ff00; font-weight: bold; }
-        .yield-neg { color: #ff4d4d; font-weight: bold; }
-        
-        .state-tag {
-            font-size: 9px; padding: 2px 4px; border-radius: 3px;
-            display: inline-block; margin: 1px; font-weight: bold;
-            border: 1px solid transparent;
-        }
+        .muted { color: #666; } .warn { color: #ffcc66; } .ok { color: #66ffcc; }
+        .yield-pos { color: #00ff00; font-weight: bold; } .yield-neg { color: #ff4d4d; font-weight: bold; }
+        .state-tag { font-size: 9px; padding: 2px 4px; border-radius: 3px; display: inline-block; margin: 1px; font-weight: bold; border: 1px solid transparent; }
         .tag-current-form { background: #224466; color: #aaddff; border-color: #4488aa; }
         .tag-select-form { background: #ccaa00; color: #000; }
         .tag-ai-form { background: #440044; color: #ff00ff; border-color: #ff00ff; }
         .tag-fullsynchro { background: #ff00ff; color: #fff; text-shadow: 0 0 2px #fff; }
         .tag-anger { background: #ff0000; color: #fff; }
         .tag-beast { background: #4400cc; color: #fff; border-color: #8855ff; }
-
-        .history-section {
-            font-size: 9px; color: #888; margin-top: 6px;
-            border-top: 1px solid #333; padding-top: 2px;
-        }
+        .history-section { font-size: 9px; color: #888; margin-top: 6px; border-top: 1px solid #333; padding-top: 2px; }
         .history-label { font-weight: bold; color: #555; display: block; margin-bottom: 1px; }
-        .cross-name { margin-right: 4px; }
-        .cross-spent { color: #555; text-decoration: line-through; }
+        .cross-name { margin-right: 4px; } .cross-spent { color: #555; text-decoration: line-through; }
         .arrow-divider { font-size: 18px; color: #444; margin: 0 10px; }
-        .section-title {
-            font-size: 10px; color: #888; margin-top: 6px;
-            padding-top: 6px; border-top: 1px solid #222;
-        }
 
-        /* --- HIGH-FIDELITY GRID STYLES (from view.html) --- */
-        .grid-cell {
-            width: 100%; height: 100%;
-            background: #222;
-            display: flex; justify-content: center; align-items: center;
-            font-size: 10px; color: rgba(255, 255, 255, 0.65);
-            position: relative;
-            border: 2px solid rgba(180, 180, 180, 0.35);
-            box-sizing: border-box;
-            --own-rgb: 180, 180, 180;
-            border-color: rgba(var(--own-rgb), 0.95);
-        }
-        .cell-p1 { --own-rgb: 255, 77, 77; } /* Player (Red in view.html, but P1 is usually Left) */
-        .cell-p2 { --own-rgb: 77, 184, 255; } /* Enemy (Blue) */
-
-        /* Tile Fills */
+        /* GRID */
+        .grid-cell { width: 100%; height: 100%; background: #222; display: flex; justify-content: center; align-items: center; font-size: 10px; color: rgba(255, 255, 255, 0.65); position: relative; border: 2px solid rgba(180, 180, 180, 0.35); box-sizing: border-box; --own-rgb: 180, 180, 180; border-color: rgba(var(--own-rgb), 0.95); }
+        .cell-p1 { --own-rgb: 255, 77, 77; } .cell-p2 { --own-rgb: 77, 184, 255; }
         .tile-permahole { background: #000 !important; border-style: dashed; color: rgba(255, 255, 255, 0.25); }
-        .tile-hole { background: #000 !important; }
-        .tile-basic { background: rgba(var(--own-rgb), 0.28) !important; }
-        .tile-cracked {
-            background: repeating-linear-gradient(135deg, rgba(255,255,255,0.08) 0px, rgba(255,255,255,0.08) 3px, rgba(0,0,0,0) 3px, rgba(0,0,0,0) 6px) !important;
-        }
-        .tile-poison { background: rgba(160, 80, 255, 0.35) !important; }
-        .tile-holy { background: rgba(255, 220, 80, 0.40) !important; color: rgba(0, 0, 0, 0.7); }
-        .tile-grass { background: rgba(80, 220, 120, 0.35) !important; }
-        .tile-ice { background: rgba(80, 220, 255, 0.35) !important; }
-        .tile-volcano {
-            background: radial-gradient(circle at 50% 55%, rgba(60,35,15,0.85) 0%, rgba(60,35,15,0.85) 28%, rgba(140,85,35,0.55) 29%, rgba(140,85,35,0.55) 100%) !important;
-        }
-        .tile-conv-left, .tile-conv-right {
-            background: repeating-linear-gradient(90deg, rgba(255,255,255,0.10) 0px, rgba(255,255,255,0.10) 3px, rgba(0,0,0,0) 3px, rgba(0,0,0,0) 6px) !important;
-        }
+        .tile-hole { background: #000 !important; } .tile-basic { background: rgba(var(--own-rgb), 0.28) !important; }
+        .tile-cracked { background: repeating-linear-gradient(135deg, rgba(255,255,255,0.08) 0px, rgba(255,255,255,0.08) 3px, rgba(0,0,0,0) 3px, rgba(0,0,0,0) 6px) !important; }
+        .tile-poison { background: rgba(160, 80, 255, 0.35) !important; } .tile-holy { background: rgba(255, 220, 80, 0.40) !important; color: rgba(0, 0, 0, 0.7); }
+        .tile-grass { background: rgba(80, 220, 120, 0.35) !important; } .tile-ice { background: rgba(80, 220, 255, 0.35) !important; }
+        .tile-volcano { background: radial-gradient(circle at 50% 55%, rgba(60,35,15,0.85) 0%, rgba(60,35,15,0.85) 28%, rgba(140,85,35,0.55) 29%, rgba(140,85,35,0.55) 100%) !important; }
+        .tile-conv-left, .tile-conv-right { background: repeating-linear-gradient(90deg, rgba(255,255,255,0.10) 0px, rgba(255,255,255,0.10) 3px, rgba(0,0,0,0) 3px, rgba(0,0,0,0) 6px) !important; }
+        .entity-p { width: 10px; height: 10px; background: #00ffff; border-radius: 50%; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); box-shadow: 0 0 5px #00ffff; z-index: 2; }
+        .entity-e { width: 10px; height: 10px; background: #ff4444; border-radius: 50%; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); box-shadow: 0 0 5px #ff0000; z-index: 2; }
+        .mini-grid { display: grid; grid-template-columns: repeat(6, 12px); grid-template-rows: repeat(3, 12px); gap: 1px; margin-top: 5px; background: #000; border: 1px solid #444; width: fit-content; }
+        .mini-grid .grid-cell { border: 1px solid rgba(180, 180, 180, 0.3); font-size: 0; }
+        .mini-grid .cell-p1 { border-color: rgba(255, 77, 77, 0.8); } .mini-grid .cell-p2 { border-color: rgba(77, 184, 255, 0.8); }
+        .mini-grid .entity-p, .mini-grid .entity-e { width: 6px; height: 6px; box-shadow: none; }
 
-        /* Entities */
-        .entity-p {
-            width: 10px; height: 10px; background: #00ffff; border-radius: 50%;
-            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            box-shadow: 0 0 5px #00ffff; z-index: 2;
-        }
-        .entity-e {
-            width: 10px; height: 10px; background: #ff4444; border-radius: 50%;
-            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            box-shadow: 0 0 5px #ff0000; z-index: 2;
-        }
-
-        /* --- PREVIEW MINI GRID (Table) --- */
-        .mini-grid {
-            display: grid;
-            grid-template-columns: repeat(6, 12px);
-            grid-template-rows: repeat(3, 12px);
-            gap: 1px;
-            margin-top: 5px;
-            background: #000;
-            border: 1px solid #444;
-            width: fit-content;
-        }
+        /* MODAL */
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.85); z-index: 999; backdrop-filter: blur(4px); align-items: center; justify-content: center; }
+        .planner-dialog { background: #181818; border: 1px solid #444; width: 1200px; max-width: 98%; height: 750px; display: flex; flex-direction: column; box-shadow: 0 0 30px #000; border-radius: 8px; overflow: hidden; }
+        .planner-header { background: #222; padding: 15px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; }
+        .planner-body { flex: 1; padding: 20px; display: flex; gap: 20px; overflow-y: auto; }
+        .planner-col { flex: 1; display: flex; flex-direction: column; gap: 15px; min-width: 200px; }
+        .planner-section { background: #111; border: 1px solid #333; padding: 10px; border-radius: 4px; height: 100%; display: flex; flex-direction: column; }
+        .section-header { font-size: 11px; text-transform: uppercase; color: #666; margin-bottom: 10px; font-weight: bold; border-bottom: 1px solid #222; padding-bottom: 4px; }
         
-        /* Inherit detailed styles but scale down borders */
-        .mini-grid .grid-cell { 
-            border: 1px solid rgba(180, 180, 180, 0.3); 
-            font-size: 0; 
-        }
-        
-        /* Owner Borders for Mini Grid */
-        .mini-grid .cell-p1 { border-color: rgba(255, 77, 77, 0.8); }
-        .mini-grid .cell-p2 { border-color: rgba(77, 184, 255, 0.8); }
-        
-        /* Tiny Entities */
-        .mini-grid .entity-p, .mini-grid .entity-e { 
-            width: 6px; height: 6px; box-shadow: none; 
-        }
-
-        /* --- MODAL / PLANNER DIALOG --- */
-        .modal-overlay {
-            display: none;
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0, 0, 0, 0.85);
-            z-index: 999;
-            backdrop-filter: blur(4px);
-            align-items: center; justify-content: center;
-        }
-        .planner-dialog {
-            background: #181818;
-            border: 1px solid #444;
-            width: 900px; max-width: 95%; height: 600px;
-            display: flex; flex-direction: column;
-            box-shadow: 0 0 30px #000;
-            border-radius: 8px; overflow: hidden;
-        }
-        .planner-header {
-            background: #222; padding: 15px; border-bottom: 1px solid #333;
-            display: flex; justify-content: space-between; align-items: center;
-        }
-        .planner-body {
-            flex: 1; padding: 20px; display: flex; gap: 20px; overflow-y: auto;
-        }
-        .planner-col { flex: 1; display: flex; flex-direction: column; gap: 15px; }
-        
-        .planner-section {
-            background: #111; border: 1px solid #333; padding: 10px; border-radius: 4px;
-        }
-        .section-header {
-            font-size: 11px; text-transform: uppercase; color: #666;
-            margin-bottom: 10px; font-weight: bold; border-bottom: 1px solid #222; padding-bottom: 4px;
-        }
-
         .planner-hand { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
         .planner-chip { cursor: pointer; width: 60px; height: 75px; font-size: 11px; }
         .planner-chip:hover { border-color: #fff; transform: translateY(-2px); }
-
         .cross-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
-        .cross-btn {
-            background: #222; border: 1px solid #444; color: #888;
-            padding: 8px 4px; font-size: 10px; text-align: center;
-            cursor: pointer; border-radius: 3px;
-        }
+        .cross-btn { background: #222; border: 1px solid #444; color: #888; padding: 8px 4px; font-size: 10px; text-align: center; cursor: pointer; border-radius: 3px; }
         .cross-btn:hover { background: #333; color: #fff; }
         .cross-btn.active { background: #ccaa00; color: #000; border-color: #ffcc00; font-weight: bold; }
         .cross-btn.disabled { opacity: 0.3; cursor: not-allowed; text-decoration: line-through; }
-
-        .beast-toggle {
-            background: #220044; border: 1px solid #8855ff; color: #dcbfff;
-            padding: 10px; text-align: center; cursor: pointer; border-radius: 4px;
-            font-weight: bold; text-transform: uppercase; letter-spacing: 1px;
-            transition: all 0.2s;
-        }
+        .beast-toggle { background: #220044; border: 1px solid #8855ff; color: #dcbfff; padding: 10px; text-align: center; cursor: pointer; border-radius: 4px; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; transition: all 0.2s; }
         .beast-toggle:hover { background: #330066; }
         .beast-toggle.active { background: #6600cc; color: #fff; box-shadow: 0 0 10px #8855ff; }
-
-        .result-box {
-            background: #000; border: 1px solid #333; padding: 15px; text-align: center; border-radius: 4px;
-        }
+        .result-box { background: #000; border: 1px solid #333; padding: 15px; text-align: center; border-radius: 4px; height: auto; }
         .result-val { font-size: 32px; font-weight: bold; margin: 5px 0; }
         .result-label { color: #666; font-size: 10px; text-transform: uppercase; }
+        .big-mini-grid { display: grid; grid-template-columns: repeat(6, 25px); grid-template-rows: repeat(3, 25px); gap: 2px; margin: 0 auto; background: #000; border: 2px solid #333; width: fit-content; padding: 2px; }
 
-        /* Planner Grid Container */
-        .big-mini-grid {
-            display: grid;
-            grid-template-columns: repeat(6, 25px); /* Matches typical tile width */
-            grid-template-rows: repeat(3, 25px);
-            gap: 2px;
-            margin: 0 auto;
-            background: #000;
-            border: 2px solid #333;
-            width: fit-content;
-            padding: 2px;
+        /* MINI CHIPS IN RESULTS */
+        .mini-chip { width: 24px; height: 30px; background: #222; border: 1px solid #444; position: relative; display: inline-block; margin-right: 2px; }
+        .mini-chip img { width: 100%; height: 100%; object-fit: contain; }
+        .mini-chip .code { position: absolute; bottom: 0; width: 100%; background: rgba(0,0,0,0.8); color: #fff; font-size: 8px; text-align: center; font-weight: bold; }
+        
+        /* CROSS BADGE IN RESULTS */
+        .res-cross-badge {
+            display: inline-block; padding: 2px 5px; font-size: 9px; font-weight: bold;
+            color: #000; background: #ccaa00; border-radius: 3px; margin-right: 5px;
+            text-transform: uppercase;
         }
     </style>
 </head>
@@ -337,6 +125,7 @@
     {{ cross_name(st.idx) }}{% if st.beast %} (Beast){% endif %}
     {%- else -%}Normal{%- endif -%}
     {%- endmacro %}
+    
     {% macro tile_class(t) -%}
     {%- if t == 1 -%}tile-hole
     {%- elif t == 2 -%}tile-basic
@@ -396,7 +185,7 @@
             {% set p_beast = turn.get('beast_p_open', dp.get('beast', {})) %}
             {% set e_beast = turn.get('beast_e_open', de.get('beast', {})) %}
 
-            <tr class="turn-row" onclick="openPlanner(this)" data-context='{{ turn | tojson }}'>
+            <tr class="turn-row" onclick="openPlanner(this)" data-context='{{ turn | tojson | forceescape }}'>
                 <td>
                     <div style="color:#fff; font-size:11px; word-break:break-all;">{{ turn.get('replay_file', turn.get('replay', '')) }}</div>
                     <div style="color:#666; font-size:10px;">
@@ -425,35 +214,22 @@
                         {% for i in range(18) %}
                         {% set t = turn.grid_state[i] %}
                         {% set o = turn.grid_owner_state[i] %}
-                        
                         {% set owner_cls = '' %}
                         {% if o == 0 %}{% set owner_cls = 'cell-p1' %}
                         {% elif o == 1 %}{% set owner_cls = 'cell-p2' %}
                         {% endif %}
-                        
                         <div class="grid-cell {{ owner_cls }} {{ tile_class(t) }}">
-                            {% if turn.get('p_grid_idx') is not none and i == turn.p_grid_idx %}
-                                <div class="entity-p"></div>
-                            {% endif %}
-                            {% if turn.get('e_grid_idx') is not none and i == turn.e_grid_idx %}
-                                <div class="entity-e"></div>
-                            {% endif %}
+                            {% if turn.get('p_grid_idx') is not none and i == turn.p_grid_idx %}<div class="entity-p"></div>{% endif %}
+                            {% if turn.get('e_grid_idx') is not none and i == turn.e_grid_idx %}<div class="entity-e"></div>{% endif %}
                         </div>
                         {% endfor %}
                     </div>
                     {% endif %}
 
                     <div style="margin-top:4px;">
-                        {% if p_active %}
-                        <span class="state-tag tag-current-form">P Now: {{ cross_state_label(p_active) }}</span>
-                        {% else %}
-                        <span class="state-tag tag-current-form">P Now: {{ cross_name(turn.get('current_cross', 0)) }}</span>
-                        {% endif %}
-
-                        {% if e_active %}
-                        <span class="state-tag tag-current-form">E Now: {{ cross_state_label(e_active) }}</span>
-                        {% endif %}
-
+                        {% if p_active %}<span class="state-tag tag-current-form">P Now: {{ cross_state_label(p_active) }}</span>
+                        {% else %}<span class="state-tag tag-current-form">P Now: {{ cross_name(turn.get('current_cross', 0)) }}</span>{% endif %}
+                        {% if e_active %}<span class="state-tag tag-current-form">E Now: {{ cross_state_label(e_active) }}</span>{% endif %}
                         {% if turn.get('player_emotion', turn.get('player_emotion_open', 0)) == 1 %}<span class="state-tag tag-fullsynchro">FULL SYNC</span>{% endif %}
                         {% if turn.get('player_emotion', turn.get('player_emotion_open', 0)) == 2 %}<span class="state-tag tag-anger">ANGER</span>{% endif %}
                         {% if p_beast and p_beast.active %}<span class="state-tag tag-beast">P BEAST</span>{% endif %}
@@ -461,20 +237,10 @@
                     </div>
 
                     <div class="kv">
-                        {% if p_folder_used and (p_folder_used|length) > 0 %}
-                        <div><b>P Folder used</b>: {{ (p_folder_used|select('equalto', true)|list|length) }}/{{ p_folder_used|length }}</div>
-                        {% endif %}
-                        {% if e_folder_used and (e_folder_used|length) > 0 %}
-                        <div><b>E Folder used</b>: {{ (e_folder_used|select('equalto', true)|list|length) }}/{{ e_folder_used|length }}</div>
-                        {% endif %}
-
-                        {% if p_beast and p_beast.ever %}
-                        <div class="muted"><b>P Beast</b>: ever · turns_since={{ p_beast.turns_since if p_beast.turns_since is not none else '?' }}</div>
-                        {% endif %}
-                        {% if e_beast and e_beast.ever %}
-                        <div class="muted"><b>E Beast</b>: ever · turns_since={{ e_beast.turns_since if e_beast.turns_since is not none else '?' }}</div>
-                        {% endif %}
-
+                        {% if p_folder_used and (p_folder_used|length) > 0 %}<div><b>P Folder used</b>: {{ (p_folder_used|select('equalto', true)|list|length) }}/{{ p_folder_used|length }}</div>{% endif %}
+                        {% if e_folder_used and (e_folder_used|length) > 0 %}<div><b>E Folder used</b>: {{ (e_folder_used|select('equalto', true)|list|length) }}/{{ e_folder_used|length }}</div>{% endif %}
+                        {% if p_beast and p_beast.ever %}<div class="muted"><b>P Beast</b>: ever · turns_since={{ p_beast.turns_since if p_beast.turns_since is not none else '?' }}</div>{% endif %}
+                        {% if e_beast and e_beast.ever %}<div class="muted"><b>E Beast</b>: ever · turns_since={{ e_beast.turns_since if e_beast.turns_since is not none else '?' }}</div>{% endif %}
                         {% if d.get('critic_v') is not none or turn.get('critic_v') is not none %}
                         {% set cv = (d.get('critic_v') if d.get('critic_v') is not none else turn.get('critic_v')) %}
                         <div class="muted"><b>Critic V</b>: {{ "%.3f"|format(cv) }}</div>
@@ -484,35 +250,19 @@
                     <div class="history-section">
                         <span class="history-label">PLAYER CROSSES (used)</span>
                         {% if p_used_mask and (p_used_mask|length) > 0 %}
-                        {% for i in range(p_used_mask|length) %}
-                        {% if i != 0 and p_used_mask[i] %}
-                        <span class="cross-name cross-spent">{{ cross_name(i) }}</span>
-                        {% endif %}
-                        {% endfor %}
+                        {% for i in range(p_used_mask|length) %}{% if i != 0 and p_used_mask[i] %}<span class="cross-name cross-spent">{{ cross_name(i) }}</span>{% endif %}{% endfor %}
                         {% elif turn.get('player_used_crosses') %}
-                        {% for c in turn.player_used_crosses %}
-                        <span class="cross-name cross-spent">{{ cross_name(c) }}</span>
-                        {% endfor %}
-                        {% else %}
-                        <span style="color:#444;">- None -</span>
-                        {% endif %}
+                        {% for c in turn.player_used_crosses %}<span class="cross-name cross-spent">{{ cross_name(c) }}</span>{% endfor %}
+                        {% else %}<span style="color:#444;">- None -</span>{% endif %}
                     </div>
 
                     <div class="history-section">
                         <span class="history-label">ENEMY CROSSES (used)</span>
                         {% if e_used_mask and (e_used_mask|length) > 0 %}
-                        {% for i in range(e_used_mask|length) %}
-                        {% if i != 0 and e_used_mask[i] %}
-                        <span class="cross-name cross-spent">{{ cross_name(i) }}</span>
-                        {% endif %}
-                        {% endfor %}
+                        {% for i in range(e_used_mask|length) %}{% if i != 0 and e_used_mask[i] %}<span class="cross-name cross-spent">{{ cross_name(i) }}</span>{% endif %}{% endfor %}
                         {% elif turn.get('enemy_used_crosses') %}
-                        {% for c in turn.enemy_used_crosses %}
-                        <span class="cross-name cross-spent">{{ cross_name(c) }}</span>
-                        {% endfor %}
-                        {% else %}
-                        <span style="color:#444;">- None -</span>
-                        {% endif %}
+                        {% for c in turn.enemy_used_crosses %}<span class="cross-name cross-spent">{{ cross_name(c) }}</span>{% endfor %}
+                        {% else %}<span style="color:#444;">- None -</span>{% endif %}
                     </div>
                 </td>
 
@@ -524,10 +274,7 @@
                         {% set chip = rich_hand[i] %}
                         {% set is_selected = (i in sel_indices) %}
                         {% set sel_order = -1 %}
-                        {% for s_idx in sel_indices %}
-                        {% if s_idx == i %}{% set sel_order = loop.index %}{% endif %}
-                        {% endfor %}
-
+                        {% for s_idx in sel_indices %}{% if s_idx == i %}{% set sel_order = loop.index %}{% endif %}{% endfor %}
                         {% if chip %}
                         <div class="chip-slot in-hand {{ 'selected' if is_selected else '' }}">
                             {% if sel_order > -1 %}<div class="order-badge">{{ sel_order }}</div>{% endif %}
@@ -535,29 +282,19 @@
                             <span class="chip-code">{{ chip.char_code }}</span>
                         </div>
                         {% else %}
-                        <div class="chip-slot" style="background:#111; opacity:0.3;">
-                            <span style="color:#333; font-size:20px;">?</span>
-                        </div>
+                        <div class="chip-slot" style="background:#111; opacity:0.3;"><span style="color:#333; font-size:20px;">?</span></div>
                         {% endif %}
                         {% endfor %}
                     </div>
-
                     {% if turn.get('chip_visible_count') is not none %}
-                    <div class="kv muted">
-                        visible={{ turn.get('chip_visible_count') }} / {{ (turn.get('hand_slots', [])|length) if turn.get('hand_slots') else 10 }}
-                    </div>
+                    <div class="kv muted">visible={{ turn.get('chip_visible_count') }} / {{ (turn.get('hand_slots', [])|length) if turn.get('hand_slots') else 10 }}</div>
                     {% endif %}
-
                     {% set rich_held_before = turn.get('rich_held_before', []) %}
                     <div class="section-title"><b>Held</b> (before window):</div>
                     <div class="queue-container" style="margin-top:4px;">
                         {% if rich_held_before and (rich_held_before|length) > 0 %}
-                        {% for chip in rich_held_before %}
-                        {{ render_chip_card(chip, "in-queue") }}
-                        {% endfor %}
-                        {% else %}
-                        <span class="muted">—</span>
-                        {% endif %}
+                        {% for chip in rich_held_before %}{{ render_chip_card(chip, "in-queue") }}{% endfor %}
+                        {% else %}<span class="muted">—</span>{% endif %}
                     </div>
                 </td>
 
@@ -566,60 +303,38 @@
                 <td>
                     {% set rich_selected = turn.get('rich_selected', []) %}
                     {% set rich_held_after = turn.get('rich_held_after', turn.get('rich_held', [])) %}
-
                     {% if wc and wc.happened %}
                     <div class="kv">
                         <b>Window commit</b>:
-                        {% if wc.close_chip_select_count is defined and wc.close_chip_select_count == 0 %}
-                        <span class="warn">carry</span>
-                        {% else %}
-                        {% if wc.selected_any %}<span class="ok">select</span>{% else %}<span class="warn">none</span>{% endif %}
-                        {% endif %}
+                        {% if wc.close_chip_select_count is defined and wc.close_chip_select_count == 0 %}<span class="warn">carry</span>
+                        {% else %}{% if wc.selected_any %}<span class="ok">select</span>{% else %}<span class="warn">none</span>{% endif %}{% endif %}
                     </div>
-
                     <div class="section-title"><b>Selected</b> (commit):</div>
                     <div class="queue-container" style="margin-top:4px;">
-                        {% if wc.beast_selected %}
-                        {{ render_beast_card() }}
-                        {% endif %}
-
+                        {% if wc.beast_selected %}{{ render_beast_card() }}{% endif %}
                         {% if rich_selected and (rich_selected|length) > 0 %}
-                        {% for chip in rich_selected %}
-                        {{ render_chip_card(chip, "in-queue") }}
-                        {% endfor %}
-                        {% else %}
-                        <span class="muted">—</span>
-                        {% endif %}
+                        {% for chip in rich_selected %}{{ render_chip_card(chip, "in-queue") }}{% endfor %}
+                        {% else %}<span class="muted">—</span>{% endif %}
                     </div>
-
                     {% set sel_state = turn.get('selected_cross_state') %}
                     {% if sel_state and sel_state.idx is not none and sel_state.idx != 0 %}
                     <div style="margin-top:4px;">
-                        <span class="state-tag tag-select-form">
-                            Select: {{ cross_state_label(sel_state) }}
-                        </span>
+                        <span class="state-tag tag-select-form">Select: {{ cross_state_label(sel_state) }}</span>
                         <span class="muted" style="font-size:9px;">(emotion {{ sel_state.raw }})</span>
                     </div>
-
                     {% set pre_state = turn.get('selected_cross_pre_state') %}
                     {% set commit_state = turn.get('selected_cross_commit_state') %}
                     {% if pre_state and commit_state %}
-                    <div class="kv muted">
-                        pre={{ cross_state_label(pre_state) }} → commit={{ cross_state_label(commit_state) }}
-                    </div>
+                    <div class="kv muted">pre={{ cross_state_label(pre_state) }} → commit={{ cross_state_label(commit_state) }}</div>
                     {% endif %}
                     {% endif %}
-
                     {% else %}
                     <div class="kv muted">No commit metadata (legacy / incomplete row).</div>
                     {% endif %}
-
                     {% if rich_held_after and (rich_held_after|length) > 0 %}
                     <div class="section-title"><b>Held</b> (enter battle):</div>
                     <div class="queue-container" style="margin-top:4px;">
-                        {% for chip in rich_held_after %}
-                        {{ render_chip_card(chip, "in-queue") }}
-                        {% endfor %}
+                        {% for chip in rich_held_after %}{{ render_chip_card(chip, "in-queue") }}{% endfor %}
                     </div>
                     {% endif %}
                 </td>
@@ -628,23 +343,14 @@
                     <div class="queue-container">
                         {% if turn.ai_indices is defined %}
                         {% for idx in turn.ai_indices %}
-                        {% if idx == 11 %}
-                        {{ render_beast_card() }}
-                        {% else %}
-                        {% set chip = (turn.rich_hand[idx] if turn.get('rich_hand') and idx < (turn.rich_hand|length) else None) %}
+                        {% if idx == 11 %}{{ render_beast_card() }}
+                        {% else %}{% set chip = (turn.rich_hand[idx] if turn.get('rich_hand') and idx < (turn.rich_hand|length) else None) %}
                         {% if chip %} {{ render_chip_card(chip, "ai-queue" ) }} {% endif %}
-                        {% endif %}
-                        {% endfor %}
-                        {% else %} <span class="muted">...</span>
-                        {% endif %}
+                        {% endif %}{% endfor %}
+                        {% else %} <span class="muted">...</span>{% endif %}
                     </div>
-
                     {% if turn.ai_cross is defined and turn.ai_cross > 0 %}
-                    <div style="margin-top:4px;">
-                        <span class="state-tag tag-ai-form">
-                            AI: {{ cross_name(turn.ai_cross) }}
-                        </span>
-                    </div>
+                    <div style="margin-top:4px;"><span class="state-tag tag-ai-form">AI: {{ cross_name(turn.ai_cross) }}</span></div>
                     {% endif %}
                 </td>
 
@@ -657,9 +363,7 @@
                         {% else %}<span style="color:#666;">{{ "%.0f"|format(cy) }}</span>{% endif %}
                     </div>
                     <div style="font-size:9px; color:#666;">Predicted Net HP</div>
-                    {% else %}
-                    <span class="muted">-</span>
-                    {% endif %}
+                    {% else %}<span class="muted">-</span>{% endif %}
                 </td>
 
                 <td>
@@ -670,8 +374,7 @@
                         {% else %}<span style="color:#666;">0</span>{% endif %}
                     </div>
                     <div style="font-size:9px; color:#555; margin-top:2px;">
-                        D:{{ turn.get('damage_dealt', 0) }}<br>
-                        T:{{ turn.get('damage_taken', 0) }}
+                        D:{{ turn.get('damage_dealt', 0) }}<br>T:{{ turn.get('damage_taken', 0) }}
                     </div>
                 </td>
             </tr>
@@ -690,9 +393,12 @@
             </div>
             
             <div class="planner-body">
-                <div class="planner-col">
+                <div class="planner-col" style="flex:1;">
                     <div class="planner-section">
-                        <div class="section-header">1. Hand (Click to Select)</div>
+                        <div class="section-header">Held Chips (Before)</div>
+                        <div class="queue-container" id="plannerHeldBefore" style="margin-bottom:10px; min-height:50px;"></div>
+
+                        <div class="section-header" style="margin-top:10px;">1. Hand (Click to Select)</div>
                         <div class="planner-hand" id="plannerHand"></div>
                     </div>
 
@@ -700,7 +406,6 @@
                         <div class="section-header">2. Transformation</div>
                         <div style="margin-bottom:8px;">Cross Selection:</div>
                         <div class="cross-grid" id="plannerCrosses"></div>
-                        
                         <div style="margin-top:15px; margin-bottom:8px;">Beast Out:</div>
                         <div class="beast-toggle" id="plannerBeast" onclick="toggleBeast()">Beast Out</div>
                     </div>
@@ -708,124 +413,245 @@
 
                 <div class="planner-col" style="flex:0.6;">
                     <div class="planner-section" style="text-align:center;">
-                        <div class="section-header">Board State</div>
+                        <div class="section-header">Game State</div>
                         <div id="plannerGrid" class="big-mini-grid"></div>
+                        
+                        <div id="plannerForms"></div>
+
                         <div style="margin-top:10px; font-size:12px;">
                             <span style="color:#4db8ff">P_HP: <span id="valPHP"></span></span>
                             <span style="color:#666; margin:0 8px;">|</span>
                             <span style="color:#ff4d4d">E_HP: <span id="valEHP"></span></span>
                         </div>
+                        <div id="plannerHistory" style="margin-top:10px; border-top:1px solid #333; padding-top:5px; text-align:left; font-size:10px; color:#888;">
+                            </div>
                     </div>
                 </div>
 
-                <div class="planner-col">
-                    <div class="planner-section">
+                <div class="planner-col" style="flex:0.7;">
+                    <div class="planner-section" style="height: auto;">
                         <div class="section-header">Selected Queue (Max 5)</div>
-                        <div id="plannerQueue" style="display:flex; flex-direction:column; gap:5px; min-height:200px;"></div>
+                        <div id="plannerQueue" style="display:flex; flex-direction:column; gap:5px; min-height:150px;"></div>
                     </div>
 
-                    <div class="result-box">
+                    <div class="result-box" style="margin-top:15px;">
                         <div class="result-label">Critic Predicted Yield</div>
                         <div class="result-val" id="plannerResult">...</div>
                         <div class="result-label">Net HP Advantage</div>
+                    </div>
+
+                    <button onclick="runSolver()" style="width:100%; margin-top:20px; background:#440044; border:1px solid #ff00ff; color:#fff; padding:10px; font-weight:bold; cursor:pointer; text-transform:uppercase;">
+                        ✨ Auto-Solve Best Hand
+                    </button>
+                </div>
+
+                <div class="planner-col" style="flex:1; border-left:1px solid #333; padding-left:15px;">
+                    <div class="planner-section" style="display:flex; flex-direction:column; overflow:hidden;">
+                        <div class="section-header">Top Solutions (Brute Force)</div>
+                        <div id="solverResults" style="flex:1; overflow-y:auto; font-size:11px; display:flex; flex-direction:column; gap:4px; padding-right:5px;">
+                            <div class="muted" style="text-align:center; margin-top:50px;">
+                                Click Auto-Solve to simulate all valid combinations.
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <script>
+<script>
+        // =============================================================================
+        // GLOBALS & CONSTANTS
+        // =============================================================================
         let currentContext = null;
-        let selectedIndices = []; // ordered list of hand indices
+        let selectedIndices = []; 
         let selectedCross = 0;
         let selectedBeast = false;
         let debounceTimer = null;
 
         const CROSS_NAMES = ["Normal", "Fire", "Elec", "Slash", "Erase", "Charge", "Aqua", "Thawk", "Tengu", "Grnd", "Dust"];
 
-        // Tile IDs mapping
         const TILE = {
-            PERMA_HOLE: null, // if grid_state[i] is null
-            HOLE: 1,
-            BASIC: 2,
-            CRACKED: 3,
-            POISON: 4,
-            HOLY: 5,
-            GRASS: 6,
-            ICE: 7,
-            VOLCANO: 8,
-            CONV_LEFT: 11,
-            CONV_RIGHT: 12,
+            PERMA_HOLE: null, HOLE: 1, BASIC: 2, CRACKED: 3, POISON: 4, 
+            HOLY: 5, GRASS: 6, ICE: 7, VOLCANO: 8, CONV_LEFT: 11, CONV_RIGHT: 12,
         };
 
-        function _applyTileFill(el, tileVal, owner) {
-            el.className = 'grid-cell'; // reset
-            
-            // Apply owner border
-            if (owner === 0) el.classList.add('cell-p1');
-            else if (owner === 1) el.classList.add('cell-p2');
-            
-            const t = Number.isFinite(Number(tileVal)) ? Number(tileVal) : 0;
+        // =============================================================================
+        // CORE INTERACTION (Attached to window)
+        // =============================================================================
 
-            if (tileVal === null) {
-                el.classList.add('tile-permahole'); el.title = 'Perma Hole'; return;
-            }
-
-            if (t === TILE.HOLE) { el.classList.add('tile-hole'); el.title = 'Hole'; }
-            else if (t === TILE.BASIC) { el.classList.add('tile-basic'); el.title = 'Basic'; }
-            else if (t === TILE.CRACKED) { el.classList.add('tile-cracked'); el.title = 'Cracked'; }
-            else if (t === TILE.POISON) { el.classList.add('tile-poison'); el.title = 'Poison'; }
-            else if (t === TILE.HOLY) { el.classList.add('tile-holy'); el.title = 'Holy'; }
-            else if (t === TILE.GRASS) { el.classList.add('tile-grass'); el.title = 'Grass'; }
-            else if (t === TILE.ICE) { el.classList.add('tile-ice'); el.title = 'Ice'; }
-            else if (t === TILE.VOLCANO) { el.classList.add('tile-volcano'); el.title = 'Volcano'; }
-            else if (t === TILE.CONV_LEFT) { el.classList.add('tile-conv-left'); el.title = 'Conveyor Left'; }
-            else if (t === TILE.CONV_RIGHT) { el.classList.add('tile-conv-right'); el.title = 'Conveyor Right'; }
-        }
-
-        function openPlanner(row) {
+        window.openPlanner = function(row) {
             const jsonStr = row.getAttribute('data-context');
             if (!jsonStr) return;
-            
             try {
                 currentContext = JSON.parse(jsonStr);
                 
-                // Initialize State from "Human Commit"
+                // Initialize State from recorded "Human Commit"
                 selectedIndices = [...(currentContext.selected_indices || [])];
+                
+                // For Cross: data uses 0 for 'No Change'. 
                 selectedCross = currentContext.selected_cross || 0;
-                if (selectedCross > 10) selectedCross = 0; // fallback if beast emotion passed
-
+                if (selectedCross > 10) selectedCross = 0; 
+                
+                // For Beast: check if they selected it this turn
                 selectedBeast = !!currentContext.window_commit.beast_selected;
 
-                // Render UI
+                // Reset Solver UI
+                const resContainer = document.getElementById('solverResults');
+                if (resContainer) {
+                    resContainer.innerHTML = '<div class="muted" style="text-align:center; margin-top:50px;">Click Auto-Solve to simulate all valid combinations.</div>';
+                }
+
                 renderPlanner();
                 document.getElementById('plannerModal').style.display = 'flex';
                 
-                // Initial Predict
+                // Run initial prediction for the current state
                 runPrediction();
-
-            } catch (e) {
-                console.error("Failed to open planner", e);
-            }
+                
+            } catch (e) { console.error("Failed to open planner", e); }
         }
 
-        function closePlanner(e) {
+        window.closePlanner = function(e) {
             if (e && e.target !== e.currentTarget && e.target.tagName !== 'BUTTON') return;
             document.getElementById('plannerModal').style.display = 'none';
         }
 
+        window.toggleBeast = function() {
+            // Check if we are allowed to toggle (not already active)
+            const isBeastActive = currentContext.beast_p_open ? currentContext.beast_p_open.active : false;
+            if (isBeastActive) return; // Cannot toggle if already active
+
+            selectedBeast = !selectedBeast;
+            renderBeast();
+            runPrediction();
+        }
+
+        window.toggleChip = function(idx) {
+            const pos = selectedIndices.indexOf(idx);
+            if (pos >= 0) {
+                // Remove
+                selectedIndices.splice(pos, 1);
+            } else {
+                // Add (Cap at 5, or 4 if Beast is selected/active)
+                // Note: Logic allows 5 in UI, backend critic will handle soft limits, 
+                // but strictly speaking game limits to 5 total slots.
+                if (selectedIndices.length < 5) {
+                    selectedIndices.push(idx);
+                }
+            }
+            renderHand();
+            renderQueue();
+            runPrediction();
+        }
+
+        window.runSolver = async function() {
+            const container = document.getElementById('solverResults');
+            if (!container) return;
+            container.innerHTML = '<div style="color:#ff00ff; text-align:center; margin-top:50px;">Running Critic on all permutations...</div>';
+            
+            // We pass the current context. 
+            // The Solver will ignore 'selectedIndices' and try to find the best ones.
+            // It WILL respect the game constraints (beast locks, cross locks).
+            const payload = {
+                ...currentContext,
+                // We pass current UI selections mostly for context, 
+                // though the solver iterates its own options.
+                selected_cross: selectedCross, 
+                beast_selected: selectedBeast
+            };
+
+            try {
+                const req = await fetch('/api/solve_strategy', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
+                });
+                const data = await req.json();
+                
+                if(data.error) {
+                    container.innerHTML = `<div style="color:red; text-align:center; margin-top:50px;">Error: ${data.error}</div>`;
+                    return;
+                }
+                
+                renderSolverResults(data.results, data.total_evaluated);
+                
+            } catch (e) {
+                console.error(e);
+                container.innerHTML = '<div style="color:red; text-align:center; margin-top:50px;">Network Error</div>';
+            }
+        }
+
+        // =============================================================================
+        // RENDERERS
+        // =============================================================================
+
         function renderPlanner() {
             if (!currentContext) return;
-
+            
+            // Header Stats
             document.getElementById('plannerSubtitle').innerText = `${currentContext.replay_file} | Frame: ${currentContext.frame_open}`;
             document.getElementById('valPHP').innerText = currentContext.p_hp_start;
             document.getElementById('valEHP').innerText = currentContext.e_hp_start;
+            
+            // Game State Info
+            const pFormIdx = currentContext.active_cross_p_open ? currentContext.active_cross_p_open.idx : 0;
+            const eFormIdx = currentContext.active_cross_e_open ? currentContext.active_cross_e_open.idx : 0;
+            const pBeast = currentContext.beast_p_open ? currentContext.beast_p_open.active : false;
+            const eBeast = currentContext.beast_e_open ? currentContext.beast_e_open.active : false;
 
+            const pName = CROSS_NAMES[pFormIdx] || `C${pFormIdx}`;
+            const eName = CROSS_NAMES[eFormIdx] || `C${eFormIdx}`;
+
+            const pLabel = pBeast ? `${pName} (Beast)` : pName;
+            const eLabel = eBeast ? `${eName} (Beast)` : eName;
+
+            const formsEl = document.getElementById('plannerForms');
+            if (formsEl) {
+                formsEl.innerHTML = `
+                    <div style="display:flex; justify-content:space-between; font-size:11px; margin-top:8px; border-bottom:1px solid #333; padding-bottom:4px;">
+                        <span style="color:#4db8ff">P: ${pLabel}</span>
+                        <span style="color:#ff4d4d">E: ${eLabel}</span>
+                    </div>
+                `;
+            }
+
+            // Sub-components
             renderGrid();
+            renderHistory();
+            renderHeldBefore();
             renderHand();
             renderCrosses();
             renderBeast();
             renderQueue();
+        }
+
+        function renderHistory() {
+            const container = document.getElementById('plannerHistory');
+            if (!container) return;
+            
+            let mask = [];
+            if (currentContext.derived && currentContext.derived.player && currentContext.derived.player.used_cross_mask) {
+                mask = currentContext.derived.player.used_cross_mask;
+            } else if (currentContext.used_cross_mask_p_open) {
+                mask = currentContext.used_cross_mask_p_open;
+            }
+
+            if (!mask || mask.length === 0) {
+                container.innerHTML = '<div>History: None</div>';
+                return;
+            }
+
+            let html = '<div style="margin-bottom:4px; font-weight:bold; color:#666;">USED CROSSES:</div>';
+            let anyUsed = false;
+            for(let i=1; i<mask.length; i++) {
+                if (mask[i]) {
+                    const name = CROSS_NAMES[i] || `C${i}`;
+                    html += `<span class="cross-spent" style="margin-right:6px; color:#666;">${name}</span>`;
+                    anyUsed = true;
+                }
+            }
+            if (!anyUsed) html += '<span style="color:#444;">- None -</span>';
+            container.innerHTML = html;
         }
 
         function renderGrid() {
@@ -833,15 +659,28 @@
             container.innerHTML = '';
             const tiles = currentContext.grid_state || [];
             const owners = currentContext.grid_owner_state || [];
-            
             for(let i=0; i<18; i++) {
                 const cell = document.createElement('div');
                 const t = tiles[i] !== undefined ? tiles[i] : 0;
                 const o = owners[i] !== undefined ? owners[i] : 2;
                 
-                _applyTileFill(cell, t, o);
+                cell.className = 'grid-cell'; 
+                if (o === 0) cell.classList.add('cell-p1');
+                else if (o === 1) cell.classList.add('cell-p2');
                 
-                // Position Markers
+                const tVal = Number.isFinite(Number(t)) ? Number(t) : 0;
+                if (t === null) cell.classList.add('tile-permahole');
+                else if (tVal === 1) cell.classList.add('tile-hole');
+                else if (tVal === 2) cell.classList.add('tile-basic');
+                else if (tVal === 3) cell.classList.add('tile-cracked');
+                else if (tVal === 4) cell.classList.add('tile-poison');
+                else if (tVal === 5) cell.classList.add('tile-holy');
+                else if (tVal === 6) cell.classList.add('tile-grass');
+                else if (tVal === 7) cell.classList.add('tile-ice');
+                else if (tVal === 8) cell.classList.add('tile-volcano');
+                else if (tVal === 11) cell.classList.add('tile-conv-left');
+                else if (tVal === 12) cell.classList.add('tile-conv-right');
+
                 if (currentContext.p_grid_idx === i) {
                     const p = document.createElement('div'); p.className='entity-p'; cell.appendChild(p);
                 }
@@ -852,27 +691,57 @@
             }
         }
 
+        function renderHeldBefore() {
+            const container = document.getElementById('plannerHeldBefore');
+            if (!container) return;
+            container.innerHTML = '';
+            
+            const richHeld = currentContext.rich_held_before || [];
+            
+            if (richHeld.length === 0) {
+                container.innerHTML = '<span class="muted" style="font-size:10px;">None</span>';
+                return;
+            }
+
+            richHeld.forEach(chip => {
+                const el = document.createElement('div');
+                el.className = 'chip-slot'; 
+                // Manual styling for "held" look (gray/ghosted)
+                el.style.border = '1px solid #666';
+                el.style.opacity = '0.7';
+                el.style.background = '#222';
+                el.style.display = 'flex';
+                el.style.flexDirection = 'column';
+                el.style.alignItems = 'center';
+                el.style.justifyContent = 'flex-end';
+                el.style.position = 'relative';
+                el.style.width = '40px';
+                el.style.height = '50px';
+                
+                let html = '';
+                if(chip.image_url) html += `<img src="${chip.image_url}" class="chip-img">`;
+                html += `<span class="chip-code">${chip.char_code || '?'}</span>`;
+                el.innerHTML = html;
+                container.appendChild(el);
+            });
+        }
+
         function renderHand() {
             const container = document.getElementById('plannerHand');
             container.innerHTML = '';
-            
             const richHand = currentContext.rich_hand || [];
             
             richHand.forEach((chip, idx) => {
-                if (!chip) return; // invisible slot
-                
+                if (!chip) return; 
                 const el = document.createElement('div');
                 const isSel = selectedIndices.includes(idx);
                 const order = selectedIndices.indexOf(idx) + 1;
-                
                 el.className = `chip-slot planner-chip ${isSel ? 'in-hand selected' : ''}`;
-                el.onclick = () => toggleChip(idx);
-                
+                el.onclick = () => window.toggleChip(idx);
                 let html = '';
                 if(order > 0) html += `<div class="order-badge">${order}</div>`;
                 if(chip.image_url) html += `<img src="${chip.image_url}" class="chip-img">`;
                 html += `<span class="chip-code">${chip.char_code || '?'}</span>`;
-                
                 el.innerHTML = html;
                 container.appendChild(el);
             });
@@ -882,16 +751,49 @@
             const container = document.getElementById('plannerCrosses');
             container.innerHTML = '';
             
+            // Context
             const activeForm = currentContext.active_cross_p_open ? currentContext.active_cross_p_open.idx : 0;
+            const isBeastActive = currentContext.beast_p_open ? currentContext.beast_p_open.active : false;
+            
+            let usedMask = [];
+            if (currentContext.derived && currentContext.derived.player) {
+                usedMask = currentContext.derived.player.used_cross_mask || [];
+            } else {
+                usedMask = currentContext.used_cross_mask_p_open || [];
+            }
+
+            // Version Detection
+            const isGregar = (activeForm >= 1 && activeForm <= 5) || usedMask.slice(1, 6).some(x => x);
+            const isFalzar = (activeForm >= 6 && activeForm <= 10) || usedMask.slice(6, 11).some(x => x);
 
             CROSS_NAMES.forEach((name, idx) => {
                 const btn = document.createElement('div');
                 const isActive = (selectedCross === idx);
-                const isDisabled = (idx === activeForm && idx !== 0); 
                 
+                let isDisabled = false;
+                
+                // If Beast is Active, you CANNOT change cross via menu (locked).
+                // Actually, in many games you are locked to the form if beast is active.
+                if (isBeastActive && idx > 0) isDisabled = true;
+
+                if (idx > 0) {
+                    if (idx === activeForm) isDisabled = true; // Already in it
+                    if (usedMask[idx]) isDisabled = true;      // Already used
+                    
+                    if (isGregar && idx >= 6) isDisabled = true;
+                    if (isFalzar && idx <= 5) isDisabled = true;
+                }
+
                 btn.className = `cross-btn ${isActive ? 'active' : ''} ${isDisabled ? 'disabled' : ''}`;
-                btn.innerText = name;
                 
+                // Label 0 as "No Change"
+                if (idx === 0) {
+                    btn.innerText = "No Change"; 
+                    if(!isActive) btn.style.color = "#888";
+                } else {
+                    btn.innerText = name;
+                }
+
                 if (!isDisabled) {
                     btn.onclick = () => { selectedCross = idx; renderPlanner(); runPrediction(); };
                 }
@@ -901,53 +803,141 @@
 
         function renderBeast() {
             const el = document.getElementById('plannerBeast');
+            
+            // Check availability
+            const beastState = currentContext.beast_p_open || {};
+            const isBeastActive = beastState.active;
+            const hasBeasted = beastState.ever;
+
+            // If already active, it's ON and locked
+            if (isBeastActive) {
+                el.classList.add('active');
+                el.style.opacity = '0.5'; 
+                el.style.cursor = 'not-allowed';
+                el.innerText = "BEAST ACTIVE";
+                el.onclick = null;
+                return;
+            }
+
+            // If used up, it's OFF and disabled
+            if (hasBeasted) {
+                el.classList.remove('active');
+                el.style.opacity = '0.3';
+                el.style.cursor = 'not-allowed';
+                el.innerText = "BEAST USED";
+                el.onclick = null;
+                return;
+            }
+
+            // Otherwise, toggleable
+            el.style.opacity = '1.0';
+            el.style.cursor = 'pointer';
+            el.innerText = "BEAST OUT";
+            el.onclick = () => window.toggleBeast();
+
             if (selectedBeast) el.classList.add('active');
             else el.classList.remove('active');
-        }
-
-        function toggleBeast() {
-            selectedBeast = !selectedBeast;
-            renderBeast();
-            runPrediction();
-        }
-
-        function toggleChip(idx) {
-            const pos = selectedIndices.indexOf(idx);
-            if (pos >= 0) {
-                selectedIndices.splice(pos, 1);
-            } else {
-                if (selectedIndices.length < 5) {
-                    selectedIndices.push(idx);
-                }
-            }
-            renderHand();
-            renderQueue();
-            runPrediction();
         }
 
         function renderQueue() {
             const container = document.getElementById('plannerQueue');
             container.innerHTML = '';
             const richHand = currentContext.rich_hand || [];
+            
+            if (selectedIndices.length === 0) {
+                container.innerHTML = '<div class="muted" style="padding:10px;">Empty Hand</div>';
+                return;
+            }
 
             selectedIndices.forEach((idx, i) => {
                 const chip = richHand[idx];
                 const row = document.createElement('div');
-                row.style.display = 'flex';
-                row.style.alignItems = 'center';
-                row.style.gap = '10px';
-                row.style.background = '#222';
-                row.style.padding = '5px';
-                row.style.borderRadius = '4px';
-                
+                row.style.cssText = 'display:flex; align-items:center; gap:10px; background:#222; padding:5px; border-radius:4px;';
                 row.innerHTML = `
                     <div style="font-weight:bold; color:#4db8ff; width:15px;">${i+1}.</div>
-                    <div style="color:#fff; font-size:12px;">${chip.name || 'Unknown'}</div>
-                    <div style="color:#aaa; font-size:10px;">[${chip.char_code}]</div>
+                    <div style="color:#fff; font-size:12px;">${chip ? (chip.name || 'Unknown') : '???'}</div>
+                    <div style="color:#aaa; font-size:10px;">[${chip ? chip.char_code : '?'}]</div>
                 `;
                 container.appendChild(row);
             });
         }
+
+        function renderSolverResults(results, totalCount) {
+            const container = document.getElementById('solverResults');
+            if (!container) return;
+            container.innerHTML = '';
+            
+            // Context
+            const isBeastActive = currentContext.beast_p_open ? currentContext.beast_p_open.active : false;
+            
+            if(!results || results.length === 0) {
+                container.innerHTML = '<div class="muted" style="padding:10px; text-align:center;">No valid moves found.</div>';
+                return;
+            }
+            
+            const header = document.createElement('div');
+            header.style.cssText = "padding:5px; background:#111; border-bottom:1px solid #333; color:#888; font-size:9px; text-align:right;";
+            header.innerText = `Evaluated: ${totalCount} | Showing Top ${results.length}`;
+            container.appendChild(header);
+
+            results.forEach((res, i) => {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex; align-items:center; background:#222; padding:6px; cursor:pointer; border-left:3px solid transparent; margin-bottom:2px; transition:background 0.1s;';
+                
+                let valColor = '#888';
+                if(res.value > 10) valColor = '#00ff00';
+                else if(res.value < -10) valColor = '#ff4d4d';
+                
+                row.onmouseover = () => { row.style.background = '#333'; };
+                row.onmouseout = () => { row.style.background = '#222'; };
+
+                row.onclick = () => {
+                    selectedIndices = res.chain_indices;
+                    selectedCross = res.cross;
+                    selectedBeast = res.beast;
+                    renderPlanner(); 
+                    runPrediction();
+                };
+                
+                let chipsHtml = '';
+                
+                // Cross Badge: Only if CHANGING (res.cross > 0)
+                if (res.cross > 0) {
+                    const cName = CROSS_NAMES[res.cross] || `C${res.cross}`;
+                    chipsHtml += `<div class="res-cross-badge">Select: ${cName}</div>`;
+                }
+
+                // Beast Badge: Only if NEW activation
+                if(res.beast && !isBeastActive) {
+                    chipsHtml += `<span class="state-tag tag-beast" style="font-size:8px; margin-right:4px;">BST</span>`;
+                }
+                
+                if (res.chips && res.chips.length > 0) {
+                    res.chips.forEach(c => {
+                        let img = '';
+                        if(c.image_url) img = `<img src="${c.image_url}">`;
+                        chipsHtml += `<div class="mini-chip">${img}<span class="code">${c.char_code}</span></div>`;
+                    });
+                } else {
+                    chipsHtml += '<span class="muted" style="font-size:10px;">(Empty)</span>';
+                }
+
+                row.innerHTML = `
+                    <div style="width:25px; color:#666; font-weight:bold; font-size:10px;">#${i+1}</div>
+                    <div style="flex:1;">
+                        <div style="display:flex; align-items:center;">${chipsHtml}</div>
+                    </div>
+                    <div style="font-weight:bold; color:${valColor}; text-align:right; width:50px; font-size:12px;">
+                        ${res.value > 0 ? '+' : ''}${res.value.toFixed(0)}
+                    </div>
+                `;
+                container.appendChild(row);
+            });
+        }
+
+        // =============================================================================
+        // PREDICTION API
+        // =============================================================================
 
         function runPrediction() {
             const resEl = document.getElementById('plannerResult');
@@ -996,6 +986,7 @@
                 }
             }, 300);
         }
+
     </script>
 </body>
 </html>
