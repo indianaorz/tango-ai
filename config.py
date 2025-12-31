@@ -24,7 +24,7 @@ def get_project_root() -> str:
 PROJECT_ROOT = get_project_root()
 APP_PATH     = os.path.join(PROJECT_ROOT, "dist", "tango-x86_64-linux.AppImage")
 
-CRITIC_CKPT_PATH os.path.join(PROJECT_ROOT, "checkpoints", "critic_rl", "tdlam_complete_v5_final", "last.pt")
+CRITIC_CKPT_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "critic_rl", "tdlam_complete_v5_final", "last.pt")
 # =============================================================================
 # Instance orchestration
 # =============================================================================
@@ -101,7 +101,7 @@ DISCRETE_ACTIONS = [
 RANDOM_ACTION_KEYS_FOR_SKIP_STRATEGY = ["B", "DOWN", "UP", "LEFT", "RIGHT", "A"]
 
 _CKPT_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
-_BATTLE_DIR = os.path.join(_CKPT_DIR, "nitrogen_battle_critic")
+_BATTLE_DIR = os.path.join(_CKPT_DIR, "battle")
 _PLAN_DIR = os.path.join(_CKPT_DIR, "planning")
 
 def _get_latest_checkpoint(ckpt_dir: str, default: str = "ng.pt") -> str:
@@ -134,7 +134,10 @@ BATTLE_CKPT_PATH = os.getenv("BATTLE_CKPT_PATH", _get_latest_checkpoint(_BATTLE_
 # PLAN_CKPT_PATH = os.getenv("PLAN_CKPT_PATH", _get_latest_checkpoint(_PLAN_DIR, "step_150000.pt"))
 
 # NEW: Point to the Strategy Transformer
-PLAN_CKPT_PATH = os.getenv("PLAN_CKPT_PATH", "checkpoints_strategy/strategy_model.pt") 
+PLAN_CKPT_PATH = os.getenv(
+    "PLAN_CKPT_PATH",
+    os.path.join(PROJECT_ROOT, "checkpoints", "planning_critic.pt"),
+)
 # NEW: Point to the Chips Database
 CHIPS_DB_PATH = os.getenv("CHIPS_DB_PATH", "data/assets/chips.json")
 

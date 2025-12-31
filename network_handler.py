@@ -13,6 +13,7 @@ from collections import deque
 from typing import Any, Dict, Optional, List
 
 import torch
+from viewer.derived_stream import DerivedStateTracker
 
 from strategy import DRLAgentStrategy
 
@@ -104,6 +105,9 @@ class ConnectionHandler:
         self._rx_events: Dict[str, int] = {}
         self._rx_first_lines_left = int(os.getenv("DBG_FIRST_LINES", "5"))
         self._tx_request_screen = 0
+
+
+        self._derived = DerivedStateTracker(rom_path=instance_config.get("rom_path"))
 
         # ---- per-instance cache ----
         self.instance_game_data_cache = {
@@ -342,6 +346,7 @@ class ConnectionHandler:
             self.instance_game_data_cache["enemy_used_crosses_list"] = []
             self.instance_game_data_cache["is_player_beasted_out"] = False
             self.instance_game_data_cache["is_player_beasted_over"] = False
+            self._derived.reset()
             if self._should_log():
                 self._log(f"Port {self.port}: [Episode End] History Cleared.")
 
@@ -477,6 +482,24 @@ class ConnectionHandler:
                     comp_state["inside_window"] = bool(float(current_raw.get("inside_window", 0)))
                     if "image" not in comp_state and "screen_image" in comp_state:
                         comp_state["image"] = comp_state["screen_image"]
+
+                    # --- LIVE DERIVED STATE (streaming) ---
+                    # Provide "static" folders if available (from your per-instance cache)
+                    static_hint = {
+                        "cached_player_folder": self.instance_game_data_cache.get("cached_player_folder") or [],
+                        "cached_enemy_folder": self.instance_game_data_cache.get("cached_enemy_folder") or [],
+                    }
+                    d = self._derived.update(comp_state, static=static_hint)
+                    comp_state["derived"] = d
+
+                    # Optional convenience mirrors (so strategies don’t need to dig)
+                    comp_state["turn_index"] = d.get("turn_index", 0)
+                    comp_state["player_held_chips"] = (d.get("player") or {}).get("held_chips", [])
+                    comp_state["player_window_commit"] = (d.get("player") or {}).get("window_commit", {})
+                    comp_state["player_folder_used_mask"] = (d.get("player") or {}).get("folder_used_mask", [])
+                    comp_state["player_used_cross_mask"] = (d.get("player") or {}).get("used_cross_mask", [])
+                    comp_state["available_cross_idxs"] = d.get("available_cross_idxs")
+                    comp_state["game_version"] = d.get("game_version")
 
                     # Reward insert for previous action
                     if self.prev_raw_game_state_for_reward and self.prev_action_info_for_buffer:
@@ -621,6 +644,8 @@ class ConnectionHandler:
         # 🚀 RESET HISTORY ON CONNECTION
         self.instance_game_data_cache["player_used_crosses_list"] = []
         self.instance_game_data_cache["enemy_used_crosses_list"] = []
+        self._derived.reset()
+
 
         while self._is_running:
             try:

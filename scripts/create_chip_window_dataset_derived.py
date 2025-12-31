@@ -22,6 +22,14 @@ except Exception as e:
     )
 
 INVALID_CHIP_IDS = {255, 65535}
+FPS_DEFAULT = 60.0
+
+# Time discount: weight = 1 / (1 + duration_s / tau_s)
+# tau_s ~= "how long a typical good turn should take"
+TURN_TAU_DEFAULT_S = 6.0
+
+# Optional hard filter: if > 0, drop turns longer than this many seconds (default off)
+MAX_TURN_DEFAULT_S = 0.0
 
 
 # ---------------------------------------------------------------------
@@ -375,20 +383,61 @@ def _find_window_events(frames: List[Dict[str, Any]]) -> List[WindowEvent]:
 
     return events
 
+def _turn_time_weight(duration_s: float, *, tau_s: float) -> float:
+    """
+    Smooth penalty for long turns.
+    - duration_s -> 0 => weight ~ 1
+    - duration_s == tau_s => weight = 0.5
+    - duration_s >> tau_s => weight -> 0
+    """
+    d = max(0.0, float(duration_s))
+    tau = max(1e-6, float(tau_s))
+    return 1.0 / (1.0 + (d / tau))
 
-def _compute_outcome(frames: List[Dict[str, Any]], start: int, end: int) -> Tuple[int, int, int]:
+
+def _safe_div(a: float, b: float) -> float:
+    return float(a) / float(b) if float(b) != 0.0 else 0.0
+
+def _compute_outcome(
+    frames: List[Dict[str, Any]],
+    start: int,
+    end: int,
+    *,
+    fps: float,
+    tau_s: float,
+) -> Dict[str, Any]:
     """
     Outcome over [start, end):
-      - damage_dealt: enemy_hp decreases
-      - damage_taken: player_hp decreases
-      - net_yield: dealt - taken
+      - damage_dealt: enemy_hp decreases (raw sum)
+      - damage_taken: player_hp decreases (raw sum)
+      - net_yield: dealt - taken (raw)
+      - duration_frames / duration_s
+      - per-second metrics
+      - time-weighted metrics (penalizes long duration)
+
+    NOTE: We keep raw totals for compatibility, but provide normalized/weighted
+    fields for training/weighting.
     """
+    n = len(frames)
     if start < 0:
         start = 0
-    if end > len(frames):
-        end = len(frames)
-    if end <= start:
-        return 0, 0, 0
+    if end > n:
+        end = n
+    if end <= start or n == 0:
+        return {
+            "damage_dealt": 0,
+            "damage_taken": 0,
+            "net_yield": 0,
+            "duration_frames": 0,
+            "duration_s": 0.0,
+            "damage_dealt_per_s": 0.0,
+            "damage_taken_per_s": 0.0,
+            "net_yield_per_s": 0.0,
+            "turn_time_weight": 0.0,
+            "damage_dealt_weighted": 0.0,
+            "damage_taken_weighted": 0.0,
+            "net_yield_weighted": 0.0,
+        }
 
     p_prev = _as_int(frames[start].get("player_health"), 0)
     e_prev = _as_int(frames[start].get("enemy_health"), 0)
@@ -404,6 +453,7 @@ def _compute_outcome(frames: List[Dict[str, Any]], start: int, end: int) -> Tupl
         dp = p_prev - p
         de = e_prev - e
 
+        # ignore giant jumps (round boundaries / weird captures)
         if 0 < dp < 2000:
             taken += dp
         if 0 < de < 2000:
@@ -412,7 +462,32 @@ def _compute_outcome(frames: List[Dict[str, Any]], start: int, end: int) -> Tupl
         p_prev = p
         e_prev = e
 
-    return dealt, taken, dealt - taken
+    duration_frames = max(0, end - start)
+    fps_f = max(1e-6, float(fps))
+    duration_s = float(duration_frames) / fps_f
+
+    net = dealt - taken
+
+    dealt_ps = _safe_div(float(dealt), duration_s)
+    taken_ps = _safe_div(float(taken), duration_s)
+    net_ps = _safe_div(float(net), duration_s)
+
+    w = _turn_time_weight(duration_s, tau_s=float(tau_s))
+
+    return {
+        "damage_dealt": int(dealt),
+        "damage_taken": int(taken),
+        "net_yield": int(net),
+        "duration_frames": int(duration_frames),
+        "duration_s": float(duration_s),
+        "damage_dealt_per_s": float(dealt_ps),
+        "damage_taken_per_s": float(taken_ps),
+        "net_yield_per_s": float(net_ps),
+        "turn_time_weight": float(w),
+        "damage_dealt_weighted": float(dealt) * float(w),
+        "damage_taken_weighted": float(taken) * float(w),
+        "net_yield_weighted": float(net) * float(w),
+    }
 
 
 def _held_to_fixed(held: Any, *, n: int = 5) -> Tuple[List[int], List[int], List[bool]]:
@@ -477,7 +552,16 @@ def _fmt_frame_flags(frames: List[Dict[str, Any]], idx: int) -> str:
     return f"idx={idx} inside={int(inside)} cust={cust} em={em}"
 
 
-def build_samples_for_replay(replay_dir: Path, *, debug: bool = False, debug_examples_limit: int = 8) -> Tuple[List[Dict[str, Any]], ReplayDebugSummary]:
+def build_samples_for_replay(
+    replay_dir: Path,
+    *,
+    debug: bool = False,
+    debug_examples_limit: int = 8,
+    fps: float = FPS_DEFAULT,
+    turn_tau_s: float = TURN_TAU_DEFAULT_S,
+    max_turn_s: float = MAX_TURN_DEFAULT_S,
+) -> Tuple[List[Dict[str, Any]], ReplayDebugSummary]:
+
     actions_path = replay_dir / "actions.jsonl"
     static_path = replay_dir / "static_data.json"
     replay_name = replay_dir.name
@@ -581,7 +665,17 @@ def build_samples_for_replay(replay_dir: Path, *, debug: bool = False, debug_exa
         ex, ey = _extract_pos(open_f, "enemy_pos")
 
         # Outcome (commit -> next open)
-        dealt, taken, net = _compute_outcome(frames, ev.commit_idx, ev.next_open_idx)
+        outcome = _compute_outcome(
+            frames,
+            ev.commit_idx,
+            ev.next_open_idx,
+            fps=float(fps),
+            tau_s=float(turn_tau_s),
+        )
+
+        # Optional hard drop (off by default)
+        if float(max_turn_s) > 0.0 and float(outcome["duration_s"]) > float(max_turn_s):
+            continue
 
         # Labels from derived commit
         selected_any = bool(window_commit.get("selected_any", False))
@@ -680,9 +774,23 @@ def build_samples_for_replay(replay_dir: Path, *, debug: bool = False, debug_exa
             "close_chip_select_count": _as_int(window_commit.get("close_chip_select_count"), 0),
 
             # --- outcome (commit -> next open) ---
-            "damage_dealt": int(dealt),
-            "damage_taken": int(taken),
-            "net_yield": int(net),
+            "damage_dealt": int(outcome["damage_dealt"]),
+            "damage_taken": int(outcome["damage_taken"]),
+            "net_yield": int(outcome["net_yield"]),
+
+            # duration + time-normalized metrics
+            "turn_duration_frames": int(outcome["duration_frames"]),
+            "turn_duration_s": float(outcome["duration_s"]),
+            "damage_dealt_per_s": float(outcome["damage_dealt_per_s"]),
+            "damage_taken_per_s": float(outcome["damage_taken_per_s"]),
+            "net_yield_per_s": float(outcome["net_yield_per_s"]),
+
+            # time-discounted (useful for weighting)
+            "turn_time_weight": float(outcome["turn_time_weight"]),
+            "damage_dealt_weighted": float(outcome["damage_dealt_weighted"]),
+            "damage_taken_weighted": float(outcome["damage_taken_weighted"]),
+            "net_yield_weighted": float(outcome["net_yield_weighted"]),
+
 
             # Optional: close snapshot telemetry
             "p_hp_close": _as_int(close_f.get("player_health"), 0),
@@ -696,18 +804,22 @@ def build_samples_for_replay(replay_dir: Path, *, debug: bool = False, debug_exa
     return samples, dbg
 
 
-def _worker_build_samples(args: Tuple[str, bool, int]) -> Tuple[str, List[Dict[str, Any]], ReplayDebugSummary, Optional[str]]:
-    """
-    ProcessPool worker.
-    Returns (replay_name, samples, debug_summary, error_str)
-    """
-    replay_dir_str, debug, debug_examples_limit = args
+def _worker_build_samples(args: Tuple[str, bool, int, float, float, float]) -> Tuple[str, List[Dict[str, Any]], ReplayDebugSummary, Optional[str]]:
+    replay_dir_str, debug, debug_examples_limit, fps, turn_tau_s, max_turn_s = args
     rd = Path(replay_dir_str)
     try:
-        samples, dbg = build_samples_for_replay(rd, debug=debug, debug_examples_limit=debug_examples_limit)
+        samples, dbg = build_samples_for_replay(
+            rd,
+            debug=debug,
+            debug_examples_limit=debug_examples_limit,
+            fps=float(fps),
+            turn_tau_s=float(turn_tau_s),
+            max_turn_s=float(max_turn_s),
+        )
         return rd.name, samples, dbg, None
     except Exception as e:
         return rd.name, [], ReplayDebugSummary(replay=rd.name), str(e)
+
 
 
 # ---------------------------------------------------------------------
@@ -720,6 +832,10 @@ def main() -> None:
     ap.add_argument("--output_name", default="strategy_v2.jsonl", help="Output jsonl filename")
     ap.add_argument("--overwrite", action="store_true", help="Overwrite output file if it exists")
     ap.add_argument("--workers", type=int, default=0, help="Num worker processes (0 = os.cpu_count())")
+    ap.add_argument("--fps", type=float, default=FPS_DEFAULT, help="Frames per second for duration conversion")
+    ap.add_argument("--turn_tau_s", type=float, default=TURN_TAU_DEFAULT_S, help="Time-discount tau (seconds) for weighting")
+    ap.add_argument("--max_turn_s", type=float, default=MAX_TURN_DEFAULT_S, help="Drop turns longer than this many seconds (0 disables)")
+
 
     # Debug controls
     ap.add_argument("--debug", action="store_true", help="Print per-replay selected-cross detection stats + a few examples")
@@ -749,7 +865,10 @@ def main() -> None:
     debug_by_name: Dict[str, ReplayDebugSummary] = {}
     errors_by_name: Dict[str, str] = {}
 
-    job_args = [(str(p), bool(args.debug), int(args.debug_examples)) for p in replay_dirs]
+    job_args = [
+        (str(p), bool(args.debug), int(args.debug_examples), float(args.fps), float(args.turn_tau_s), float(args.max_turn_s))
+        for p in replay_dirs
+    ]
 
     with ProcessPoolExecutor(max_workers=workers) as ex:
         for name, samples, dbg, err in ex.map(_worker_build_samples, job_args):

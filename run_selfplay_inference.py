@@ -413,7 +413,7 @@ async def _run() -> None:
                         allow_actions_in_window=True, # Battle model shouldn't see window, but keep true for safety
                         mask_path=None
                     )
-                    print(f"[Dual] Loading PLANNING model (Critic) from {config.CRITIC_CKPT_PATH}...")
+                    print(f"[Dual] Loading PLANNING model (Critic) from {config.PLAN_CKPT_PATH}...")
                     # --- CHANGED: Use PlanningAgentStrategy ---
                     plan_strat = PlanningAgentStrategy(
                         model_path=config.PLAN_CKPT_PATH,
