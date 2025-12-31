@@ -35,6 +35,20 @@ FORM_MAPPING = [
 def _c(text: str, code: int) -> str:
     return f"\033[{code}m{text}\033[0m" if sys.stdout.isatty() else text
 
+def _coalesce(d: Dict[str, Any], *keys: str, default: Any = None) -> Any:
+    for k in keys:
+        if k in d and d[k] not in (None, ""):
+            return d[k]
+    return default
+
+def _as_int(v: Any, default: int = 0) -> int:
+    try:
+        if v is None or v == "":
+            return default
+        return int(float(v))
+    except Exception:
+        return default
+
 
 class ConnectionHandler:
     def __init__(
@@ -477,6 +491,8 @@ class ConnectionHandler:
                     if not isinstance(current_raw, dict):
                         continue
 
+
+
                     self._update_instance_game_data_cache(current_raw)
                     comp_state = {**current_raw, **self.instance_game_data_cache}
                     comp_state["inside_window"] = bool(float(current_raw.get("inside_window", 0)))
@@ -491,6 +507,7 @@ class ConnectionHandler:
                     }
                     d = self._derived.update(comp_state, static=static_hint)
                     comp_state["derived"] = d
+                    
 
                     # Optional convenience mirrors (so strategies don’t need to dig)
                     comp_state["turn_index"] = d.get("turn_index", 0)
@@ -500,6 +517,23 @@ class ConnectionHandler:
                     comp_state["player_used_cross_mask"] = (d.get("player") or {}).get("used_cross_mask", [])
                     comp_state["available_cross_idxs"] = d.get("available_cross_idxs")
                     comp_state["game_version"] = d.get("game_version")
+                    # ---- normalize server typos/aliases ----
+                    if "cust_gauge" not in current_raw:
+                        # server sends cust_gage (typo)
+                        if "cust_gage" in current_raw:
+                            current_raw["cust_gauge"] = current_raw["cust_gage"]
+                    current_raw["cust_gauge"] = _as_int(current_raw.get("cust_gauge"), 0)
+                    comp_state["cust_gauge"] = current_raw["cust_gauge"]
+                    # positions (critic features expect player_pos/enemy_pos in some places)
+                    if "player_pos" not in current_raw:
+                        current_raw["player_pos"] = current_raw.get("player_grid_position") or current_raw.get("player_position")
+                    if "enemy_pos" not in current_raw:
+                        current_raw["enemy_pos"] = current_raw.get("enemy_grid_position") or current_raw.get("enemy_position")
+                    comp_state["player_pos"] = current_raw.get("player_pos")
+                    comp_state["enemy_pos"] = current_raw.get("enemy_pos")
+
+                    
+
 
                     # Reward insert for previous action
                     if self.prev_raw_game_state_for_reward and self.prev_action_info_for_buffer:

@@ -680,6 +680,9 @@ class NGAgentStrategy:
                 return 1.0 if bool(game_state.get(key, False)) else 0.0
             except Exception:
                 return 0.0
+            
+        INVALID = {255, 65535}
+
 
         # Conservative normalizers; keep identical in training + inference.
         # If you know exact maxima, hardcode them.
@@ -693,7 +696,12 @@ class NGAgentStrategy:
         # Chip IDs are categorical; treat as numeric only if your conditioning head expects it.
         # Safer: keep both raw id and "has chip".
         p_chip = f("player_chip", 0.0)
+        if int(p_chip) in INVALID:
+            p_chip = 0.0
+
         p_active_chip = f("player_active_chip", 0.0)
+        if int(p_active_chip) in INVALID:
+            p_active_chip = 0.0
 
         inside_window = 1.0 if bool(float(game_state.get("inside_window", 0.0))) else 0.0
         cust_gauge = f("cust_gauge", 0.0) / 100.0  # if it's 0..100

@@ -144,7 +144,7 @@ CHIPS_DB_PATH = os.getenv("CHIPS_DB_PATH", "data/assets/chips.json")
 # Keep NG_CKPT_PATH for backward compat if needed, but point it to battle
 NG_CKPT_PATH = BATTLE_CKPT_PATH
 # NG_CKPT_PATH = os.getenv("NG_CKPT_PATH", os.path.join(PROJECT_ROOT, "weights", "ng.pt"))
-USE_NG_POLICY = 1
+USE_NG_POLICY = 0
 NG_DEVICE = os.getenv("NG_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
 # NEW: Use FP16 for speed on TensorCores
 NG_USE_FP16 = bool(int(os.getenv("NG_USE_FP16", "1"))) 
