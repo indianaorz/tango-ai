@@ -15,7 +15,7 @@ app = Flask(__name__)
 # We use os.path.abspath/normpath later to ensure Windows compatibility.
 LOG_DIRS = {
     "Battle": "logs/nitrogen_battle_cache_bellman",
-    "Planning": "logs/planning",
+    "Planning": "logs/conditioned_nitrogen_battle_cache_bellman",
     "RL": "logs/rl_battle",
     "Critic": "checkpoints/critic_hpdelta",
     "Critic_RL": "checkpoints/critic_rl",

@@ -385,7 +385,7 @@ class NgNitroGenPolicy(nn.Module):
             traceback.print_exc()
             raise
 
-    def _encode_with_tokenizer(self, frames: torch.Tensor) -> dict[str, Any]:
+    def _encode_with_tokenizer(self, frames: torch.Tensor, cond: Optional[torch.Tensor] = None) -> dict[str, Any]:
         if self.tokenizer is None:
             raise NgPolicyError("Tokenizer is not initialized.")
 
@@ -408,6 +408,18 @@ class NgNitroGenPolicy(nn.Module):
             T_vis = 1
 
         encoded_list: list[dict[str, Any]] = []
+
+        # cond expected [B, F] float32 on CPU or CUDA
+        cond_src = None
+        if torch.is_tensor(cond):
+            cond_src = cond
+            if cond_src.is_cuda:
+                cond_src = cond_src.detach().cpu()
+            cond_src = cond_src.to(dtype=torch.float32, copy=False)
+            if cond_src.ndim == 1:
+                cond_src = cond_src.unsqueeze(0)
+            if int(cond_src.shape[0]) != int(B):
+                raise NgPolicyError(f"cond batch mismatch: frames B={B}, cond B={int(cond_src.shape[0])}")
 
         for i in range(B):
             vis = frames_src[i]  # [V_in,3,H,W]
@@ -447,6 +459,22 @@ class NgNitroGenPolicy(nn.Module):
                 "game": "bn6",
             }
 
+            # ---- NEW: conditioning injection ----
+            if cond_src is not None:
+                # Each sample gets [1, F]
+                sample["game_features"] = cond_src[i].unsqueeze(0)
+                sample["has_game_features"] = torch.ones((1,), dtype=torch.bool)
+            else:
+                # If you trained with optional conditioning, keep the “missing” sentinel consistent:
+                # Either omit entirely (if tokenizer supports missing), OR provide zeros + has=0.
+                if os.getenv("NG_COND_ALWAYS_PRESENT", "0").strip() == "1":
+                    # If your tokenizer/model requires the keys to exist.
+                    Fdim = int(os.getenv("NG_COND_DIM", "0"))
+                    if Fdim > 0:
+                        sample["game_features"] = torch.zeros((1, Fdim), dtype=torch.float32)
+                        sample["has_game_features"] = torch.zeros((1,), dtype=torch.bool)
+
+
             enc = self.tokenizer.encode(sample)
             encoded_list.append(enc)
 
@@ -459,6 +487,7 @@ class NgNitroGenPolicy(nn.Module):
         self,
         frames: torch.Tensor,
         *,
+        cond: Optional[torch.Tensor] = None,   # <-- NEW
         seed: Optional[int] = None,
         take_step: int = 0,
         return_continuous: bool = False,
@@ -466,13 +495,14 @@ class NgNitroGenPolicy(nn.Module):
         raw_max_items: int = 16,
         return_sequence: bool = False,
     ) -> Any:
+
         
         try:
             x = frames
             if x.dtype != torch.float32: x = x.float()
 
             if self._use_tokenizer and self.tokenizer is not None:
-                data = self._encode_with_tokenizer(x)
+                data = self._encode_with_tokenizer(x, cond=cond)
             else:
                 raise NgPolicyError("Manual token construction not supported.")
 
@@ -517,6 +547,8 @@ class NgNitroGenPolicy(nn.Module):
                     "sa_token_ids": _summarize_tensor(data.get("sa_token_ids"), max_items=raw_max_items),
                 },
                 "primary": _summarize_tensor(primary, max_items=raw_max_items),
+                "game_features": _summarize_tensor(data.get("game_features"), max_items=raw_max_items),
+                "has_game_features": _summarize_tensor(data.get("has_game_features"), max_items=raw_max_items),
             }
             return primary, raw_summary
         

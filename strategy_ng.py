@@ -110,11 +110,11 @@ class GlobalBatchManager:
                     raise ValueError("GlobalBatchManager not initialized (policy/device missing).")
                 cls._instance = cls(policy, device, use_fp16)
             return cls._instance
-
     def infer(
         self,
         frame_tensor: torch.Tensor,
         *,
+        cond: Optional[torch.Tensor] = None,   # <-- NEW
         emit_raw: bool = False,
         seed: Optional[int] = None,
         return_sequence: bool = False,
@@ -135,11 +135,13 @@ class GlobalBatchManager:
                     "event": my_event,
                     "result": my_result,
                     "frame": frame_tensor,
+                    "cond": cond,               # <-- NEW
                     "seed": seed,
                     "emit_raw": bool(emit_raw),
                     "return_sequence": bool(return_sequence),
                 }
             )
+
             should_trigger = (len(self.pending_inputs) == 1)
 
         if should_trigger:
@@ -164,6 +166,27 @@ class GlobalBatchManager:
         frames = [item["frame"] for item in batch_data]
         try:
             batch_tensor = torch.cat(frames, dim=0)
+            conds = [item.get("cond") for item in batch_data]
+            cond_tensor = None
+
+            # If any caller provided conditioning, batch it; missing entries become zeros.
+            first = next((c for c in conds if torch.is_tensor(c)), None)
+            if first is not None:
+                # Expect each c is [1, F] on CPU; standardize
+                F = int(first.shape[-1])
+                built: List[torch.Tensor] = []
+                for c in conds:
+                    if torch.is_tensor(c):
+                        cc = c.to(dtype=torch.float32, device="cpu")
+                        if cc.ndim == 1:
+                            cc = cc.unsqueeze(0)
+                        if cc.shape[-1] != F:
+                            raise RuntimeError(f"cond_dim_mismatch: got {tuple(cc.shape)} expected (*,{F})")
+                        built.append(cc)
+                    else:
+                        built.append(torch.zeros((1, F), dtype=torch.float32))
+                cond_tensor = torch.cat(built, dim=0)  # [B, F]
+
         except Exception as e:
             for item in batch_data:
                 item["result"]["error"] = f"batch_cat_failed: {e!r}"
@@ -185,6 +208,7 @@ class GlobalBatchManager:
                 if emit_raw:
                     primary, raw_out = self.policy(
                         batch_dev,
+                        cond=cond_tensor,  
                         seed=seed,
                         take_step=0,
                         return_continuous=True,
@@ -196,6 +220,7 @@ class GlobalBatchManager:
                 else:
                     primary = self.policy(
                         batch_dev,
+                        cond=cond_tensor,  
                         seed=seed,
                         take_step=0,
                         return_continuous=True,
@@ -638,6 +663,61 @@ class NGAgentStrategy:
 
         return torch.stack(xs, dim=0).unsqueeze(0).contiguous()  # [1,V,3,H,W]
 
+    def _build_cond_vec(self, game_state: Dict[str, Any]) -> torch.Tensor:
+        """
+        Returns [1, F] float32 on CPU.
+        Keep it stable + normalized so training/inference match.
+        """
+        def f(key: str, default: float = 0.0) -> float:
+            try:
+                v = game_state.get(key, default)
+                return float(v)
+            except Exception:
+                return float(default)
+
+        def b(key: str) -> float:
+            try:
+                return 1.0 if bool(game_state.get(key, False)) else 0.0
+            except Exception:
+                return 0.0
+
+        # Conservative normalizers; keep identical in training + inference.
+        # If you know exact maxima, hardcode them.
+        HP_MAX = float(os.getenv("NG_HP_MAX", "3000"))
+        CHARGE_MAX = float(os.getenv("NG_CHARGE_MAX", "4"))
+
+        p_hp = f("player_health", 0.0) / max(1.0, HP_MAX)
+        e_hp = f("enemy_health", 0.0) / max(1.0, HP_MAX)
+        p_charge = f("player_charge", 0.0) / max(1.0, CHARGE_MAX)
+
+        # Chip IDs are categorical; treat as numeric only if your conditioning head expects it.
+        # Safer: keep both raw id and "has chip".
+        p_chip = f("player_chip", 0.0)
+        p_active_chip = f("player_active_chip", 0.0)
+
+        inside_window = 1.0 if bool(float(game_state.get("inside_window", 0.0))) else 0.0
+        cust_gauge = f("cust_gauge", 0.0) / 100.0  # if it's 0..100
+
+        turn_index = f("turn_index", 0.0) / 50.0  # arbitrary scaling
+        cross_id = f("player_cross_id", 0.0) / 10.0
+        beasted = 1.0 if bool(game_state.get("is_player_beasted_out", False)) else 0.0
+
+        # Feature vector (keep order fixed forever)
+        vec = [
+            p_hp, e_hp,
+            p_charge,
+            inside_window,
+            cust_gauge,
+            turn_index,
+            cross_id,
+            beasted,
+            p_chip / 512.0,        # rough scale; replace if you do proper embedding
+            p_active_chip / 512.0, # rough scale
+            1.0,                   # has_conditioning flag (present)
+        ]
+        return torch.tensor(vec, dtype=torch.float32).unsqueeze(0)  # [1, F]
+
+
     def _seed_for(self, port: int) -> Optional[int]:
         if not self._use_seed:
             return None
@@ -673,12 +753,16 @@ class NGAgentStrategy:
         Blocking: runs model once, returns (keys, ng_keys, new_plan_id, raw_debug).
         keys/ng_keys are 16-bit binary strings (mapped + raw intent).
         """
+        cond = self._build_cond_vec(game_state)
+
         action_seq, raw = self.batch_mgr.infer(
             seq,
+            cond=cond,                 # <-- NEW
             emit_raw=self._emit_ng_raw,
             seed=seed,
             return_sequence=True,
         )
+
 
         # action_seq comes back as [1, T, 25] OR [1, 25]
         x = action_seq.squeeze(0)
