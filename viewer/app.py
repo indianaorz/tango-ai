@@ -1962,49 +1962,54 @@ def _densify_and_smooth_masked(
     *,
     mask: List[bool],
     ema_alpha: float,
-) -> List[Optional[float]]:
+) -> tuple[List[Optional[float]], List[Optional[float]]]:
     """
+    Returns:
+      (smoothed, densified_pre_ema)
+
     (1) coerce -> dense (None where missing / NaN)
     (2) linear densify within mask segments
     (3) EMA smooth within mask segments, resetting at mask boundaries
     """
     dense = _coerce_values_by_frame(sparse, n_frames)
-    dense = _densify_linear_masked(dense, mask)
-    dense = _ema_smooth_masked(dense, mask, alpha=ema_alpha)
-    return dense
+    densified = _densify_linear_masked(dense, mask)
+    smoothed = _ema_smooth_masked(densified, mask, alpha=ema_alpha)
+    return smoothed, densified
 
 
 # -----------------------------------------------------------------------------
-# Critic init
+# Critic init (critic_minimal)
 # -----------------------------------------------------------------------------
 
 _CRITIC = None
 _CRITIC_ERR = None
 
-_DEFAULT_CRITIC_CKPT = r"C:\Users\leeor\FFCO\ai\tango-ai\checkpoints\critic_rl\v10_full\last.pt"
+_DEFAULT_CRITIC_MINIMAL_CKPT = r"C:\Users\leeor\FFCO\ai\tango-ai\checkpoints\critic_minimal\minq_v2_tanh\best.pt"
 _DEFAULT_CRITIC_DEVICE = "cuda"
 _DEFAULT_BATCH_SEQS = 256
 
 def _init_critic() -> None:
     global _CRITIC, _CRITIC_ERR
     try:
-        from critic_infer import CriticRunner
+        from viewer.critic_minimal_infer import MinimalCriticRunner
 
-        ckpt = (os.environ.get("CRITIC_RL_CKPT", "").strip() or _DEFAULT_CRITIC_CKPT).strip()
-        device = (os.environ.get("CRITIC_RL_DEVICE", "").strip() or _DEFAULT_CRITIC_DEVICE).strip()
+        ckpt = (os.environ.get("CRITIC_MINIMAL_CKPT", "").strip() or _DEFAULT_CRITIC_MINIMAL_CKPT).strip()
+        device = (os.environ.get("CRITIC_MINIMAL_DEVICE", "").strip() or _DEFAULT_CRITIC_DEVICE).strip()
+        batch_seqs = int(os.environ.get("CRITIC_MINIMAL_BATCH_SEQS", str(_DEFAULT_BATCH_SEQS)).strip() or str(_DEFAULT_BATCH_SEQS))
+        use_amp = (os.environ.get("CRITIC_MINIMAL_AMP", "1").strip() != "0")
 
         if not ckpt:
-            print("[Critic] No checkpoint path configured.")
+            print("[CriticMinimal] No checkpoint path configured.")
             return
 
-        print(f"[Critic] Loading model from: {ckpt} on {device}...")
-        _CRITIC = CriticRunner(ckpt_path=ckpt, device=device, use_amp=True, batch_seqs=_DEFAULT_BATCH_SEQS)
+        print(f"[CriticMinimal] Loading model from: {ckpt} on {device}...")
+        _CRITIC = MinimalCriticRunner(ckpt_path=ckpt, device=device, use_amp=use_amp, batch_seqs=batch_seqs)
         _CRITIC_ERR = None
-        print("[Critic] Model loaded successfully.")
+        print("[CriticMinimal] Model loaded successfully.")
     except Exception as e:
         _CRITIC = None
         _CRITIC_ERR = str(e)
-        print(f"[Critic] Failed to load model: {e}")
+        print(f"[CriticMinimal] Failed to load model: {e}")
 
 _init_critic()
 
@@ -2398,74 +2403,79 @@ def serve_inputs(replay_name: str):
             cache_hit = False
 
 
-    # 5) Critic inference (ONLY if cache missed)
-    if not cache_hit and _CRITIC is not None and derived_data:
+    # 5) Critic inference (critic_minimal)
+    if _CRITIC is not None and response["frames"] and derived_data:
         try:
-            # Canonical mask: exactly what training filtered on (raw frame cust_gauge > 0)
+            # Canonical mask: match training notion of "battle" (cust_gauge > 0)
             cust_mask = [(int((f or {}).get("cust_gauge") or 0) > 0) for f in response["frames"]]
             if len(cust_mask) != n_frames:
                 cust_mask = cust_mask[:n_frames] + [False] * max(0, n_frames - len(cust_mask))
 
-            stride = int(os.environ.get("CRITIC_RL_STRIDE", "2").strip() or "2")
-            trained_seq_len = getattr(_CRITIC, "trained_seq_len", None) or getattr(_CRITIC, "trained_seq_len", None)
-            seq_len = int(os.environ.get("CRITIC_RL_SEQ_LEN", str(trained_seq_len or 64)).strip())
-            ema_alpha = float(os.environ.get("CRITIC_RL_EMA_ALPHA", "0.25").strip() or "0.25")
+            hold = int(os.environ.get("CRITIC_MINIMAL_HOLD", "4").strip() or "4")
+            seq_len = int(os.environ.get("CRITIC_MINIMAL_SEQ_LEN", "192").strip() or "192")
+            start_stride = int(os.environ.get("CRITIC_MINIMAL_START_STRIDE", "1").strip() or "1")
+            ema_alpha = float(os.environ.get("CRITIC_MINIMAL_EMA_ALPHA", "0.25").strip() or "0.25")
 
-            print(f"[Serve] Inferencing Critic (stride={stride}, seq_len={seq_len}, ema_alpha={ema_alpha})...")
+            # If 1, require cust>0 starts (recommended for matching your cache/training intent)
+            require_cust_gt0 = (os.environ.get("CRITIC_MINIMAL_REQUIRE_CUST_GT0", "1").strip() != "0")
+
+            print(f"[Serve] Inferencing CriticMinimal (hold={hold}, seq_len={seq_len}, start_stride={start_stride}, ema_alpha={ema_alpha})...")
 
             t0 = time.time()
-            res = _CRITIC.infer_from_derived(
+            res = _CRITIC.infer_from_frames(
                 frames=response["frames"],
-                static=response["static"],
-                derived=derived_data,
-                stride=stride,
+                hold=hold,
                 seq_len=seq_len,
-                require_cust_gt0=None, 
+                start_stride=start_stride,
+                require_cust_gt0=require_cust_gt0,
             )
             dt = time.time() - t0
 
-            # 1) sparse -> dense (None where missing)
-            dense_raw = _coerce_values_by_frame(res.values_by_frame, n_frames)
+            # res.values_by_frame is sparse at raw indices (0,hold,2hold,...)
+            # Densify + smooth ONLY inside cust_mask segments (same pattern as before)
+            critic_values, densified_pre_ema = _densify_and_smooth_masked(
+                res.values_by_frame,
+                n_frames,
+                mask=cust_mask,
+                ema_alpha=float(ema_alpha),
+            )
 
-            # 2) densify/interpolate ONLY within cust_mask segments
-            densified = _densify_linear_masked(dense_raw, cust_mask)
-
-            # 3) EMA smooth ONLY within cust_mask segments
-            critic_values = _ema_smooth_masked(densified, cust_mask, alpha=ema_alpha)
-
-            # Store aux for probe
+            # IMPORTANT: store aux needed by probe (exact EMA-at-idx override)
             CRITIC_AUX_CACHE[replay_name] = {
                 "mask": cust_mask,
-                "densified": densified,
+                "densified": densified_pre_ema,   # pre-EMA so probe can override a raw point
                 "ema_alpha": float(ema_alpha),
-                "stride": int(stride),
+                "hold": int(hold),
                 "seq_len": int(seq_len),
+                "start_stride": int(start_stride),
+                "require_cust_gt0": bool(require_cust_gt0),
             }
-            CRITIC_AUX_CACHE.move_to_end(replay_name)
-            if len(CRITIC_AUX_CACHE) > MAX_CACHE_SIZE:
-                CRITIC_AUX_CACHE.popitem(last=False)
 
             critic_meta = dict(res.meta or {})
             critic_meta.update({
-                "source": "inference",
-                "stride": stride,
-                "seq_len": seq_len,
-                "ema_alpha": ema_alpha,
+                "source": "critic_minimal",
+                "took_s": float(dt),
+                "ema_alpha": float(ema_alpha),
+                "hold": int(hold),
+                "seq_len": int(seq_len),
+                "start_stride": int(start_stride),
+                "require_cust_gt0": bool(require_cust_gt0),
             })
 
-            print(f"[Serve] Inference complete in {dt:.3f}s.")
+
+            print(f"[Serve] CriticMinimal inference complete in {dt:.3f}s.")
 
         except Exception as e:
             critic_values = None
             critic_meta = {"error": str(e)}
-            print(f"[Serve] Critic inference failed: {e}")
+            print(f"[Serve] CriticMinimal inference failed: {e}")
             import traceback
             traceback.print_exc()
 
-        # VRAM cleanup
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
 
     # 6) Attach critic_v
     if critic_values is not None:
@@ -2648,13 +2658,541 @@ def _critic_probe_last_value(
     return float(v)
 
 
+def _bitmask_to_buttons(mask: int, keys: List[str]) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for i, k in enumerate(keys):
+        out[k] = 1 if ((mask >> i) & 1) else 0
+    return out
+
+
+def _build_minimal_probe_window(
+    *,
+    frames: List[Dict[str, Any]],
+    end_frame: int,
+    hold: int,
+    seq_len: int,
+) -> tuple[List[Dict[str, Any]], int, int]:
+    """
+    Builds the same kind of window as api_critic_probe, ending exactly at end_frame.
+    Window length in frames = (seq_len - 1) * hold + 1
+
+    Returns: (window_frames, window_abs_start, window_abs_end)
+    """
+    n = len(frames)
+    end_frame = max(0, min(int(end_frame), n - 1))
+
+    win_len = (int(seq_len) - 1) * int(hold) + 1
+    start_abs = int(end_frame) - (win_len - 1)
+
+    window: List[Dict[str, Any]] = []
+    for t in range(win_len):
+        src_i = start_abs + t
+        if src_i < 0:
+            src_i = 0
+        if src_i >= n:
+            src_i = n - 1
+        row = frames[src_i]
+        window.append(row if isinstance(row, dict) else {})
+
+    return window, int(start_abs), int(end_frame)
+
+
+def _minimal_raw_value_for_overrides(
+    runner,
+    *,
+    base_window: List[Dict[str, Any]],
+    overrides: Dict[str, int],
+    hold: int,
+    seq_len: int,
+    start_stride: int,
+    require_cust_gt0: bool,
+) -> float:
+    """
+    Runs critic_minimal on base_window, overriding ONLY the endpoint buttons.
+    Returns the raw model output at the endpoint (last element).
+    """
+    if not base_window:
+        raise ValueError("empty window")
+
+    # shallow copy window list; copy endpoint dict only (avoid mutating base)
+    window = list(base_window)
+    window[-1] = _apply_button_overrides(window[-1], overrides)
+
+    res = runner.infer_from_frames(
+        frames=window,
+        hold=int(hold),
+        seq_len=int(seq_len),
+        start_stride=int(start_stride),
+        require_cust_gt0=bool(require_cust_gt0),
+    )
+
+    raw_dense = _coerce_values_by_frame(getattr(res, "values_by_frame", []), len(window))
+    raw_last = raw_dense[-1] if raw_dense else None
+    if raw_last is None or not _is_finite(raw_last):
+        raise RuntimeError("no finite raw value at endpoint")
+    return float(raw_last)
+
+
+def _ema_prev_at_idx(
+    *,
+    densified: List[Optional[float]],
+    mask: List[bool],
+    alpha: float,
+    idx: int,
+) -> Optional[float]:
+    """
+    EMA at idx-1 inside the current mask segment.
+    Used to cheaply recompute EMA at idx for many candidate raw values:
+      ema_idx = raw if ema_prev is None else alpha*raw + (1-alpha)*ema_prev
+    """
+    if idx <= 0:
+        return None
+    return _ema_value_at_idx(densified=densified, mask=mask, alpha=alpha, idx=idx - 1, override_value=None)
+
+@app.route("/api/critic_find_best", methods=["POST"])
+def api_critic_find_best():
+    """
+    Exhaustive search over all possible PROBE_KEYS button states (pruned).
+    Returns the best controller mask for the probed frame (snapped to hold grid).
+
+    Body:
+      {
+        replay: str,
+        frame_idx: int,
+        keys?: [str],          # optional; default is standard keys (no START/BACK)
+        top_k?: int            # optional; default 5
+      }
+    """
+    global _CRITIC, _CRITIC_ERR
+
+    # ---------------------------------------------------------------------
+    # Globals / consts (NO env vars)
+    # ---------------------------------------------------------------------
+    CRITIC_FIND_BEST_BATCH_SEQS = 16384  # push GPU; reduce if OOM
+    CRITIC_FIND_BEST_MAX_STATES = None   # None => no cap
+
+    # Keys we will never search over (ignored entirely)
+    _IGNORED_KEYS = {"START", "BACK"}  # START + SELECT(BACK)
+
+    # DPAD mutual exclusion constraints
+    _DPAD_VERT = ("DPAD_UP", "DPAD_DOWN")
+    _DPAD_HORZ = ("DPAD_LEFT", "DPAD_RIGHT")
+
+    # Shoulder constraint: only allowed when cust_gauge==100
+    _SHOULDERS = ("LEFT_SHOULDER", "RIGHT_SHOULDER")
+
+    print("[API] /api/critic_find_best hit")
+
+    payload = request.get_json(silent=True) or {}
+    replay = payload.get("replay", "")
+    frame_idx = payload.get("frame_idx", None)
+
+    # Default probe set (no START/BACK)
+    default_keys = [
+        "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT",
+        "EAST", "SOUTH",
+        "LEFT_SHOULDER", "RIGHT_SHOULDER",
+    ]
+
+    keys_in = payload.get("keys", None)
+    if not isinstance(keys_in, list) or not keys_in:
+        keys_in = default_keys
+
+    # normalize + filter ignored
+    keys = []
+    for k in keys_in:
+        ks = str(k)
+        if ks in _IGNORED_KEYS:
+            continue
+        keys.append(ks)
+
+    # de-dupe preserving order
+    seen = set()
+    keys = [k for k in keys if not (k in seen or seen.add(k))]
+
+    try:
+        top_k = int(payload.get("top_k", 5))
+    except Exception:
+        top_k = 5
+    top_k = max(1, min(top_k, 20))
+
+    if not isinstance(replay, str) or not replay.strip():
+        return jsonify({"ok": False, "note": "bad request: missing replay"}), 400
+    try:
+        frame_idx = int(frame_idx)
+    except Exception:
+        return jsonify({"ok": False, "note": "bad request: frame_idx must be int"}), 400
+
+    # Ensure critic is initialized
+    if _CRITIC is None and _CRITIC_ERR is None:
+        _init_critic()
+    if _CRITIC is None:
+        err = _CRITIC_ERR or "critic not available"
+        return jsonify({"ok": False, "note": f"critic init error: {err}"}), 500
+
+    # Load frames
+    try:
+        frames = _load_replay_frames_for_probe(replay)
+    except Exception as e:
+        return jsonify({"ok": False, "note": f"load frames error: {e}"}), 500
+
+    n = len(frames)
+    if n <= 0:
+        return jsonify({"ok": False, "note": "no frames"}), 400
+    frame_idx = max(0, min(int(frame_idx), n - 1))
+
+    # Match /inputs config (keep your current sources of truth here)
+    # NOTE: You asked "no env var"; if you want these const too, say so and I’ll inline them.
+    try:
+        hold = int(os.environ.get("CRITIC_MINIMAL_HOLD", "4").strip() or "4")
+    except Exception:
+        hold = 4
+    try:
+        seq_len = int(os.environ.get("CRITIC_MINIMAL_SEQ_LEN", "192").strip() or "192")
+    except Exception:
+        seq_len = 192
+    try:
+        start_stride = int(os.environ.get("CRITIC_MINIMAL_START_STRIDE", "1").strip() or "1")
+    except Exception:
+        start_stride = 1
+    try:
+        ema_alpha = float(os.environ.get("CRITIC_MINIMAL_EMA_ALPHA", "0.25").strip() or "0.25")
+    except Exception:
+        ema_alpha = 0.25
+
+    require_cust_gt0 = (os.environ.get("CRITIC_MINIMAL_REQUIRE_CUST_GT0", "1").strip() != "0")
+
+    if hold <= 0:
+        return jsonify({"ok": False, "note": f"bad config: hold<=0 ({hold})"}), 500
+    if seq_len <= 1:
+        return jsonify({"ok": False, "note": f"bad config: seq_len<=1 ({seq_len})"}), 500
+
+    # Ensure aux exists (same as probe)
+    aux = CRITIC_AUX_CACHE.get(replay)
+    if aux is None:
+        cust_mask = [(int((f or {}).get("cust_gauge") or 0) > 0) for f in frames]
+        if len(cust_mask) != n:
+            cust_mask = cust_mask[:n] + [False] * max(0, n - len(cust_mask))
+
+        try:
+            res_full = _CRITIC.infer_from_frames(
+                frames=frames,
+                hold=int(hold),
+                seq_len=int(seq_len),
+                start_stride=int(start_stride),
+                require_cust_gt0=bool(require_cust_gt0),
+            )
+            dense = _coerce_values_by_frame(res_full.values_by_frame, n)
+            densified = _densify_linear_masked(dense, cust_mask)
+            aux = {
+                "mask": cust_mask,
+                "densified": densified,
+                "ema_alpha": float(ema_alpha),
+                "hold": int(hold),
+                "seq_len": int(seq_len),
+                "start_stride": int(start_stride),
+                "require_cust_gt0": bool(require_cust_gt0),
+            }
+            CRITIC_AUX_CACHE[replay] = aux
+        except Exception as e:
+            return jsonify({"ok": False, "note": f"aux build failed: {e}"}), 500
+
+    mask: List[bool] = aux["mask"]
+    densified_full: List[Optional[float]] = aux["densified"]
+    alpha_full: float = float(aux["ema_alpha"])
+
+    # Snap to hold grid
+    effective_frame = int(frame_idx) - (int(frame_idx) % int(hold))
+    effective_frame = max(0, min(effective_frame, n - 1))
+
+    # If we’re outside battle mask, searching is meaningless
+    if not (0 <= effective_frame < len(mask)) or not mask[effective_frame]:
+        return jsonify(
+            {
+                "ok": True,
+                "best": None,
+                "top": [],
+                "meta": {
+                    "frame_requested": int(frame_idx),
+                    "frame_effective": int(effective_frame),
+                    "hold": int(hold),
+                    "seq_len": int(seq_len),
+                    "ema_alpha": float(alpha_full),
+                    "cust_mask_at_effective": False,
+                    "keys": list(keys),
+                },
+                "note": "effective frame is outside battle mask (cust_gauge==0); no search performed",
+            }
+        )
+
+    # Shoulder gating
+    cust_here = int((frames[effective_frame] or {}).get("cust_gauge") or 0)
+    allow_shoulders = (cust_here == 100)
+
+    # Precompute EMA at idx-1 once
+    ema_prev = _ema_prev_at_idx(
+        densified=densified_full, mask=mask, alpha=alpha_full, idx=int(effective_frame)
+    )
+
+    # Build base window once
+    base_window, win_start, win_end = _build_minimal_probe_window(
+        frames=frames,
+        end_frame=int(effective_frame),
+        hold=int(hold),
+        seq_len=int(seq_len),
+    )
+
+    # ---------------------------------------------------------------------
+    # Pruned enumeration
+    # ---------------------------------------------------------------------
+    t0 = time.time()
+    K = len(keys)
+    if K <= 0 or K > 24:
+        return jsonify({"ok": False, "note": f"refusing search: keys size {K} (expected 1..24)"}), 400
+
+    bit = {k: i for i, k in enumerate(keys)}
+
+    def _set_bit(m: int, k: str, v: int) -> int:
+        i = bit.get(k, None)
+        if i is None:
+            return m
+        if v:
+            return m | (1 << i)
+        return m & ~(1 << i)
+
+    # Build DPAD combo masks (mutual exclusion)
+    dpad_masks: List[int] = [0]
+
+    has_up = _DPAD_VERT[0] in bit
+    has_dn = _DPAD_VERT[1] in bit
+    has_lt = _DPAD_HORZ[0] in bit
+    has_rt = _DPAD_HORZ[1] in bit
+
+    if has_up or has_dn or has_lt or has_rt:
+        dpad_masks = []
+        vert_states = [
+            {},  # neither
+            {_DPAD_VERT[0]: 1},  # up
+            {_DPAD_VERT[1]: 1},  # down
+        ]
+        horz_states = [
+            {},  # neither
+            {_DPAD_HORZ[0]: 1},  # left
+            {_DPAD_HORZ[1]: 1},  # right
+        ]
+        for vs in vert_states:
+            for hs in horz_states:
+                mm = 0
+                for k, v in vs.items():
+                    mm = _set_bit(mm, k, v)
+                for k, v in hs.items():
+                    mm = _set_bit(mm, k, v)
+                dpad_masks.append(mm)
+
+    # Remaining keys (independent toggles) except shoulders (gated)
+    free_keys: List[str] = []
+    for k in keys:
+        if k in _IGNORED_KEYS:
+            continue
+        if k in _DPAD_VERT or k in _DPAD_HORZ:
+            continue
+        if k in _SHOULDERS:
+            continue
+        free_keys.append(k)
+
+    # Shoulder keys included only if allowed; otherwise forced 0 (so excluded from enumeration)
+    shoulder_keys: List[str] = []
+    if allow_shoulders:
+        for k in _SHOULDERS:
+            if k in bit:
+                shoulder_keys.append(k)
+
+    # Build all valid bitmasks (usually tiny: 9 * 2^(free + shoulder_allowed))
+    masks: List[int] = []
+    base_list = dpad_masks
+
+    # enumerate free keys
+    for base in base_list:
+        m0s = [base]
+        for k in free_keys:
+            i = bit[k]
+            nexts = []
+            for mm in m0s:
+                nexts.append(mm)              # k=0
+                nexts.append(mm | (1 << i))   # k=1
+            m0s = nexts
+        # enumerate shoulders if allowed
+        if shoulder_keys:
+            for k in shoulder_keys:
+                i = bit[k]
+                nexts = []
+                for mm in m0s:
+                    nexts.append(mm)
+                    nexts.append(mm | (1 << i))
+                m0s = nexts
+        masks.extend(m0s)
+
+    # Optional cap
+    if CRITIC_FIND_BEST_MAX_STATES is not None:
+        masks = masks[: int(CRITIC_FIND_BEST_MAX_STATES)]
+
+    total = 1 << K
+    best = {"mask": 0, "raw": -1e30, "v": -1e30}
+    top: List[Dict[str, Any]] = []
+
+    def push_top(item: Dict[str, Any]) -> None:
+        top.append(item)
+        top.sort(key=lambda x: float(x["v"]), reverse=True)
+        del top[top_k:]
+
+    def score_from_raw(raw_val: float) -> float:
+        if ema_prev is None:
+            return float(raw_val)
+        return float(alpha_full) * float(raw_val) + (1.0 - float(alpha_full)) * float(ema_prev)
+
+    # Score in big GPU batches if supported
+    batch_seqs = int(CRITIC_FIND_BEST_BATCH_SEQS)
+    batch_seqs = max(1, min(batch_seqs, 32768))
+
+    if hasattr(_CRITIC, "infer_last_raw_batch"):
+        for off in range(0, len(masks), batch_seqs):
+            chunk_masks = masks[off : off + batch_seqs]
+            overrides_list = [_bitmask_to_buttons(int(m), keys) for m in chunk_masks]
+
+            # If shoulders are NOT allowed, forcibly clear them in overrides (belt+suspenders).
+            if not allow_shoulders:
+                for ov in overrides_list:
+                    for sk in _SHOULDERS:
+                        if sk in ov:
+                            ov[sk] = 0
+
+            try:
+                try:
+                    raws = _CRITIC.infer_last_raw_batch(
+                        frames_window=base_window,
+                        overrides_list=overrides_list,
+                        hold=int(hold),
+                        seq_len=int(seq_len),
+                        start_stride=int(start_stride),
+                        require_cust_gt0=bool(require_cust_gt0),
+                        batch_seqs=int(batch_seqs),
+                    )
+                except TypeError:
+                    # older signature
+                    raws = _CRITIC.infer_last_raw_batch(
+                        frames_window=base_window,
+                        overrides_list=overrides_list,
+                        hold=int(hold),
+                        seq_len=int(seq_len),
+                        start_stride=int(start_stride),
+                        require_cust_gt0=bool(require_cust_gt0),
+                    )
+            except Exception as e:
+                return jsonify({"ok": False, "note": f"batch infer failed: {e}"}), 500
+
+            for m, raw in zip(chunk_masks, raws):
+                if raw is None or not _is_finite(raw):
+                    continue
+                rawf = float(raw)
+                vf = float(score_from_raw(rawf))
+                if vf > float(best["v"]):
+                    best = {"mask": int(m), "raw": rawf, "v": vf}
+                push_top({"mask": int(m), "raw": rawf, "v": vf})
+    else:
+        # fallback (slow)
+        for m in masks:
+            overrides = _bitmask_to_buttons(int(m), keys)
+            if not allow_shoulders:
+                for sk in _SHOULDERS:
+                    if sk in overrides:
+                        overrides[sk] = 0
+
+            try:
+                raw = _minimal_raw_value_for_overrides(
+                    _CRITIC,
+                    base_window=base_window,
+                    overrides=overrides,
+                    hold=int(hold),
+                    seq_len=int(seq_len),
+                    start_stride=int(start_stride),
+                    require_cust_gt0=bool(require_cust_gt0),
+                )
+            except Exception:
+                continue
+
+            vf = float(score_from_raw(float(raw)))
+            if vf > float(best["v"]):
+                best = {"mask": int(m), "raw": float(raw), "v": vf}
+            push_top({"mask": int(m), "raw": float(raw), "v": vf})
+
+    dt = time.time() - t0
+
+    best_buttons = _bitmask_to_buttons(int(best["mask"]), keys) if top else None
+    if best_buttons is not None and not allow_shoulders:
+        for sk in _SHOULDERS:
+            if sk in best_buttons:
+                best_buttons[sk] = 0
+
+    return jsonify(
+        {
+            "ok": True,
+            "best": {
+                "buttons": best_buttons,
+                "mask": int(best["mask"]),
+                "critic_v": float(best["v"]),
+                "critic_v_raw": float(best["raw"]),
+            } if best_buttons is not None else None,
+            "top": [
+                {
+                    "mask": int(it["mask"]),
+                    "buttons": _bitmask_to_buttons(int(it["mask"]), keys),
+                    "critic_v": float(it["v"]),
+                    "critic_v_raw": float(it["raw"]),
+                }
+                for it in top
+            ],
+            "meta": {
+                "frame_requested": int(frame_idx),
+                "frame_effective": int(effective_frame),
+                "hold": int(hold),
+                "seq_len": int(seq_len),
+                "start_stride": int(start_stride),
+                "ema_alpha": float(alpha_full),
+                "keys": list(keys),
+                "ignored_keys": sorted(list(_IGNORED_KEYS)),
+                "cust_gauge_at_effective": int(cust_here),
+                "allow_shoulders": bool(allow_shoulders),
+                "states_evaluated": int(len(masks)),
+                "states_total_naive": int(total),
+                "window_abs_start": int(win_start),
+                "window_abs_end": int(win_end),
+                "batch_seqs": int(batch_seqs),
+                "took_s": float(dt),
+            },
+            "note": "" if int(effective_frame) == int(frame_idx) else "snapped to hold grid",
+        }
+    )
+
 
 @app.route("/api/critic_probe", methods=["POST"])
 def api_critic_probe():
     """
-    Probe V(s) at a specific frame with overridden controller button states.
+    Probe CriticMinimal V(s) at a specific frame with overridden controller button states.
+
+    IMPORTANT:
+      - critic_minimal produces sparse raw values on a HOLD grid (0, hold, 2*hold, ...)
+      - for exact, deterministic matching, we snap to the hold grid.
+
     Body: { replay: str, frame_idx: int, buttons: {KEY:0/1,...} }
-    Response: { critic_v: float, note?: str }
+
+    Response:
+      {
+        critic_v: float|None,            # EMA-smoothed value at effective_frame WITH override
+        critic_v_cached: float|None,     # EMA-smoothed baseline at effective_frame (no override)
+        critic_v_raw: float|None,        # raw model value at endpoint in the probe window
+        meta: {...},
+        note: str
+      }
     """
     global _CRITIC, _CRITIC_ERR
 
@@ -2665,198 +3203,172 @@ def api_critic_probe():
 
     if not isinstance(replay, str) or not replay.strip():
         return jsonify({"critic_v": None, "note": "bad request: missing replay"}), 400
-    if not isinstance(frame_idx, int):
-        try:
-            frame_idx = int(frame_idx)
-        except Exception:
-            return jsonify({"critic_v": None, "note": "bad request: frame_idx must be int"}), 400
     if not isinstance(buttons, dict):
         return jsonify({"critic_v": None, "note": "bad request: buttons must be object/dict"}), 400
+    try:
+        frame_idx = int(frame_idx)
+    except Exception:
+        return jsonify({"critic_v": None, "note": "bad request: frame_idx must be int"}), 400
 
     # Ensure critic is initialized
     if _CRITIC is None and _CRITIC_ERR is None:
         _init_critic()
-
     if _CRITIC is None:
         err = _CRITIC_ERR or "critic not available"
         return jsonify({"critic_v": None, "note": f"critic init error: {err}"}), 500
 
+    # Load frames
     try:
         frames = _load_replay_frames_for_probe(replay)
     except Exception as e:
         return jsonify({"critic_v": None, "note": f"load frames error: {e}"}), 500
 
     n = len(frames)
-    if n == 0:
+    if n <= 0:
         return jsonify({"critic_v": None, "note": "no frames"}), 400
-    if frame_idx < 0:
-        frame_idx = 0
-    if frame_idx >= n:
-        frame_idx = n - 1
 
-    # --- Match /inputs/<replay> config ---
+    frame_idx = max(0, min(int(frame_idx), n - 1))
+
+    # Match /inputs config (critic_minimal)
     try:
-        stride = int(os.environ.get("CRITIC_RL_STRIDE", "2").strip() or "2")
+        hold = int(os.environ.get("CRITIC_MINIMAL_HOLD", "4").strip() or "4")
     except Exception:
-        stride = 2
-
-    trained_seq_len = getattr(_CRITIC, "trained_seq_len", None)
+        hold = 4
     try:
-        seq_len = int(os.environ.get("CRITIC_RL_SEQ_LEN", str(trained_seq_len or 64)).strip())
+        seq_len = int(os.environ.get("CRITIC_MINIMAL_SEQ_LEN", "192").strip() or "192")
     except Exception:
-        seq_len = int(trained_seq_len or 64)
-
+        seq_len = 192
     try:
-        ema_alpha = float(os.environ.get("CRITIC_RL_EMA_ALPHA", "0.25").strip() or "0.25")
+        start_stride = int(os.environ.get("CRITIC_MINIMAL_START_STRIDE", "1").strip() or "1")
+    except Exception:
+        start_stride = 1
+    try:
+        ema_alpha = float(os.environ.get("CRITIC_MINIMAL_EMA_ALPHA", "0.25").strip() or "0.25")
     except Exception:
         ema_alpha = 0.25
 
-    if stride <= 0:
-        return jsonify({"critic_v": None, "note": f"bad request: stride<=0 ({stride})"}), 400
+    require_cust_gt0 = (os.environ.get("CRITIC_MINIMAL_REQUIRE_CUST_GT0", "1").strip() != "0")
+
+    if hold <= 0:
+        return jsonify({"critic_v": None, "note": f"bad request: hold<=0 ({hold})"}), 400
     if seq_len <= 1:
         return jsonify({"critic_v": None, "note": f"bad request: seq_len<=1 ({seq_len})"}), 400
 
-    # --- Build probe window from base frames with stride sampling (same as normal) ---
-    requested_end = int(frame_idx)
-    # IMPORTANT: match /inputs sampling grid. /inputs only has "known" raw points on stride-aligned frames.
-    end = requested_end - (requested_end % int(stride))
-    start = end - (int(seq_len) - 1) * int(stride)
+    # Ensure aux exists for this replay (build on-demand if user probed before /inputs loaded)
+    aux = CRITIC_AUX_CACHE.get(replay)
+    if aux is None:
+        cust_mask = [(int((f or {}).get("cust_gauge") or 0) > 0) for f in frames]
+        if len(cust_mask) != n:
+            cust_mask = cust_mask[:n] + [False] * max(0, n - len(cust_mask))
+
+        try:
+            res_full = _CRITIC.infer_from_frames(
+                frames=frames,
+                hold=int(hold),
+                seq_len=int(seq_len),
+                start_stride=int(start_stride),
+                require_cust_gt0=bool(require_cust_gt0),
+            )
+            dense = _coerce_values_by_frame(res_full.values_by_frame, n)
+            densified = _densify_linear_masked(dense, cust_mask)
+
+            aux = {
+                "mask": cust_mask,
+                "densified": densified,
+                "ema_alpha": float(ema_alpha),
+                "hold": int(hold),
+                "seq_len": int(seq_len),
+                "start_stride": int(start_stride),
+                "require_cust_gt0": bool(require_cust_gt0),
+            }
+            CRITIC_AUX_CACHE[replay] = aux
+        except Exception as e:
+            return jsonify({"critic_v": None, "note": f"probe aux build failed: {e}"}), 500
+
+    mask: List[bool] = aux["mask"]
+    densified_full: List[Optional[float]] = aux["densified"]
+    alpha_full: float = float(aux["ema_alpha"])
+
+    # Snap to hold grid for deterministic "raw point" probing
+    effective_frame = int(frame_idx) - (int(frame_idx) % int(hold))
+    effective_frame = max(0, min(effective_frame, n - 1))
+
+    # Build a window that ends exactly on a hold-aligned index so the last point has a raw value.
+    # Window length in frames = (seq_len - 1) * hold + 1
+    win_len = (int(seq_len) - 1) * int(hold) + 1
+    start_abs = int(effective_frame) - (win_len - 1)
 
     window: list[dict] = []
-    window_src_indices: list[int] = []
-    for t in range(int(seq_len)):
-        src_i = start + t * int(stride)
+    for t in range(win_len):
+        src_i = start_abs + t
         if src_i < 0:
             src_i = 0
         if src_i >= n:
             src_i = n - 1
         row = frames[src_i]
-        if not isinstance(row, dict):
-            row = {}
-        window.append(row)
-        window_src_indices.append(int(src_i))
+        window.append(row if isinstance(row, dict) else {})
 
-    # Apply overrides ONLY to the last element (the probed frame)
+    # Apply button overrides ONLY to the endpoint frame
     window[-1] = _apply_button_overrides(window[-1], buttons)
 
-    # Load static_data.json (same as /inputs/<replay>)
-    static = None
+    # Run critic_minimal on the window
     try:
-        from pathlib import Path
-        static_path = Path(DATASET_DIR) / replay / "static_data.json"
-        if static_path.exists():
-            static = json.loads(static_path.read_text(encoding="utf-8"))
-    except Exception:
-        static = None
-
-    # --- Run critic on the window ---
-    try:
-        # IMPORTANT:
-        # compute_derived is HISTORY-DEPENDENT. For a probe at frame_idx, we must use
-        # derived state computed on the FULL replay (or cached /inputs output), not
-        # recompute derived on the clipped window.
-
-        full_frames: Optional[list] = None
-        full_derived: Optional[list] = None
-        full_static: Any = static
-
-        # Prefer the /inputs cache if present (it already computed full derived correctly).
-        cached = INPUT_CACHE.get(replay)
-        if cached and isinstance(cached.get("frames"), list) and isinstance(cached.get("derived"), list):
-            full_frames = cached["frames"]
-            full_derived = cached["derived"]
-            if cached.get("static") is not None:
-                full_static = cached["static"]
-
-        if full_frames is None or full_derived is None or len(full_frames) != len(full_derived):
-            # Fallback: compute full derived ONCE for this probe request.
-            # (This is expensive, but correct.)
-            full_frames = frames
-            full_static = full_static
-            full_derived = compute_derived(full_frames, full_static)
-
-        # Build derived window aligned to the SAME sampled indices as `window`.
-        derived_window: list[dict] = []
-        for src_i in window_src_indices:
-            d = full_derived[src_i] if (0 <= src_i < len(full_derived)) else {}
-            if not isinstance(d, dict):
-                d = {}
-            # Ensure we don't accidentally feed critic_v back into the critic.
-            if "critic_v" in d:
-                d = dict(d)
-                d.pop("critic_v", None)
-            derived_window.append(d)
-
-        res = _CRITIC.infer_from_derived(
+        res = _CRITIC.infer_from_frames(
             frames=window,
-            static=full_static,
-            derived=derived_window,
-            stride=1,                  # window is stride-sampled already
+            hold=int(hold),
             seq_len=int(seq_len),
-            require_cust_gt0=None,
+            start_stride=int(start_stride),
+            require_cust_gt0=bool(require_cust_gt0),
         )
 
-
-        # raw value for last frame in the WINDOW coordinate system
-        raw_dense = _coerce_values_by_frame(getattr(res, "values_by_frame", []), int(seq_len))
+        raw_dense = _coerce_values_by_frame(getattr(res, "values_by_frame", []), len(window))
         raw_last = raw_dense[-1] if raw_dense else None
-
-        # --- Match /inputs/<replay> postprocess: cust_gauge>0 mask + densify + EMA ---
-        aux = CRITIC_AUX_CACHE.get(replay)
-        if not aux:
-            raise RuntimeError("probe needs /inputs to be loaded first (missing CRITIC_AUX_CACHE).")
-
-        full_mask = aux["mask"]
-        full_densified = aux["densified"]
-        full_alpha = float(aux["ema_alpha"])
-
-        # `end` is the stride-aligned frame we are actually probing.
-        # raw_last is the model output for that endpoint (in WINDOW coordinates),
-        # but it corresponds to absolute frame `end`.
         override_raw = float(raw_last) if (raw_last is not None and _is_finite(raw_last)) else None
+        if override_raw is None:
+            return jsonify({"critic_v": None, "note": "probe produced no finite raw value"}), 500
 
-        smooth_at_end = _ema_value_at_idx(
-            densified=full_densified,
-            mask=full_mask,
-            alpha=full_alpha,
-            idx=int(end),
-            override_value=override_raw,
+        # Baseline (no override) EMA at effective_frame
+        baseline = _ema_value_at_idx(
+            densified=densified_full,
+            mask=mask,
+            alpha=alpha_full,
+            idx=int(effective_frame),
+            override_value=None,
         )
 
+        # Override EMA at effective_frame using the probed raw endpoint value
+        probed = _ema_value_at_idx(
+            densified=densified_full,
+            mask=mask,
+            alpha=alpha_full,
+            idx=int(effective_frame),
+            override_value=float(override_raw),
+        )
 
-
-        # --- If /inputs cached this replay, also return the normal value at frame_idx ---
-        cached_v = None
-        try:
-            cached2 = INPUT_CACHE.get(replay)
-            if cached2 and isinstance(cached2.get("derived"), list):
-                di = int(frame_idx)
-                if 0 <= di < len(cached2["derived"]) and isinstance(cached2["derived"][di], dict):
-                    cached_v = cached2["derived"][di].get("critic_v", None)
-        except Exception:
-            cached_v = None
-
+        note = ""
+        if int(effective_frame) != int(frame_idx):
+            note = "probe snapped to hold grid for exact match"
 
         return jsonify(
             {
-                "critic_v": float(smooth_at_end) if (smooth_at_end is not None and _is_finite(smooth_at_end)) else None,
-                "critic_v_smoothed": float(smooth_at_end) if (smooth_at_end is not None and _is_finite(smooth_at_end)) else None,
-                "critic_v_raw": float(raw_last) if (raw_last is not None and _is_finite(raw_last)) else None,
-                "critic_v_cached": float(cached_v) if (cached_v is not None and _is_finite(cached_v)) else None,
+                "critic_v": float(probed) if (probed is not None and _is_finite(probed)) else None,
+                "critic_v_cached": float(baseline) if (baseline is not None and _is_finite(baseline)) else None,
+                "critic_v_raw": float(override_raw),
                 "meta": {
-                    "stride": int(stride),
+                    "frame_requested": int(frame_idx),
+                    "frame_effective": int(effective_frame),
+                    "hold": int(hold),
                     "seq_len": int(seq_len),
-                    "ema_alpha": float(ema_alpha),
-                    "requested_frame": int(frame_idx),
-                    "effective_frame": int(end),
-                    "cust_mask_at_effective": bool(aux["mask"][int(end)]) if (0 <= int(end) < len(aux["mask"])) else False,
-                    "window_src_start": int(window_src_indices[0]) if window_src_indices else None,
-                    "window_src_end": int(window_src_indices[-1]) if window_src_indices else None,
+                    "start_stride": int(start_stride),
+                    "ema_alpha": float(alpha_full),
+                    "cust_mask_at_effective": bool(mask[int(effective_frame)]) if 0 <= int(effective_frame) < len(mask) else False,
+                    "window_abs_start": int(start_abs),
+                    "window_abs_end": int(effective_frame),
+                    "window_len": int(len(window)),
                 },
-                "note": "" if int(end) == int(frame_idx) else "probe snapped to stride grid for exact match",
+                "note": note,
             }
         )
-
 
     except Exception as e:
         return jsonify({"critic_v": None, "note": f"probe error: {e}"}), 500

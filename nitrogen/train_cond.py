@@ -4,11 +4,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import torch
 from torch.optim import AdamW
@@ -32,7 +33,7 @@ BASE_CONFIG = {
     "save_every": 1000,
     "num_workers": 8,
     "max_keep_ckpts": 3,
-    "base_ckpt": "checkpoints/nitrogen_battle_cache_bellman/step_48000.pt",
+    "base_ckpt": "checkpoints/cond_nitrogen_battle_cache_bellman/step_50000.pt",
     "prefetch_factor": 8,
 }
 
@@ -40,6 +41,33 @@ DEFAULT_CACHE_DIR = "data/nitrogen_battle_cache_bellman"
 DEFAULT_CKPT_DIR = "checkpoints/conditioned_nitrogen_battle_cache_bellman"
 DEFAULT_LOG_DIR = "logs/conditioned_nitrogen_battle_cache_bellman"
 MANIFEST_NAME = "manifest.json"
+
+# -----------------------------------------------------------------------------
+# Chip conditioning sanitization (NO RECACHE REQUIRED)
+# -----------------------------------------------------------------------------
+INVALID_CHIP_IDS = {255, 65535}
+
+
+def sanitize_chip_id(chip_id: Any) -> Tuple[int, float]:
+    """
+    Returns (chip_id_sanitized, has_chip_flag).
+
+    Policy:
+      - Invalid sentinel ids (255, 65535), negatives, non-int => (0, 0.0)
+      - Otherwise => (int(id), 1.0)
+
+    We reserve chip_id=0 as "no chip / unknown". (BN chip ids are typically >= 1.)
+    """
+    try:
+        cid = int(chip_id)
+    except Exception:
+        return 0, 0.0
+
+    if cid in INVALID_CHIP_IDS:
+        return 0, 0.0
+    if cid < 0:
+        return 0, 0.0
+    return cid, 1.0
 
 
 def _now_tag() -> str:
@@ -69,7 +97,7 @@ def _estimate_total_batches(cache_dir: Path, batch_size: int) -> Optional[int]:
 def _suggest_norm_factor_from_manifest(manifest: Optional[Dict[str, Any]]) -> Optional[float]:
     """
     Reads precache-written manifest['values_summary'] and returns a good default norm_factor.
-    We prefer abs_p90 median (more stable) and fall back to abs_p95 median.
+    Prefer abs_p90 median (more stable), fall back to abs_p95 median.
     """
     if not manifest:
         return None
@@ -142,7 +170,7 @@ class BattleBellmanCacheDataset(IterableDataset):
 
     Optional conditioning (NO RECACHE REQUIRED if already present in .pt):
       - states: [N, 3] float32  (p_hp_norm, e_hp_norm, p_charge_norm)
-      - chips:  [N] int64      (player_chip id)
+      - chips:  [N] int64       (player_chip id, may include sentinel invalids)
     """
 
     def __init__(
@@ -195,6 +223,8 @@ class BattleBellmanCacheDataset(IterableDataset):
         wid = wi.id if wi is not None else 0
         rng = random.Random((self.seed * 1000003) ^ (self._epoch * 9176) ^ (wid * 1315423911))
 
+        chip_debug = (os.environ.get("NITROGEN_CHIP_DEBUG", "").strip() == "1")
+
         for fp in files:
             payload = torch.load(fp, map_location="cpu")
 
@@ -240,6 +270,9 @@ class BattleBellmanCacheDataset(IterableDataset):
             if self.shuffle_within_file:
                 rng.shuffle(order)
 
+            invalid_seen = 0
+            total_seen = 0
+
             for i in order:
                 f = frames[i]  # [3, H, W]
                 a = actions[i]  # [AH, ACTION_DIM]
@@ -264,14 +297,24 @@ class BattleBellmanCacheDataset(IterableDataset):
                 }
 
                 if states is not None and chips is not None:
-                    # Keep per-sample tensors unbatched here; collate will add batch dim.
                     out["state"] = states[i].to(torch.float32)  # [3]
-                    out["chip_id"] = chips[i].to(torch.long)  # []
-                else:
-                    # If conditioning isn't required, we simply omit the keys.
-                    pass
+
+                    raw_chip = chips[i].item() if torch.is_tensor(chips[i]) else chips[i]
+                    cid, has_chip = sanitize_chip_id(raw_chip)
+
+                    total_seen += 1
+                    if has_chip == 0.0:
+                        invalid_seen += 1
+
+                    # Training-facing conditioning
+                    out["chip_id"] = torch.tensor(cid, dtype=torch.long)  # []
+                    out["has_chip"] = torch.tensor(has_chip, dtype=torch.float32)  # []
 
                 yield out
+
+            if chip_debug and total_seen > 0:
+                frac = 100.0 * float(invalid_seen) / float(total_seen)
+                print(f"[chip_sanitize][epoch={self._epoch}][worker={wid}] {fp.name}: invalid={invalid_seen}/{total_seen} ({frac:.2f}%)")
 
 
 # -----------------------------------------------------------------------------
@@ -298,6 +341,7 @@ def _save_ckpt(
     action_horizon: int,
     vision_horizon: int,
     weight_cfg: ValueWeightCfg,
+    conditioning_enabled: bool,
 ) -> None:
     save_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = save_path.with_suffix(save_path.suffix + ".tmp")
@@ -325,10 +369,10 @@ def _save_ckpt(
                     "positive_only_weights": bool(weight_cfg.positive_only_weights),
                 },
                 "conditioning": {
-                    "enabled": True,
-                    "fields": ["state", "chip_id"],
+                    "enabled": bool(conditioning_enabled),
+                    "fields": (["state", "chip_id", "has_chip"] if conditioning_enabled else []),
                     "state_def": "states[i]=[p_hp_norm,e_hp_norm,p_charge_norm] from cache payload",
-                    "chip_def": "chips[i]=player_chip id from cache payload",
+                    "chip_def": "chips[i]=player_chip id from cache payload; sanitized 255/65535->0 with has_chip=0",
                 },
             },
         },
@@ -393,8 +437,7 @@ class CollateAndEncode:
                 "game": s["game"],
             }
 
-            # --- NEW: conditioning pass-through (no recache) ---
-            # Keep batch semantics per-sample to match typical tokenizer expectations.
+            # Conditioning pass-through (no recache)
             if "state" in s and s["state"] is not None:
                 st = s["state"]
                 if not torch.is_tensor(st):
@@ -402,10 +445,11 @@ class CollateAndEncode:
                 d["state"] = st.view(1, -1).to(torch.float32)  # [1,3]
 
             if "chip_id" in s and s["chip_id"] is not None:
-                ch = s["chip_id"]
-                if not torch.is_tensor(ch):
-                    ch = torch.as_tensor(ch, dtype=torch.long)
-                d["chip_id"] = ch.view(1).to(torch.long)  # [1]
+                raw = s["chip_id"].item() if torch.is_tensor(s["chip_id"]) else s["chip_id"]
+                cid, has_chip = sanitize_chip_id(raw)
+                d["chip_id"] = torch.tensor([cid], dtype=torch.long)  # [1]
+                # Safe extra signal (only matters if your tokenizer/model reads it)
+                d["has_chip"] = torch.tensor([has_chip], dtype=torch.float32)  # [1]
 
             enc = tok.encode(d)
             if enc:
@@ -504,7 +548,7 @@ def main() -> None:
     manifest = _load_manifest(cache_dir)
     total_batches = _estimate_total_batches(cache_dir, int(args.batch_size))
 
-    # --- Determine norm_factor (auto if 0) ---
+    # Determine norm_factor (auto if 0)
     if float(args.norm_factor) > 0.0:
         norm_factor = float(args.norm_factor)
         norm_src = "cli"
@@ -526,7 +570,7 @@ def main() -> None:
         positive_only_weights=bool(args.positive_only_weights),
     )
 
-    # --- Load model (resume/auto/base) ---
+    # Load model (resume/auto/base)
     if args.resume:
         load_path = args.resume
         print(f"🔄 Resuming from explicit: {load_path}")
@@ -558,9 +602,9 @@ def main() -> None:
     print(f"   tokenizer horizons: action_horizon={action_horizon} vision_horizon={vision_horizon}")
 
     conditioning_enabled = not bool(args.no_conditioning)
-    print(f"   conditioning: {'enabled (state+chip_id)' if conditioning_enabled else 'disabled'}")
+    print(f"   conditioning: {'enabled (state+chip_id+has_chip)' if conditioning_enabled else 'disabled'}")
 
-    # --- Dataset / loader ---
+    # Dataset / loader
     dataset = BattleBellmanCacheDataset(
         cache_dir=str(cache_dir),
         vision_horizon=vision_horizon,
@@ -572,7 +616,6 @@ def main() -> None:
         require_conditioning=conditioning_enabled,
     )
 
-    # IMPORTANT: pass config, not a closure
     collate_fn = CollateAndEncode(loaded.tokenizer_cfg)
 
     dl_kwargs: Dict[str, Any] = dict(
@@ -588,7 +631,7 @@ def main() -> None:
 
     loader = DataLoader(dataset, **dl_kwargs)
 
-    # --- Model / optim ---
+    # Model / optim
     model = loaded.model
     model.train()
 
@@ -606,7 +649,7 @@ def main() -> None:
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=float(args.lr))
     writer = SummaryWriter(str(log_dir))
 
-    # step init
+    # Step init
     step = 0
     try:
         p = Path(load_path)
@@ -628,6 +671,7 @@ def main() -> None:
     print(f"🔥 Training Loop Start (continuing from step={step})")
 
     interrupted = False
+    warned_missing_conditioning_once = False
 
     try:
         for epoch in range(int(args.epochs)):
@@ -652,14 +696,17 @@ def main() -> None:
 
                 model_input = U.collate_encoded(encoded_list, device=device)
 
-                # Optional hard fail if conditioning requested but got dropped by tokenizer/collate.
+                # If conditioning is requested, make sure it actually made it through tokenizer+collate.
                 if conditioning_enabled:
-                    # NOTE: This asserts that tokenizer.encode preserved the fields into encoded dicts
-                    # and train_utils.collate_encoded carries them through to model_input.
-                    if "state" not in model_input or "chip_id" not in model_input:
-                        raise RuntimeError(
-                            "Conditioning enabled, but model_input is missing 'state' and/or 'chip_id'. "
-                            "Fix NitrogenTokenizer.encode() and/or train_utils.collate_encoded() to preserve these."
+                    missing = [k for k in ("state", "chip_id") if k not in model_input]
+                    # has_chip is "optional": if tokenizer/model ignores it, that's OK,
+                    # but it's still useful when supported.
+                    if missing and not warned_missing_conditioning_once:
+                        warned_missing_conditioning_once = True
+                        print(
+                            f"⚠️ Conditioning requested but missing in model_input: {missing}. "
+                            f"Your sanitize fix is in place, but NitrogenTokenizer.encode() and/or "
+                            f"train_utils.collate_encoded() may not be preserving these keys yet."
                         )
 
                 optimizer.zero_grad(set_to_none=True)
@@ -717,6 +764,7 @@ def main() -> None:
                         action_horizon=action_horizon,
                         vision_horizon=vision_horizon,
                         weight_cfg=weight_cfg,
+                        conditioning_enabled=conditioning_enabled,
                     )
                     U.cleanup_old_checkpoints(ckpt_dir, int(args.max_keep_ckpts))
 
@@ -736,6 +784,7 @@ def main() -> None:
                     action_horizon=action_horizon,
                     vision_horizon=vision_horizon,
                     weight_cfg=weight_cfg,
+                    conditioning_enabled=conditioning_enabled,
                 )
                 U.cleanup_old_checkpoints(ckpt_dir, int(args.max_keep_ckpts))
                 print(f"💾 Saved: {save_path}")

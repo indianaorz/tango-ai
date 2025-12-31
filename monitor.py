@@ -17,7 +17,7 @@ LOG_DIRS = {
     "Battle": "logs/nitrogen_battle_cache_bellman",
     "Planning": "logs/conditioned_nitrogen_battle_cache_bellman",
     "RL": "logs/rl_battle",
-    "Critic": "checkpoints/critic_hpdelta",
+    "Critic": "checkpoints/critic_minimal",
     "Critic_RL": "checkpoints/critic_rl",
 }
 

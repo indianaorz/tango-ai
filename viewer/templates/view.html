@@ -716,6 +716,10 @@
                             style="background:#222; border:1px solid #444; color:#ddd; padding:6px 10px; border-radius:6px; cursor:pointer;">
                             Clear all
                         </button>
+
+
+                        <button id="probe-find-best" class="probe-action">Find Best</button>
+                        <span id="probe-best-note" class="probe-note"></span>
                     </div>
                 </div>
             </div>
@@ -930,6 +934,89 @@
         const probeNoteEl = document.getElementById('probe-note');
         const probeResetBtn = document.getElementById('probe-reset');
         const probeClearBtn = document.getElementById('probe-clear');
+        const probeFindBestBtn = document.getElementById('probe-find-best');
+        const probeBestNoteEl = document.getElementById('probe-best-note');
+
+        let probeFollowFrame = true;   // follows current frame until user interacts
+        let lastProbeInitIdx = -1;     // prevents re-init spam
+        let probePending = false;      // mirrors UI pending class
+
+
+        function setBestNote(txt) {
+            if (probeBestNoteEl) probeBestNoteEl.textContent = txt || "";
+        }
+
+        function bitmaskToState(mask) {
+            const st = {};
+            for (let i = 0; i < PROBE_KEYS.length; i++) {
+                st[PROBE_KEYS[i]] = ((mask >> i) & 1) ? 1 : 0;
+            }
+            return st;
+        }
+
+        async function findBestControllerState() {
+            if (!actions || !actions.length) return;
+    probeFollowFrame = false; 
+            if (!probeState) ensureProbeInitializedForIdx(currentIdx);
+
+            setProbePending(true);
+            setBestNote("searching…");
+            setProbeUIValue(null, "searching…");
+
+            const payload = {
+                replay: "{{ replay_name }}",
+                frame_idx: currentIdx,
+                keys: PROBE_KEYS,  // must match server keys ordering for mask readability
+                top_k: 5,
+            };
+
+            try {
+                const res = await fetch("/api/critic_find_best", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                });
+
+                if (!res.ok) {
+                    const txt = await res.text();
+                    throw new Error(`HTTP ${res.status}: ${txt.slice(0, 300)}`);
+                }
+
+                const out = await res.json();
+                if (!out || !out.ok || !out.best || !out.best.buttons) {
+                    const note = out && out.note ? String(out.note) : "no result";
+                    setBestNote(note);
+                    setProbeUIValue(null, note);
+                    return;
+                }
+
+                // Apply best buttons to probeState + UI
+                probeState = cloneProbeState(out.best.buttons);
+                renderProbeController();
+
+                const v = (out.best && typeof out.best.critic_v === "number") ? out.best.critic_v : null;
+                const note = (out.note ? String(out.note) : "");
+                setProbeUIValue(v, note);
+
+                const meta = out.meta || {};
+                const took = (typeof meta.took_s === "number") ? meta.took_s.toFixed(3) : "?";
+                const evald = meta.states_evaluated ?? "?";
+                setBestNote(`best found (states=${evald}, took=${took}s)`);
+
+            } catch (err) {
+                const msg = `find-best error: ${err && err.message ? err.message : String(err)}`;
+                setBestNote(msg);
+                setProbeUIValue(null, msg);
+            } finally {
+                setProbePending(false);
+            }
+        }
+
+        if (probeFindBestBtn) {
+            probeFindBestBtn.addEventListener("click", () => {
+                findBestControllerState();
+            });
+        }
 
         function _frameButtonValue(frame, k) {
             const v = frame ? frame[k] : 0;
@@ -975,12 +1062,13 @@
                 else el.classList.remove('active');
             }
         }
-
         function setProbePending(on) {
+            probePending = !!on;
             if (!probeCtlEl) return;
             if (on) probeCtlEl.classList.add('pending');
             else probeCtlEl.classList.remove('pending');
         }
+
 
         function setProbeUIValue(val, note) {
             if (probeValEl) probeValEl.textContent = (typeof val === "number" && Number.isFinite(val)) ? val.toFixed(6) : "—";
@@ -1025,25 +1113,38 @@
                 setProbePending(false);
             }
         }
+let lastRenderedIdx = -1;
 
-        function ensureProbeInitializedForIdx(idx) {
-            currentIdx = idx;
+function ensureProbeInitializedForIdx(idx) {
+    currentIdx = idx;
 
-            // baseline from actual frame
-            probeBaseline = buildProbeBaselineFromFrame(idx);
+    // Always refresh baseline from actual frame (cheap, and useful).
+    probeBaseline = buildProbeBaselineFromFrame(idx);
 
-            // if probeState is null OR we want to always track frame, reset it here:
-            // - by default: reset whenever frame changes (keeps “current controller state” accurate)
-            probeState = cloneProbeState(probeBaseline);
-            renderProbeController();
-            setProbeUIValue(null, "");
-        }
+    // Only reset probeState when:
+    //  - we are in follow mode
+    //  - NOT pending a server call
+    //  - idx actually changed since last init
+    if (!probeFollowFrame) return;
+    if (probePending) return;
+    if (idx === lastProbeInitIdx) return;
+
+    lastProbeInitIdx = idx;
+    probeState = cloneProbeState(probeBaseline);
+    renderProbeController();
+    setProbeUIValue(null, "");
+    setBestNote("");
+}
+
 
         // Click toggles
         if (probeCtlEl) {
             probeCtlEl.addEventListener("click", (e) => {
                 const t = e.target;
                 if (!t || !t.classList || !t.classList.contains("probe-btn")) return;
+
+                probeFollowFrame = false;
+
 
                 const k = t.getAttribute("data-action");
                 if (!k || !probeState || !(k in probeState)) return;
@@ -1323,34 +1424,51 @@
 
             renderStatic(data.static || {});
 
+            function computeRange(values, fallbackMin, fallbackMax) {
+                let mn = Infinity, mx = -Infinity;
+                for (let i = 0; i < values.length; i++) {
+                    const v = values[i];
+                    if (typeof v === "number" && Number.isFinite(v)) {
+                        mn = Math.min(mn, v);
+                        mx = Math.max(mx, v);
+                    }
+                }
+                if (mn === Infinity) return { min: fallbackMin, max: fallbackMax };
+
+                const span = mx - mn;
+                const pad = (span === 0) ? Math.max(1, Math.abs(mx) * 0.1) : span * 0.1;
+                return { min: mn - pad, max: mx + pad };
+            }
+
             // Build critic series (from derived[].critic_v) + bellman series (from server)
-            // and compute a shared graph range.
             const n = derived.length || actions.length || 0;
 
             criticValues = new Array(n).fill(null);
             bellmanValues = (bellmanValues && bellmanValues.length) ? bellmanValues : new Array(n).fill(null);
 
-            let min = Infinity, max = -Infinity;
-
             for (let i = 0; i < n; i++) {
                 const cv = derived[i]?.critic_v;
-                const c = (typeof cv === "number" && Number.isFinite(cv)) ? cv : null;
-                criticValues[i] = c;
+                criticValues[i] = (typeof cv === "number" && Number.isFinite(cv)) ? cv : null;
 
                 const bv = bellmanValues[i];
-                const b = (typeof bv === "number" && Number.isFinite(bv)) ? bv : null;
-                bellmanValues[i] = b;
-
-                if (c !== null) { min = Math.min(min, c); max = Math.max(max, c); }
-                if (b !== null) { min = Math.min(min, b); max = Math.max(max, b); }
+                bellmanValues[i] = (typeof bv === "number" && Number.isFinite(bv)) ? bv : null;
             }
 
-            if (min !== Infinity) {
-                const span = max - min;
-                const pad = (span === 0) ? 10 : span * 0.1;
-                graphMin = min - pad;
-                graphMax = max + pad;
-            }
+            // Heuristic fallback for critic_minimal: if it’s tanh-ish, show it nicely by default.
+            const criticFallback =
+                (criticMeta && criticMeta.source === "critic_minimal")
+                    ? { min: -1.2, max: 1.2 }
+                    : { min: -100, max: 100 };
+
+            // Compute independent ranges
+            const cr = computeRange(criticValues, criticFallback.min, criticFallback.max);
+            criticMin = cr.min;
+            criticMax = cr.max;
+
+            const br = computeRange(bellmanValues, -100, 100);
+            graphMin = br.min;   // keep these names: graphMin/graphMax now mean Bellman range
+            graphMax = br.max;
+
 
 
             if (actions.length) render(actions[0], 0);
@@ -1431,8 +1549,21 @@
             if (cvEl) cvEl.textContent = (cv !== null) ? cv.toFixed(3) : "—";
             if (noteEl) {
                 const err = criticMeta && criticMeta.error ? criticMeta.error : null;
-                noteEl.textContent = err ? `critic: ${err}` : "";
+                if (err) {
+                    noteEl.textContent = `critic error: ${err}`;
+                } else {
+                    const src = (criticMeta && criticMeta.source) ? String(criticMeta.source) : "unknown";
+                    const critOk = (Number.isFinite(criticMin) && Number.isFinite(criticMax));
+                    const bellOk = (Number.isFinite(graphMin) && Number.isFinite(graphMax));
+
+                    const critRangeTxt = critOk ? `crit=[${criticMin.toFixed(2)}..${criticMax.toFixed(2)}]` : `crit=[—]`;
+                    const bellRangeTxt = bellOk ? `bell=[${graphMin.toFixed(2)}..${graphMax.toFixed(2)}]` : `bell=[—]`;
+
+                    noteEl.textContent = `critic: ${src} · ${critRangeTxt} · ${bellRangeTxt}`;
+                }
             }
+
+
 
             if (p) {
                 const mask = p.folder_used_mask || [];
@@ -1509,8 +1640,6 @@
         }
 
         function drawCriticGraph(currentIdx) {
-            // NOTE: simplest possible: use CSS pixel sizing (like your original).
-            // If you want crisp lines on HiDPI, we can add DPR scaling later.
             const w = criticCanvas.width = criticCanvas.offsetWidth;
             const h = criticCanvas.height = criticCanvas.offsetHeight;
             const ctx = ctxCritic;
@@ -1520,7 +1649,7 @@
             if (!criticValues || criticValues.length <= 1) return;
             const n = criticValues.length;
 
-            // Shade cust_gauge==0 spans (fixes your "Cannot access 'n' before initialization" bug)
+            // Shade cust_gauge==0 spans
             if (custZeroRuns && custZeroRuns.length) {
                 for (const r of custZeroRuns) {
                     const a = Math.max(0, Math.min(n - 1, r.a));
@@ -1536,58 +1665,72 @@
                 }
             }
 
-            const range = graphMax - graphMin;
-            if (!Number.isFinite(range) || range === 0) return;
+            // --- Two independent ranges ---
+            const bellRange = graphMax - graphMin;         // Bellman scale
+            const critRange = criticMax - criticMin;       // Critic scale
 
-            function getY(val) {
-                const norm = (val - graphMin) / range;
+            const okBell = Number.isFinite(bellRange) && bellRange !== 0;
+            const okCrit = Number.isFinite(critRange) && critRange !== 0;
+
+            function getYBell(val) {
+                const norm = (val - graphMin) / bellRange;
                 return h - (norm * h);
             }
 
-            // Zero line
-            const y0 = getY(0);
-            ctx.beginPath();
-            ctx.strokeStyle = "#444";
-            ctx.lineWidth = 1;
-            ctx.moveTo(0, y0);
-            ctx.lineTo(w, y0);
-            ctx.stroke();
+            function getYCrit(val) {
+                const norm = (val - criticMin) / critRange;
+                return h - (norm * h);
+            }
 
-            // Graph path (skip nulls; don't connect across gaps)
-            ctx.beginPath();
-            ctx.strokeStyle = "#00e5ff";
-            ctx.lineWidth = 2;
+            // Draw Bellman zero line (only if bellman range is valid)
+            if (okBell) {
+                const y0 = getYBell(0);
+                ctx.beginPath();
+                ctx.strokeStyle = "#444";
+                ctx.lineWidth = 1;
+                ctx.moveTo(0, y0);
+                ctx.lineTo(w, y0);
+                ctx.stroke();
+            }
 
-            let started = false;
-            for (let i = 0; i < n; i++) {
-                const v = criticValues[i];
-                if (!(typeof v === "number" && Number.isFinite(v))) {
-                    started = false;
-                    continue;
+            // Critic path (cyan) using critic scale
+            if (okCrit) {
+                ctx.beginPath();
+                ctx.strokeStyle = "#00e5ff";
+                ctx.lineWidth = 2;
+
+                let started = false;
+                for (let i = 0; i < n; i++) {
+                    const v = criticValues[i];
+                    if (!(typeof v === "number" && Number.isFinite(v))) {
+                        started = false;
+                        continue;
+                    }
+                    const x = (i / (n - 1)) * w;
+                    const y = getYCrit(v);
+                    if (!started) { ctx.moveTo(x, y); started = true; }
+                    else ctx.lineTo(x, y);
                 }
-                const x = (i / (n - 1)) * w;
-                const y = getY(v);
-                if (!started) { ctx.moveTo(x, y); started = true; }
-                else ctx.lineTo(x, y);
+                ctx.stroke();
             }
-            ctx.stroke();
 
-            // Bellman path (red)
-            ctx.beginPath();
-            ctx.strokeStyle = "#ff4d4d";
-            ctx.lineWidth = 2;
+            // Bellman path (red) using bellman scale
+            if (okBell) {
+                ctx.beginPath();
+                ctx.strokeStyle = "#ff4d4d";
+                ctx.lineWidth = 2;
 
-            let startedB = false;
-            for (let i = 0; i < n; i++) {
-                const v = bellmanValues[i];
-                if (!(typeof v === "number" && Number.isFinite(v))) { startedB = false; continue; }
-                const x = (i / (n - 1)) * w;
-                const y = getY(v);
-                if (!startedB) { ctx.moveTo(x, y); startedB = true; }
-                else ctx.lineTo(x, y);
+                let startedB = false;
+                for (let i = 0; i < n; i++) {
+                    const v = bellmanValues[i];
+                    if (!(typeof v === "number" && Number.isFinite(v))) { startedB = false; continue; }
+                    const x = (i / (n - 1)) * w;
+                    const y = getYBell(v);
+                    if (!startedB) { ctx.moveTo(x, y); startedB = true; }
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
             }
-            ctx.stroke();
-
 
             // Playhead
             const xHead = (currentIdx / (n - 1)) * w;
@@ -1598,6 +1741,7 @@
             ctx.lineTo(xHead, h);
             ctx.stroke();
         }
+
 
         function renderChipSlot(el, chipInfo, opacity) {
             if (!chipInfo) {
@@ -1618,8 +1762,12 @@
         }
 
         function render(d, idx) {
-            currentIdx = idx;                 // NEW: track current index
-            ensureProbeInitializedForIdx(idx);// NEW: keep probe controller == current frame state
+currentIdx = idx;
+if (idx !== lastRenderedIdx) {
+    lastRenderedIdx = idx;
+    ensureProbeInitializedForIdx(idx);
+}
+
 
             document.getElementById('frame').innerText = d.frame_idx;
 
