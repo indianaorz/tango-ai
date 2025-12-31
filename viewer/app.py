@@ -1666,6 +1666,73 @@ def api_predict_strategy():
         print(f"[API] Prediction failed: {e}")
         return jsonify({"error": str(e), "value": 0.0}), 500
 
+
+
+FPS_DEFAULT = 60.0
+TURN_TAU_DEFAULT_S = 6.0  # must match your dataset builder default (or pass through)
+
+def _turn_time_weight(duration_s: float, tau_s: float) -> float:
+    d = max(0.0, float(duration_s))
+    tau = max(1e-6, float(tau_s))
+    return 1.0 / (1.0 + (d / tau))
+
+def _safe_div(a: float, b: float) -> float:
+    return float(a) / float(b) if float(b) != 0.0 else 0.0
+
+def _ensure_turn_time_metrics(row: Dict[str, Any], *, fps: float = FPS_DEFAULT, tau_s: float = TURN_TAU_DEFAULT_S) -> None:
+    """
+    Ensure duration + per-second + weighted metrics exist on a strategy row.
+    This makes older rows display correctly and gives the viewer consistent keys.
+
+    Writes:
+      - turn_duration_frames, turn_duration_s
+      - damage_*_per_s, net_yield_per_s
+      - turn_time_weight, net_yield_weighted (and dealt/taken weighted)
+    """
+    # Derive duration from indices if missing
+    if "turn_duration_frames" not in row or "turn_duration_s" not in row:
+        commit_idx = int(row.get("commit_idx", 0) or 0)
+        next_open_idx = int(row.get("next_open_idx", commit_idx) or commit_idx)
+
+        dur_frames = max(0, next_open_idx - commit_idx)
+        row["turn_duration_frames"] = int(dur_frames)
+
+        fps_f = max(1e-6, float(fps))
+        row["turn_duration_s"] = float(dur_frames) / fps_f
+
+    dur_s = float(row.get("turn_duration_s", 0.0) or 0.0)
+
+    dealt = float(row.get("damage_dealt", 0) or 0)
+    taken = float(row.get("damage_taken", 0) or 0)
+
+    # net_yield fallback (raw)
+    if "net_yield" not in row:
+        row["net_yield"] = int(dealt - taken)
+
+    net = float(row.get("net_yield", 0) or 0)
+
+    # per-second rates
+    if "damage_dealt_per_s" not in row:
+        row["damage_dealt_per_s"] = _safe_div(dealt, dur_s)
+    if "damage_taken_per_s" not in row:
+        row["damage_taken_per_s"] = _safe_div(taken, dur_s)
+    if "net_yield_per_s" not in row:
+        row["net_yield_per_s"] = _safe_div(net, dur_s)
+
+    # time-discounted weighting
+    if "turn_time_weight" not in row:
+        row["turn_time_weight"] = float(_turn_time_weight(dur_s, tau_s=float(tau_s)))
+
+    w = float(row.get("turn_time_weight", 0.0) or 0.0)
+    if "damage_dealt_weighted" not in row:
+        row["damage_dealt_weighted"] = dealt * w
+    if "damage_taken_weighted" not in row:
+        row["damage_taken_weighted"] = taken * w
+    if "net_yield_weighted" not in row:
+        row["net_yield_weighted"] = net * w
+
+
+
 @app.route("/strategy")
 def view_strategy():
     turns: List[Dict[str, Any]] = []
@@ -1676,35 +1743,39 @@ def view_strategy():
     try:
         with open(STRATEGY_DB_PATH, "r", encoding="utf-8") as f:
             for line in f:
-                if not line.strip(): continue
+                if not line.strip():
+                    continue
                 try:
                     raw_turn = json.loads(line)
-                except Exception: continue
-                if not isinstance(raw_turn, dict): continue
+                except Exception:
+                    continue
+                if not isinstance(raw_turn, dict):
+                    continue
 
                 # v2 only
                 if str(raw_turn.get("format", "")) != "chip_window_strategy_v2":
                     continue
 
-                # net_yield fallback
-                if "net_yield" not in raw_turn:
-                    d = raw_turn.get("damage_dealt", 0) or 0
-                    t = raw_turn.get("damage_taken", 0) or 0
-                    try: raw_turn["net_yield"] = int(d) - int(t)
-                    except: raw_turn["net_yield"] = 0
-
+                # Decorate first (adds rich_hand, selected_indices, cross states, etc.)
                 try:
                     raw_turn = _decorate_strategy_v2_row(raw_turn)
-                except Exception as e:
+                except Exception:
                     continue
 
+                # Ensure time metrics exist for display + consistency (old rows too)
+                _ensure_turn_time_metrics(raw_turn, fps=FPS_DEFAULT, tau_s=TURN_TAU_DEFAULT_S)
+
                 # Grid indices for visualization
-                p_pos = raw_turn.get("player_pos") or [0, 0]
-                e_pos = raw_turn.get("enemy_pos") or [0, 0]
-                try: raw_turn["p_grid_idx"] = pos_to_grid_idx(float(p_pos[0]), float(p_pos[1]))
-                except: raw_turn["p_grid_idx"] = 0
-                try: raw_turn["e_grid_idx"] = pos_to_grid_idx(float(e_pos[0]), float(e_pos[1]))
-                except: raw_turn["e_grid_idx"] = 0
+                p_pos = raw_turn.get("player_pos") or raw_turn.get("player_pos_open") or [0, 0]
+                e_pos = raw_turn.get("enemy_pos") or raw_turn.get("enemy_pos_open") or [0, 0]
+                try:
+                    raw_turn["p_grid_idx"] = pos_to_grid_idx(float(p_pos[0]), float(p_pos[1]))
+                except Exception:
+                    raw_turn["p_grid_idx"] = 0
+                try:
+                    raw_turn["e_grid_idx"] = pos_to_grid_idx(float(e_pos[0]), float(e_pos[1]))
+                except Exception:
+                    raw_turn["e_grid_idx"] = 0
 
                 turns.append(raw_turn)
 
@@ -1721,6 +1792,8 @@ def view_strategy():
         print(f"Error reading strategy DB: {e}")
 
     return render_template("view_strategy.html", turns=turns[::-1])
+
+
 import math
 import os
 import json
