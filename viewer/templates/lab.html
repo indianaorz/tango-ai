@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Tango Flow Lab (Generative)</title>
+
+    <style>
+        /* --- GLOBAL & SCROLLBARS --- */
+        body { background: #111; color: #eee; font-family: 'Consolas', monospace; display: flex; flex-direction: column; align-items: center; padding: 20px; user-select: none; }
+        
+        ::-webkit-scrollbar { width: 10px; height: 10px; }
+        ::-webkit-scrollbar-track { background: #0a0a0a; border-left: 1px solid #222; }
+        ::-webkit-scrollbar-thumb { background: #333; border-radius: 5px; border: 2px solid #0a0a0a; }
+        ::-webkit-scrollbar-thumb:hover { background: #555; }
+
+        /* --- LAYOUT --- */
+        .layout { display: flex; gap: 20px; align-items: flex-start; justify-content: center; width: 100%; max-width: 1600px; margin-bottom: 20px; }
+
+        .panel { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 15px; width: 320px; flex-shrink: 0; }
+        .panel h4 { margin: 0 0 10px 0; color: #888; border-bottom: 1px solid #444; font-size: 12px; text-transform: uppercase; padding-bottom: 5px; }
+
+        /* SCALARS */
+        .control-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 11px; }
+        input[type=number], input[type=text] { background: #333; color: #fff; border: 1px solid #555; padding: 4px; border-radius: 2px; }
+        input[type=number] { width: 60px; } input[type=text] { width: 100%; }
+
+        /* GRID */
+        .grid-container { display: grid; grid-template-columns: repeat(6, 50px); grid-template-rows: repeat(3, 40px); gap: 2px; background: #000; border: 2px solid #444; margin-bottom: 15px; position: relative; }
+        .cell { background: #222; border: 2px solid #333; position: relative; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #555; }
+        .cell:hover { border-color: #666; }
+        .cell.p0 { border-color: #4db8ff; } .cell.p1 { border-color: #ff4d4d; }
+        .tile-1 { background: #000; } .tile-2 { background: rgba(255,255,255,0.1); }
+        .tile-3 { background: repeating-linear-gradient(45deg, #333 0, #333 2px, transparent 2px, transparent 4px); }
+        .tile-4 { background: rgba(160, 80, 255, 0.3); } .tile-5 { background: rgba(255, 220, 80, 0.3); }
+        .tile-6 { background: rgba(80, 220, 120, 0.3); } .tile-7 { background: rgba(80, 220, 255, 0.3); }
+        .entity { width: 16px; height: 16px; border-radius: 50%; position: absolute; pointer-events: none; z-index: 10; box-shadow: 0 0 5px #000; }
+        .ent-p { background: cyan; box-shadow: 0 0 8px cyan; border: 1px solid #fff; }
+        .ent-e { background: red; box-shadow: 0 0 8px red; border: 1px solid #fff; }
+
+        /* FORMS & CHIPS */
+        .form-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-bottom: 10px; }
+        .form-btn { background: #222; border: 1px solid #444; color: #888; font-size: 10px; padding: 4px; text-align: center; cursor: pointer; border-radius: 3px; }
+        .form-btn.active { border-color: #fff; color: #000; font-weight: bold; background: #ccc; }
+        .beast-toggle { width: 100%; padding: 6px; background: #220044; border: 1px solid #6600cc; color: #aa88ff; text-align: center; cursor: pointer; font-size: 11px; margin-bottom: 15px; border-radius: 4px; }
+        .beast-toggle.active { background: #6600cc; color: #fff; box-shadow: 0 0 10px #aa00ff; }
+        .chip-display { display: flex; align-items: center; gap: 10px; background: #222; padding: 5px; border: 1px solid #444; margin-bottom: 5px; }
+        .chip-browser { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; height: 250px; overflow-y: auto; background: #111; border: 1px solid #333; padding: 4px; }
+        .chip-opt { border: 1px solid #333; cursor: pointer; position: relative; height: 40px; background: #000; display:flex; align-items:center; justify-content:center; }
+        .chip-opt.active { border-color: #00ffff; box-shadow: 0 0 5px cyan; }
+        .chip-opt img { width: 100%; height: 100%; object-fit: contain; }
+
+        /* CONTROLLER VIZ */
+        .controller-viz { position: relative; width: 220px; height: 120px; background: #ccc; border-radius: 60px 60px 20px 20px; margin: 0 auto; border: 4px solid #999; box-shadow: inset 0 -5px 10px rgba(0,0,0,0.2); transform: scale(0.9); }
+        .c-btn { position: absolute; background: #444; border: 1px solid #222; transition: all 0.05s; }
+        .c-btn.active { background: #0f0 !important; box-shadow: 0 0 10px #0f0; transform: scale(0.95); }
+        .btn-L { top:-10px; left:20px; width:60px; height:15px; border-radius: 5px 5px 0 0; background:#bbb; z-index:-1; }
+        .btn-R { top:-10px; right:20px; width:60px; height:15px; border-radius: 5px 5px 0 0; background:#bbb; z-index:-1; }
+        .dpad-area { position: absolute; top:40px; left:20px; width:60px; height:60px; }
+        .btn-U { top:0; left:20px; width:20px; height:20px; border-radius: 3px 3px 0 0; }
+        .btn-D { bottom:0; left:20px; width:20px; height:20px; border-radius: 0 0 3px 3px; }
+        .btn-Lt { top:20px; left:0; width:20px; height:20px; border-radius: 3px 0 0 3px; }
+        .btn-Rt { top:20px; right:0; width:20px; height:20px; border-radius: 0 3px 3px 0; }
+        .dpad-center { position: absolute; top:20px; left:20px; width:20px; height:20px; background: #444; pointer-events: none; }
+        .btn-A { top:45px; right:15px; width:24px; height:24px; border-radius:50%; background:#a00; color:rgba(255,255,255,0.5); font-size:10px; display:flex; align-items:center; justify-content:center; font-weight:bold; }
+        .btn-B { top:60px; right:45px; width:24px; height:24px; border-radius:50%; background:#a00; color:rgba(255,255,255,0.5); font-size:10px; display:flex; align-items:center; justify-content:center; font-weight:bold; }
+
+        /* BUTTONS */
+        button.big-btn { width: 100%; padding: 10px; background: #004400; color: #fff; border: 1px solid #008800; cursor: pointer; font-weight: bold; margin-top: 10px; border-radius: 4px; }
+        button.big-btn:hover { background: #006600; }
+
+        /* --- SPLIT MATRIX (Bottom) --- */
+        .bottom-section { width: 98%; max-width: 1800px; display: flex; flex-direction: column; }
+
+        .matrix-wrapper { display: flex; width: 100%; border: 1px solid #333; background: #000; height: 260px; }
+
+        /* Left Side: Fixed Labels */
+        .matrix-labels-col { 
+            width: 50px; flex-shrink: 0; background: #111; border-right: 1px solid #333; 
+            display: flex; flex-direction: column; padding-top: 5px; z-index: 2;
+        }
+        .label-cell { 
+            height: 20px; display: flex; align-items: center; justify-content: flex-end; 
+            padding-right: 8px; font-size: 10px; color: #888; font-weight: bold; border-bottom: 1px solid #222;
+        }
+
+        /* Right Side: Scrollable Timeline */
+        .matrix-data-col { 
+            flex-grow: 1; overflow-x: auto; overflow-y: hidden; position: relative; 
+            display: flex; flex-direction: column; padding-top: 5px;
+        }
+        .data-row { 
+            display: flex; height: 20px; border-bottom: 1px solid #222; width: max-content; 
+        }
+        .matrix-cell { 
+            width: 8px; height: 19px; background: #080808; margin-right: 1px; flex-shrink: 0; 
+        }
+        .matrix-cell:hover { background: #444 !important; }
+    </style>
+</head>
+<body>
+
+    <h2>🌊 Bellman Flow Lab</h2>
+
+    <div class="layout">
+
+        <div class="panel">
+            <h4>Scalars</h4>
+            <div class="control-row"><label>P HP</label> <input type="number" id="p_hp" value="1000"></div>
+            <div class="control-row"><label>E HP</label> <input type="number" id="e_hp" value="1000"></div>
+            <div class="control-row"><label>P Charge</label> <input type="number" id="p_chg" value="0" step="0.1" min="0" max="2"></div>
+            <div class="control-row"><label>E Charge</label> <input type="number" id="e_chg" value="0" step="0.1" min="0" max="2"></div>
+            <div class="control-row"><label>Cust Gauge</label> <input type="number" id="cust" value="50" min="0" max="100"></div>
+
+            <h4 style="margin-top:20px;">Active Chip</h4>
+            <div class="active-chip-display chip-display" id="active_chip_disp">
+                <div id="active_chip_icon" style="width:30px; height:30px; background:#000; border:1px solid #444; display:flex; align-items:center; justify-content:center;">?</div>
+                <div id="active_chip_name" style="font-size:11px; color:#aaa;">No Chip</div>
+            </div>
+            <input type="text" id="chip_search" placeholder="Search chips..." oninput="filterChips(this.value)" style="width:95%; margin-bottom:5px;">
+            <div class="chip-browser" id="chip_list">Loading...</div>
+        </div>
+
+        <div style="display:flex; flex-direction:column; align-items:center; width: 340px;">
+            <div class="grid-container" id="grid" oncontextmenu="return false;"></div>
+            <div style="font-size:10px; color:#aaa; margin-bottom:10px;">
+                <span style="color:cyan">L-Click: P/E Pos</span> | <span style="color:orange">R-Click: Tile</span> | <span style="color:#888">Ctrl: Owner</span>
+            </div>
+
+            <div class="panel" style="width:100%; margin-bottom:10px;">
+                <h4>Player Form</h4>
+                <div class="form-grid" id="p_forms"></div>
+                <div class="beast-toggle" id="p_beast" onclick="toggleBeast('p')">BEAST OUT</div>
+
+                <h4 style="margin-top:15px;">Enemy Form</h4>
+                <div class="form-grid" id="e_forms"></div>
+                <div class="beast-toggle" id="e_beast" onclick="toggleBeast('e')">BEAST OUT</div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h4>Generated Input</h4>
+            <div class="controller-viz" id="ctrl">
+                <div class="c-btn btn-L" id="btn_LEFT_SHOULDER"></div>
+                <div class="c-btn btn-R" id="btn_RIGHT_SHOULDER"></div>
+                <div class="dpad-area">
+                    <div class="c-btn btn-U" id="btn_DPAD_UP"></div>
+                    <div class="c-btn btn-D" id="btn_DPAD_DOWN"></div>
+                    <div class="c-btn btn-Lt" id="btn_DPAD_LEFT"></div>
+                    <div class="c-btn btn-Rt" id="btn_DPAD_RIGHT"></div>
+                    <div class="dpad-center"></div>
+                </div>
+                <div class="c-btn btn-A" id="btn_EAST">A</div>
+                <div class="c-btn btn-B" id="btn_SOUTH">B</div>
+            </div>
+
+            <div style="margin-top:20px; border-top:1px solid #444; padding-top:10px;">
+                <h4 style="color:cyan; border-bottom:none;">Prompt Engineering</h4>
+                <div style="margin-bottom:10px;">
+                    <label>Game Signal (Sentiment)</label>
+                    <input type="range" id="prompt_slider" min="-300" max="300" step="0.1" value="1" style="width:100%" oninput="document.getElementById('p_val').innerText=this.value">
+                    <div style="text-align:right; font-size:12px; color:cyan;" id="p_val">1.0</div>
+                </div>
+
+                <div style="margin-bottom:10px;">
+                    <label>Guidance Scale (CFG)</label>
+                    <input type="range" id="cfg_slider" min="0" max="10" step="0.1" value="2.5" style="width:100%" oninput="document.getElementById('cfg_val').innerText=this.value">
+                    <div style="text-align:right; font-size:12px; color:magenta;" id="cfg_val">2.5</div>
+                </div>
+
+                <button class="big-btn" id="btn_gen" onclick="generatePlan()">GENERATE PLAN</button>
+                <button class="big-btn" style="margin-top:5px; background:#222; border-color:#444; color:#ccc;" onclick="toggleAutoGen()">🔄 AUTO-GEN (1s)</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="bottom-section">
+        <h4 id="matrix_title" style="color:#888; border-bottom:1px solid #444; font-size:12px; text-transform:uppercase; padding-bottom:5px;">Input Matrix</h4>
+        
+        <div class="matrix-wrapper">
+            <div id="matrix_labels" class="matrix-labels-col"></div>
+            <div id="matrix_timeline" class="matrix-data-col"></div>
+        </div>
+    </div>
+
+<script>
+// Provided by Flask: render_template("lab.html", seq_len=..., hist_len=...)
+const SEQ_LEN = {{ (seq_len if seq_len is not none else 18) | tojson }};
+const HIST_LEN = {{ (hist_len if hist_len is not none else 256) | tojson }};
+
+const MAX_MATRIX_COLS = 480; 
+const DISPLAY_COLS = Math.max(18, Math.min(MAX_MATRIX_COLS, SEQ_LEN));
+const BIN = Math.max(1, Math.ceil(SEQ_LEN / DISPLAY_COLS)); 
+
+const FORM_MAPPING = [
+    { type: 'Normal', normal:0, beast:11 }, { type: 'Fire', normal:1, beast:13 },
+    { type: 'Elec', normal:2, beast:14 }, { type: 'Slash', normal:3, beast:15 },
+    { type: 'Erase', normal:4, beast:16 }, { type: 'Charge', normal:5, beast:17 },
+    { type: 'Aqua', normal:6, beast:18 }, { type: 'Thawk', normal:7, beast:19 },
+    { type: 'Tengu', normal:8, beast:20 }, { type: 'Grnd', normal:9, beast:21 },
+    { type: 'Dust', normal:10,beast:22 },
+];
+
+const KEYS = ['DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'EAST', 'SOUTH', 'LEFT_SHOULDER', 'RIGHT_SHOULDER', 'START', 'BACK'];
+const KEY_LABELS = {'DPAD_UP':'UP','DPAD_DOWN':'DN','DPAD_LEFT':'LT','DPAD_RIGHT':'RT','EAST':'A','SOUTH':'B','LEFT_SHOULDER':'L','RIGHT_SHOULDER':'R','START':'ST','BACK':'SEL'};
+
+let state = {
+    grid_owners: [0,0,0, 1,1,1, 0,0,0, 1,1,1, 0,0,0, 1,1,1],
+    grid_tiles: Array(18).fill(2),
+    p_idx: 7, e_idx: 10,
+    p_form_idx: 0, p_is_beast: false,
+    e_form_idx: 0, e_is_beast: false,
+    active_chip_id: 65535,
+    chip_db: [],
+    plan: []
+};
+
+let autoGenInterval = null;
+
+async function init() {
+    renderGrid(); renderForms('p'); renderForms('e'); renderMatrix();
+    document.getElementById('btn_gen').innerText = `GENERATE PLAN (${SEQ_LEN}f)`;
+    document.getElementById('matrix_title').innerText = `Input Matrix (${SEQ_LEN} frames, 1:1 view)`;
+
+    try {
+        const r = await fetch('/api/chip_library');
+        const db = await r.json();
+        state.chip_db = Object.values(db).filter((v,i,a)=>a.findIndex(t=>(t.Name===v.Name))===i).sort((a,b)=>(a.SId||0)-(b.SId||0));
+        renderChipList();
+    } catch(e) {}
+}
+
+function toggleAutoGen() {
+    const btn = document.querySelector('button[onclick="toggleAutoGen()"]');
+    if (autoGenInterval) {
+        clearInterval(autoGenInterval);
+        autoGenInterval = null;
+        btn.innerText = "🔄 AUTO-GEN (1s)";
+        btn.style.background = "#222";
+        btn.style.borderColor = "#444";
+        btn.style.color = "#ccc";
+    } else {
+        generatePlan();
+        autoGenInterval = setInterval(generatePlan, 500);
+        btn.innerText = "🛑 STOP AUTO-GEN";
+        btn.style.background = "#440000";
+        btn.style.borderColor = "#ff4444";
+        btn.style.color = "#ff4444";
+    }
+}
+
+function getPayload() {
+    const pForm = FORM_MAPPING[state.p_form_idx];
+    const eForm = FORM_MAPPING[state.e_form_idx];
+    return {
+        p_idx: state.p_idx, e_idx: state.e_idx,
+        p_hp: document.getElementById('p_hp').value,
+        e_hp: document.getElementById('e_hp').value,
+        p_chg: document.getElementById('p_chg').value,
+        e_chg: document.getElementById('e_chg').value,
+        cust: document.getElementById('cust').value,
+        p_emo: state.p_is_beast ? pForm.beast : pForm.normal,
+        e_emo: state.e_is_beast ? eForm.beast : eForm.normal,
+        chip_id: state.active_chip_id,
+        grid_tiles: state.grid_tiles,
+        grid_owners: state.grid_owners,
+        prompt_reward: parseFloat(document.getElementById('prompt_slider').value),
+        cfg_scale: parseFloat(document.getElementById('cfg_slider').value)
+    };
+}
+
+function _binRange(col) {
+    const t0 = col * BIN;
+    const t1 = Math.min(SEQ_LEN, (col + 1) * BIN);
+    return [t0, t1];
+}
+
+function _binMax(key, t0, t1) {
+    let m = 0.0;
+    for (let t = t0; t < t1; t++) {
+        if (state.plan.length > t) {
+            const v = state.plan[t][key] || 0.0;
+            if (v > m) m = v;
+        }
+    }
+    return m;
+}
+
+function renderMatrix() {
+    const labelCol = document.getElementById('matrix_labels');
+    const timeCol = document.getElementById('matrix_timeline');
+    
+    // If it's already populated, don't redraw
+    if (labelCol.innerHTML !== '') return;
+
+    labelCol.innerHTML = '';
+    timeCol.innerHTML = '';
+
+    KEYS.forEach(key => {
+        // 1. Create Label
+        const lbl = document.createElement('div');
+        lbl.className = 'label-cell';
+        lbl.innerText = KEY_LABELS[key];
+        labelCol.appendChild(lbl);
+
+        // 2. Create Data Row
+        const row = document.createElement('div');
+        row.className = 'data-row';
+        
+        for (let col = 0; col < DISPLAY_COLS; col++) {
+            const [t0, t1] = _binRange(col);
+            const val = (state.plan && state.plan.length) ? _binMax(key, t0, t1) : 0.0;
+
+            const cell = document.createElement('div');
+            cell.className = `matrix-cell col-${col}`; 
+            const gVal = Math.floor(val * 255);
+            cell.style.backgroundColor = val > 0.1 ? `rgba(0, ${gVal}, 0, 0.8)` : '#111';
+            
+            cell.title = `${KEY_LABELS[key]} @ [${t0}..${t1}): ${val.toFixed(2)}`;
+            // Keep hover to show on controller viz
+            cell.onmouseover = () => showFrame(t0);
+            row.appendChild(cell);
+        }
+        timeCol.appendChild(row);
+    });
+}
+
+function renderGrid() {
+    const grid = document.getElementById('grid');
+    grid.innerHTML = '';
+    for(let i=0; i<18; i++) {
+        let d = document.createElement('div');
+        d.className = `cell tile-${state.grid_tiles[i]} p${state.grid_owners[i]}`;
+        if(i === state.p_idx) d.innerHTML += '<div class="entity ent-p"></div>';
+        if(i === state.e_idx) d.innerHTML += '<div class="entity ent-e"></div>';
+        d.onmousedown = (e) => {
+            if (e.button === 2) state.grid_tiles[i] = (state.grid_tiles[i] % 7) + 1;
+            else if (e.ctrlKey) state.grid_owners[i] = 1 - state.grid_owners[i];
+            else if (e.shiftKey) state.e_idx = i;
+            else state.p_idx = i;
+            renderGrid();
+        };
+        d.oncontextmenu = (e) => e.preventDefault();
+        grid.appendChild(d);
+    }
+}
+
+function renderForms(actor) {
+    const container = document.getElementById(`${actor}_forms`);
+    container.innerHTML = '';
+    const currentIdx = (actor === 'p') ? state.p_form_idx : state.e_form_idx;
+    FORM_MAPPING.forEach((f, i) => {
+        const btn = document.createElement('div');
+        btn.className = `form-btn f-${f.type} ${i === currentIdx ? 'active' : ''}`;
+        btn.innerText = f.type;
+        btn.onclick = () => {
+            if(actor === 'p') state.p_form_idx = i; else state.e_form_idx = i;
+            renderForms(actor);
+        };
+        container.appendChild(btn);
+    });
+    const bBtn = document.getElementById(`${actor}_beast`);
+    const isBeast = (actor === 'p') ? state.p_is_beast : state.e_is_beast;
+    if (isBeast) bBtn.classList.add('active'); else bBtn.classList.remove('active');
+}
+function toggleBeast(actor) {
+    if(actor === 'p') state.p_is_beast = !state.p_is_beast; else state.e_is_beast = !state.e_is_beast;
+    renderForms(actor);
+}
+
+function renderChipList(filter = "") {
+    const el = document.getElementById('chip_list');
+    el.innerHTML = '';
+    const noChip = document.createElement('div');
+    noChip.className = `chip-opt ${state.active_chip_id === 65535 ? 'active' : ''}`;
+    noChip.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#666;">NONE</div>`;
+    noChip.onclick = () => selectChip(65535, "No Chip", null);
+    el.appendChild(noChip);
+    const f = filter.toLowerCase();
+    state.chip_db.forEach(c => {
+        if (filter && !c.Name.toLowerCase().includes(f)) return;
+        const id = c.SId || c.MId; if (!id) return;
+        const div = document.createElement('div');
+        div.className = `chip-opt ${state.active_chip_id === id ? 'active' : ''}`;
+        let imgHtml = c.Image ? `<img src="/assets/images/${c.Image}" loading="lazy">` : `<span style="font-size:9px">${id}</span>`;
+        div.innerHTML = `${imgHtml}`;
+        div.title = c.Name;
+        div.onclick = () => selectChip(id, c.Name, c.Image);
+        el.appendChild(div);
+    });
+}
+function selectChip(id, name, img) {
+    state.active_chip_id = id;
+    document.getElementById('active_chip_name').innerText = name;
+    const icon = document.getElementById('active_chip_icon');
+    icon.innerHTML = img ? `<img src="/assets/images/${img}" style="width:100%;height:100%;object-fit:contain;">` : "?";
+    renderChipList(document.getElementById('chip_search').value);
+}
+function filterChips(val) { renderChipList(val); }
+
+async function generatePlan() {
+    const btn = document.getElementById('btn_gen');
+    if (btn) btn.innerText = "GENERATING...";
+    try {
+        const res = await fetch('/api/generate_plan', {
+            method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(getPayload())
+        });
+        const data = await res.json();
+        if(data.error) alert("Error: " + data.error);
+        else if(data.plan) {
+            state.plan = data.plan;
+            document.getElementById('matrix_labels').innerHTML = ''; // Force rebuild of matrix
+            renderMatrix();
+        }
+    } catch(e) { console.error(e); }
+    if (btn) btn.innerText = `GENERATE PLAN (${SEQ_LEN}f)`;
+}
+
+function showFrame(idx) {
+    if (!state.plan || !state.plan[idx]) return;
+    const frame = state.plan[idx];
+
+    // Update controller viz on hover
+    const map = {
+        'DPAD_UP': 'btn_DPAD_UP', 'DPAD_DOWN': 'btn_DPAD_DOWN',
+        'DPAD_LEFT': 'btn_DPAD_LEFT', 'DPAD_RIGHT': 'btn_DPAD_RIGHT',
+        'EAST': 'btn_EAST', 'SOUTH': 'btn_SOUTH',
+        'LEFT_SHOULDER': 'btn_LEFT_SHOULDER', 'RIGHT_SHOULDER': 'btn_RIGHT_SHOULDER'
+    };
+    for (let k in map) {
+        const el = document.getElementById(map[k]);
+        const val = frame[k] || 0.0;
+        if (val > 0.5) el.classList.add('active'); else el.classList.remove('active');
+    }
+}
+
+init();
+</script>
+</body>
+</html>
