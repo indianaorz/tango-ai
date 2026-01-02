@@ -1,207 +1,129 @@
 # critic_minimal/dataset.py
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
+from torch.utils.data import Dataset
+from tqdm import tqdm
 
 
-def _load_manifest(cache_dir: Path) -> Optional[Dict[str, Any]]:
-    mpath = cache_dir / "manifest.json"
-    if not mpath.exists():
-        return None
-    try:
-        m = json.loads(mpath.read_text(encoding="utf-8"))
-        return m if isinstance(m, dict) else None
-    except Exception:
-        return None
-
-
-@dataclass(frozen=True)
-class CacheSchema:
-    seq_len: int
-    action_dim: int
-    scalar_dim: int
-
-
-def _infer_schema_from_one_file(pt_path: Path) -> CacheSchema:
-    ck = torch.load(pt_path, map_location="cpu")
-    if not isinstance(ck, dict):
-        raise RuntimeError(f"Bad cache file (not dict): {pt_path}")
-
-    x = ck.get("x", None)
-    y = ck.get("y", None)
-    valid = ck.get("valid", None)
-
-    if not isinstance(x, dict) or not torch.is_tensor(y) or not torch.is_tensor(valid):
-        raise RuntimeError(f"Bad cache file (missing x/y/valid): {pt_path}")
-
-    # y: [N,T]
-    if y.ndim != 2:
-        raise RuntimeError(f"Bad y shape in {pt_path}: {tuple(y.shape)}")
-    T = int(y.shape[1])
-
-    # action: [N,T,A]
-    action = x.get("action", None)
-    scalars = x.get("scalars", None)
-    if not torch.is_tensor(action) or action.ndim != 3:
-        raise RuntimeError(f"Bad x[action] in {pt_path}: {None if action is None else tuple(action.shape)}")
-    if not torch.is_tensor(scalars) or scalars.ndim != 3:
-        raise RuntimeError(f"Bad x[scalars] in {pt_path}: {None if scalars is None else tuple(scalars.shape)}")
-
-    A = int(action.shape[2])
-    S = int(scalars.shape[2])
-
-    if int(action.shape[1]) != T or int(scalars.shape[1]) != T:
-        raise RuntimeError(f"Time dim mismatch in {pt_path}: yT={T} actionT={action.shape[1]} scalarsT={scalars.shape[1]}")
-
-    return CacheSchema(seq_len=T, action_dim=A, scalar_dim=S)
-
-
-class StreamingMinimalQDataset(torch.utils.data.IterableDataset):
-    """
-    Stream-load cache files one by one (deterministic order/shuffle).
-
-    Yields:
-      (x: dict [T,...], y_raw: [T], valid:[T])
-    """
-
+class FlowDataset(Dataset):
     def __init__(
         self,
         cache_dir: str,
+        context_len: int = 256,
+        pred_len: int = 18,
         *,
-        split: str = "train",
-        val_ratio: float = 0.1,
-        seed: int = 1337,
-        max_sequences: Optional[int] = None,
+        ret_scale: float = 50.0,  # tune this; 30-100 are typical
+        ret_clip: float = 200.0,  # safety clamp before tanh
     ):
-        super().__init__()
-        self.cache_dir = Path(cache_dir)
-        self.split = str(split)
-        self.seed = int(seed)
-        self.max_sequences = max_sequences
+        self.context_len = int(context_len)
+        self.pred_len = int(pred_len)
+        self.ret_scale = float(ret_scale)
+        self.ret_clip = float(ret_clip)
 
-        all_files = sorted([p for p in self.cache_dir.glob("*.pt") if p.name != "_manifest.pt"])
-        if not all_files:
-            raise RuntimeError(f"No cache files in {cache_dir}")
+        if self.context_len <= 0:
+            raise ValueError("context_len must be > 0")
+        if self.pred_len <= 0:
+            raise ValueError("pred_len must be > 0")
 
-        # deterministic split by filename stem
-        rng = __import__("random").Random(self.seed)
-        names = [p.stem for p in all_files]
-        rng.shuffle(names)
+        self.data_store: List[Dict[str, torch.Tensor]] = []
+        self.indices: List[Tuple[int, int]] = []
+        self.weights: List[float] = []
 
-        if float(val_ratio) <= 0:
-            n_val = 0
-        else:
-            n_val = max(1, int(len(names) * float(val_ratio)))
+        files = sorted(list(Path(cache_dir).glob("*.pt")))
+        if not files:
+            raise RuntimeError(f"No files in {cache_dir}")
 
-        val_set = set(names[:n_val])
+        print(f"Loading {len(files)} replays into RAM...")
 
-        if self.split == "val":
-            self.files = [p for p in all_files if p.stem in val_set]
-        else:
-            self.files = [p for p in all_files if p.stem not in val_set]
-
-        if not self.files:
-            raise RuntimeError(f"{split} split has 0 files (cache_dir={cache_dir})")
-
-        # length estimate from manifest (optional)
-        self._approx_len = None
-        m = _load_manifest(self.cache_dir)
-        if m is not None:
+        for f_path in tqdm(files):
             try:
-                total = int(m.get("total_sequences", 0) or 0)
-                num_files = int(m.get("num_files", 0) or len(all_files))
-                if total > 0 and num_files > 0:
-                    avg = total / float(num_files)
-                    self._approx_len = int(len(self.files) * avg)
-            except Exception:
-                self._approx_len = None
+                d = torch.load(f_path, map_location="cpu")
+                if "states" not in d:
+                    continue
 
-        # schema inference (fast, 1 file)
-        self.schema = _infer_schema_from_one_file(self.files[0])
+                states = d["states"].float()    # [N, feat]
+                actions = d["actions"].float()  # [N, act]
+                returns = d["returns"].float()  # [N]
+                weights = d["weights"].float()  # [N]
+
+                N = int(weights.shape[0])
+                if N <= 0:
+                    continue
+                if actions.shape[0] != N or states.shape[0] != N or returns.shape[0] != N:
+                    # corrupted / mismatched cache
+                    continue
+
+                # Make sure we NEVER sample indices that don't have full future action slice.
+                # Valid t must satisfy: t + pred_len <= N  => t <= N - pred_len
+                # We enforce this in two ways:
+                #   (1) zero out tail weights
+                #   (2) explicitly check t + pred_len <= N when collecting indices
+                if N > self.pred_len:
+                    weights[(N - self.pred_len + 1) :].fill_(0.0)  # conservative tail kill
+                else:
+                    weights.fill_(0.0)
+
+                valid_t = torch.nonzero(weights > 0).flatten()
+
+                store_idx = len(self.data_store)
+                self.data_store.append({"s": states, "a": actions, "r": returns})
+
+                for t in valid_t:
+                    ti = int(t.item())
+                    if ti < 0:
+                        continue
+                    if ti + self.pred_len > N:
+                        continue  # hard safety
+                    self.indices.append((store_idx, ti))
+                    self.weights.append(float(weights[ti].item()))
+
+            except Exception as e:
+                print(f"Skipping {f_path.name}: {e}")
+
+        if not self.indices:
+            raise RuntimeError("No valid samples found (all weights zero?)")
+
+        # sampler likes double
+        self.weights_tensor = torch.tensor(self.weights, dtype=torch.double)
+        print(f"Dataset Ready. Samples: {len(self.indices)}")
 
     def __len__(self) -> int:
-        if self._approx_len is None:
-            return int(len(self.files) * 512)
-        return int(self._approx_len)
+        return len(self.indices)
 
-    def __iter__(self) -> Iterator[Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor]]:
-        worker_info = torch.utils.data.get_worker_info()
+    def _encode_return(self, raw_val: torch.Tensor) -> torch.Tensor:
+        x = raw_val.clamp(min=-self.ret_clip, max=self.ret_clip)
+        return torch.tanh(x / self.ret_scale)
 
-        # shard files across workers
-        if worker_info is None:
-            my_files = list(self.files)
-            worker_id = 0
-            num_workers = 1
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        f_idx, t = self.indices[idx]
+        data = self.data_store[f_idx]
+        states = data["s"]  # [N, feat]
+        actions = data["a"] # [N, act]
+        returns = data["r"] # [N]
+
+        # History slice [t-context_len : t], left-pad with zeros if needed
+        start_hist = t - self.context_len
+        if start_hist < 0:
+            pad = torch.zeros((abs(start_hist), states.shape[1]), dtype=states.dtype)
+            hist_slice = states[0:t]
+            history = torch.cat([pad, hist_slice], dim=0)
         else:
-            worker_id = int(worker_info.id)
-            num_workers = int(worker_info.num_workers)
-            per_worker = int(__import__("math").ceil(len(self.files) / float(num_workers)))
-            a = worker_id * per_worker
-            b = min(a + per_worker, len(self.files))
-            my_files = self.files[a:b]
+            history = states[start_hist:t]
 
-        # deterministic per-worker shuffle (no time dependence)
-        rng = __import__("random").Random(self.seed + 1009 * worker_id + 9176 * num_workers)
-        rng.shuffle(my_files)
+        # Future actions [t : t+pred_len] (guaranteed full by construction)
+        future_actions = actions[t : t + self.pred_len]
+        if future_actions.shape[0] != self.pred_len:
+            raise IndexError("future_actions shorter than pred_len; check cache weights / index filtering")
 
-        # deterministic per-worker row permutation generator
-        g = torch.Generator()
-        g.manual_seed(self.seed + 1000003 * worker_id)
+        raw_ret = returns[t]
+        ret_val = self._encode_return(raw_ret).unsqueeze(0)
 
-        yielded = 0
-
-        for p in my_files:
-            ck = None
-            try:
-                ck = torch.load(p, map_location="cpu")
-                if not isinstance(ck, dict):
-                    continue
-                x_dict = ck.get("x", None)
-                y = ck.get("y", None)
-                valid = ck.get("valid", None)
-                if not isinstance(x_dict, dict) or not torch.is_tensor(y) or not torch.is_tensor(valid):
-                    continue
-
-                # basic shape checks
-                if y.ndim != 2 or valid.ndim != 2:
-                    continue
-                if int(y.shape[1]) != self.schema.seq_len:
-                    continue
-
-                n_rows = int(y.shape[0])
-                if n_rows == 0:
-                    continue
-
-                idxs = torch.randperm(n_rows, generator=g)
-
-                for i in idxs.tolist():
-                    x_out = {k: v[i] for k, v in x_dict.items() if torch.is_tensor(v)}
-                    yield x_out, y[i], valid[i]
-                    yielded += 1
-                    if self.max_sequences is not None and yielded >= int(self.max_sequences):
-                        return
-            except Exception:
-                continue
-            finally:
-                if ck is not None:
-                    del ck
-
-
-def collate_minimal_q(
-    batch: List[Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor]]
-) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
-    xs, ys, vs = zip(*batch)
-    out: Dict[str, torch.Tensor] = {}
-    for k in xs[0].keys():
-        out[k] = torch.stack([x[k] for x in xs], dim=0)  # [B,T,...]
-    y = torch.stack(list(ys), dim=0)  # [B,T] RAW
-    valid = torch.stack(list(vs), dim=0)  # [B,T]
-    return out, y, valid
-
-
-__all__ = ["CacheSchema", "StreamingMinimalQDataset", "collate_minimal_q"]
+        return {
+            "history": history,         # [context_len, feat]
+            "action": future_actions,   # [pred_len, act]
+            "return": ret_val,          # [1]
+        }

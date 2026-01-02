@@ -1820,6 +1820,29 @@ def _is_finite(x: Any) -> bool:
     except Exception:
         return False
 
+def _ema_smooth_masked(values: List[Optional[float]], mask: List[bool], alpha: float) -> List[Optional[float]]:
+    if not (0.0 < alpha <= 1.0):
+        raise ValueError(f"alpha must be in (0,1], got {alpha}")
+    if len(mask) != len(values):
+        raise ValueError("mask length mismatch")
+
+    out: List[Optional[float]] = [None] * len(values)
+    ema: Optional[float] = None
+
+    for i, v in enumerate(values):
+        if not mask[i]:
+            ema = None
+            out[i] = None
+            continue
+
+        if v is None:
+            out[i] = ema if ema is not None else None
+            continue
+
+        ema = v if ema is None else (alpha * v + (1.0 - alpha) * ema)
+        out[i] = ema
+
+    return out
 
 def _coerce_values_by_frame(
     values_by_frame: Union[List[Any], Dict[Any, Any]],
@@ -1976,44 +1999,310 @@ def _densify_and_smooth_masked(
     smoothed = _ema_smooth_masked(densified, mask, alpha=ema_alpha)
     return smoothed, densified
 
+# Ensure these imports are available
+import os
+import json
+import torch
+import numpy as np
+from pathlib import Path
+from flask import Flask, render_template, jsonify, request
+from critic_minimal.model_flow import ActionFlowDiT
+from critic_minimal.features import extract_flow_features, BUTTON_KEYS
 
-# -----------------------------------------------------------------------------
-# Critic init (critic_minimal)
-# -----------------------------------------------------------------------------
+# --- CONFIG ---
+# Point this to flow_v3_cfg/best.pt if you retrained, or try flow_v2/best.pt
+_FLOW_CKPT_PATH = r"checkpoints/flow_v10_8s/last.pt"
+_CHIP_LIB_PATH = r"data/chip_library.json"
+_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-_CRITIC = None
-_CRITIC_ERR = None
+_MODEL = None
+_CHIPS = {}
+def _encode_prompt_return(x: float, *, ret_scale: float = 50.0, ret_clip: float = 200.0) -> float:
+    # must match FlowDataset encoding
+    x = max(-ret_clip, min(ret_clip, float(x)))
+    import math
+    return math.tanh(x / ret_scale)
 
-_DEFAULT_CRITIC_MINIMAL_CKPT = r"C:\Users\leeor\FFCO\ai\tango-ai\checkpoints\critic_minimal\minq_v2_tanh\best.pt"
-_DEFAULT_CRITIC_DEVICE = "cuda"
-_DEFAULT_BATCH_SEQS = 256
+def _load_state_dict_compat(path: str, device: str):
+    """
+    Supports:
+      - new: {"model": state_dict, "opt":..., "epoch":..., "best_loss":...}
+      - legacy: state_dict directly
+    Returns (state_dict, meta_dict)
+    """
+    obj = torch.load(path, map_location=device)
+    if isinstance(obj, dict) and "model" in obj and isinstance(obj["model"], dict):
+        meta = {
+            "epoch": obj.get("epoch", None),
+            "best_loss": obj.get("best_loss", None),
+            "has_opt": "opt" in obj and obj["opt"] is not None,
+        }
+        return obj["model"], meta
+    # legacy
+    return obj, {"epoch": None, "best_loss": None, "has_opt": False}
 
-def _init_critic() -> None:
-    global _CRITIC, _CRITIC_ERR
+def _init_model():
+    global _MODEL, _CHIPS
+
+    # 1) Load Chips (if not already loaded)
+    if not _CHIPS and os.path.exists(_CHIP_LIB_PATH):
+        try:
+            _CHIPS = json.loads(Path(_CHIP_LIB_PATH).read_text(encoding="utf-8"))
+            print(f"[Flow] Loaded {len(_CHIPS)} chips.")
+        except Exception as e:
+            print(f"[Flow] Error loading chips: {e}")
+
+    # 2) Load Flow Model
+    if _MODEL is not None:
+        return
+
+    if not os.path.exists(_FLOW_CKPT_PATH):
+        print(f"[Flow] Warning: Checkpoint not found at {_FLOW_CKPT_PATH}")
+        return
+
     try:
-        from viewer.critic_minimal_infer import MinimalCriticRunner
+        print(f"[Flow] Loading Tactical Flow from {_FLOW_CKPT_PATH}...")
 
-        ckpt = (os.environ.get("CRITIC_MINIMAL_CKPT", "").strip() or _DEFAULT_CRITIC_MINIMAL_CKPT).strip()
-        device = (os.environ.get("CRITIC_MINIMAL_DEVICE", "").strip() or _DEFAULT_CRITIC_DEVICE).strip()
-        batch_seqs = int(os.environ.get("CRITIC_MINIMAL_BATCH_SEQS", str(_DEFAULT_BATCH_SEQS)).strip() or str(_DEFAULT_BATCH_SEQS))
-        use_amp = (os.environ.get("CRITIC_MINIMAL_AMP", "1").strip() != "0")
+        # MUST match training config
+        HIST_LEN = 256
+        SEQ_LEN = 480
 
-        if not ckpt:
-            print("[CriticMinimal] No checkpoint path configured.")
-            return
+        model = ActionFlowDiT(
+            feat_dim=47,
+            act_dim=10,
+            hist_len=HIST_LEN,
+            seq_len=SEQ_LEN,
+            embed_dim=384,
+            depth=6,
+            heads=6,
+        )
 
-        print(f"[CriticMinimal] Loading model from: {ckpt} on {device}...")
-        _CRITIC = MinimalCriticRunner(ckpt_path=ckpt, device=device, use_amp=use_amp, batch_seqs=batch_seqs)
-        _CRITIC_ERR = None
-        print("[CriticMinimal] Model loaded successfully.")
+        sd, meta = _load_state_dict_compat(_FLOW_CKPT_PATH, _DEVICE)
+        missing, unexpected = model.load_state_dict(sd, strict=True)
+        if missing or unexpected:
+            raise RuntimeError(f"state_dict mismatch: missing={missing}, unexpected={unexpected}")
+
+        model.eval().to(_DEVICE)
+        _MODEL = model
+
+        ep = meta.get("epoch", None)
+        bl = meta.get("best_loss", None)
+        if ep is not None or bl is not None:
+            print(f"[Flow] Model Loaded (epoch={ep}, best_loss={bl}).")
+        else:
+            print("[Flow] Model Loaded (legacy checkpoint).")
+
     except Exception as e:
-        _CRITIC = None
-        _CRITIC_ERR = str(e)
-        print(f"[CriticMinimal] Failed to load model: {e}")
-
-_init_critic()
+        print(f"[Flow] Failed to load model: {e}")
+        _MODEL = None
 
 
+def _grid_idx_to_pos(idx):
+    # Maps grid index back to approximate pixel coordinates for the feature extractor
+    row, col = idx // 6, idx % 6
+    x = 20 + (col * 40)
+    y = [260, 515, 770][row] if row < 3 else 260
+    return [x, y]
+
+
+@app.route("/lab")
+def view_lab():
+    # Pass seq_len/hist_len into the Jinja template so the JS can adapt.
+    # If model isn't loaded yet, fall back to the intended config.
+    seq_len = None
+    hist_len = 256
+    try:
+        if _MODEL is None:
+            _init_model()
+        if _MODEL is not None and hasattr(_MODEL, "pos_emb"):
+            seq_len = int(_MODEL.pos_emb.shape[1])
+    except Exception:
+        seq_len = None
+
+    if seq_len is None:
+        seq_len = 480
+
+    return render_template("lab.html", seq_len=seq_len, hist_len=hist_len)
+
+
+# Initialize on startup
+_init_model()
+
+# --- HELPERS ---
+def _grid_idx_to_pos(idx):
+    # Maps grid index back to approximate pixel coordinates for the feature extractor
+    row, col = idx // 6, idx % 6
+    x = 20 + (col * 40)
+    y = [260, 515, 770][row] if row < 3 else 260
+    return [x, y]
+
+# --- ROUTES ---
+
+
+@app.route("/api/generate_plan", methods=["POST"])
+def api_generate_plan():
+    if _MODEL is None:
+        _init_model()
+        if _MODEL is None:
+            return jsonify({"error": "Flow Model not loaded."}), 500
+
+    data = request.json
+
+    try:
+        # Determine model horizon dynamically from loaded model
+        seq_len = int(_MODEL.pos_emb.shape[1])
+
+        # 1) State Setup
+        p_pos = _grid_idx_to_pos(int(data.get("p_idx", 7)))
+        e_pos = _grid_idx_to_pos(int(data.get("e_idx", 10)))
+
+        frame_sim = {
+            "player_health": int(data.get("p_hp", 1000)),
+            "enemy_health": int(data.get("e_hp", 1000)),
+            "player_charge": float(data.get("p_chg", 0)),
+            "enemy_charge": float(data.get("e_chg", 0)),
+            "cust_gauge": int(data.get("cust", 100)),
+            "player_game_emotion": int(data.get("p_emo", 0)),
+            "enemy_game_emotion": int(data.get("e_emo", 0)),
+            "player_pos": p_pos,
+            "enemy_pos": e_pos,
+            "grid_state": data.get("grid_tiles", [2] * 18),
+            "grid_owner_state": data.get("grid_owners", [0] * 9 + [1] * 9),
+            "player_chip": int(data.get("chip_id", 65535)),
+        }
+
+        feat = extract_flow_features(frame_sim)
+
+        # History with jitter (must match hist_len used in training/model)
+        hist_len = 256
+        base_hist = torch.tensor([feat] * hist_len, dtype=torch.float32, device=_DEVICE)
+        noise = torch.randn_like(base_hist) * 0.005
+        hist_tensor = (base_hist + noise).unsqueeze(0)  # [1, hist, feat]
+
+        # CFG & conditioning
+        raw_prompt = float(data.get("prompt_reward", 0.0))
+        req_reward = _encode_prompt_return(raw_prompt, ret_scale=50.0, ret_clip=200.0)
+        cfg_scale = float(data.get("cfg_scale", 2.5))
+
+        hist_batch = hist_tensor.repeat(2, 1, 1)  # cond + uncond
+        ret_batch = torch.tensor([[req_reward], [0.0]], dtype=torch.float32, device=_DEVICE)
+
+        # 2) Multi-step Euler solver (t=0 noise -> t=1 data)
+        x = torch.randn(1, seq_len, len(BUTTON_KEYS), device=_DEVICE)
+
+        num_steps = 20
+        dt = 1.0 / num_steps
+
+        with torch.no_grad():
+            for i in range(num_steps):
+                t_val = i / num_steps
+
+                x_in = x.repeat(2, 1, 1)
+                t_in = torch.full((2,), t_val, device=_DEVICE, dtype=torch.float32)
+
+                v_out = _MODEL(x_in, t_in, hist_batch, ret_batch)
+                v_cond, v_uncond = v_out[0], v_out[1]
+
+                v_final = v_uncond + cfg_scale * (v_cond - v_uncond)
+                x = x + v_final * dt
+
+        # 3) Decode
+        plan_raw = x[0].detach().cpu().numpy()  # [seq_len, act_dim]
+        frames_out = []
+        for t in range(seq_len):
+            frame_btns = {}
+            for i, key in enumerate(BUTTON_KEYS):
+                val = float(plan_raw[t, i])
+                if val < 0.0:
+                    val = 0.0
+                elif val > 1.0:
+                    val = 1.0
+                frame_btns[key] = val
+            frames_out.append(frame_btns)
+
+        return jsonify({"plan": frames_out})
+
+    except Exception as e:
+        print(f"[Flow] Inference Error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+
+
+@app.route("/api/scan_cust", methods=["POST"])
+def api_scan_cust():
+    if _MODEL is None: _init_model()
+    if _MODEL is None: return jsonify({"error": "Model not loaded"}), 500
+    
+    data = request.json
+    
+    try:
+        # 1. Base State Construction
+        p_pos = _grid_idx_to_pos(int(data.get("p_idx", 7)))
+        e_pos = _grid_idx_to_pos(int(data.get("e_idx", 10)))
+        
+        base_state = {
+            "player_health": int(data.get("p_hp", 1000)),
+            "enemy_health": int(data.get("e_hp", 1000)),
+            "player_charge": float(data.get("p_chg", 0)),
+            "enemy_charge": float(data.get("e_chg", 0)),
+            # Cust will vary
+            "player_game_emotion": int(data.get("p_emo", 0)),
+            "enemy_game_emotion": int(data.get("e_emo", 0)),
+            "player_pos": p_pos, "enemy_pos": e_pos,
+            "grid_state": data.get("grid_tiles", [2]*18),
+            "grid_owner_state": data.get("grid_owners", [0]*9 + [1]*9),
+            "player_chip": int(data.get("chip_id", 65535))
+        }
+
+        # 2. Create Batch (Cust 0 to 100 in steps of 10)
+        # We create 11 parallel universes
+        cust_steps = list(range(0, 101, 10)) # [0, 10, 20 ... 100]
+        B = len(cust_steps)
+        
+        feats_list = []
+        for c in cust_steps:
+            s = base_state.copy()
+            s["cust_gauge"] = c
+            feats_list.append(extract_flow_features(s))
+            
+        # [B, 47] -> [B, 256, 47] (Simulated History)
+        feat_tensor = torch.tensor(feats_list, dtype=torch.float32).to(_DEVICE)
+        hist_batch = feat_tensor.unsqueeze(1).repeat(1, 256, 1)
+        
+        # 3. Prompt (Same reward for all)
+        req_reward = float(data.get("prompt_reward", 100.0))
+        ret_batch = torch.tensor([[req_reward]] * B, dtype=torch.float32).to(_DEVICE)
+        
+        # 4. Inference (Batched)
+        x0 = torch.randn(B, 18, 10).to(_DEVICE)
+        t0 = torch.zeros(B).to(_DEVICE)
+        
+        with torch.no_grad():
+            v = _MODEL(x0, t0, hist_batch, ret_batch)
+            x1 = x0 + v
+            
+        # 5. Output: [11, 18, 10]
+        # We structure this as a dictionary of surfaces: 
+        # { "EAST": [[t0_c0, t1_c0...], [t0_c10...]] }
+        res = x1.cpu().numpy()
+        
+        surfaces = {}
+        for k_idx, key in enumerate(BUTTON_KEYS):
+            # Extract 2D matrix for this button: [Cust(11) x Time(18)]
+            # Values are 0.0 - 1.0 probabilities (sigmoid-ish)
+            # Since flow is unbounded, we clamp/sigmoid for visualization
+            # Rectified flow usually targets 0/1, so we just pass raw values 
+            # and let the frontend colormap handle it.
+            mat = res[:, :, k_idx].tolist() 
+            surfaces[key] = mat
+            
+        return jsonify({"surfaces": surfaces, "cust_labels": cust_steps})
+
+    except Exception as e:
+        print(f"Scan Error: {e}")
+        return jsonify({"error": str(e)}), 500
+        
 # -----------------------------------------------------------------------------
 # Cache
 # -----------------------------------------------------------------------------
@@ -2403,78 +2692,51 @@ def serve_inputs(replay_name: str):
             cache_hit = False
 
 
-    # 5) Critic inference (critic_minimal)
+    # 5) Critic inference (frame critic)
     if _CRITIC is not None and response["frames"] and derived_data:
         try:
-            # Canonical mask: match training notion of "battle" (cust_gauge > 0)
             cust_mask = [(int((f or {}).get("cust_gauge") or 0) > 0) for f in response["frames"]]
             if len(cust_mask) != n_frames:
                 cust_mask = cust_mask[:n_frames] + [False] * max(0, n_frames - len(cust_mask))
 
-            hold = int(os.environ.get("CRITIC_MINIMAL_HOLD", "4").strip() or "4")
-            seq_len = int(os.environ.get("CRITIC_MINIMAL_SEQ_LEN", "192").strip() or "192")
-            start_stride = int(os.environ.get("CRITIC_MINIMAL_START_STRIDE", "1").strip() or "1")
-            ema_alpha = float(os.environ.get("CRITIC_MINIMAL_EMA_ALPHA", "0.25").strip() or "0.25")
+            ema_alpha = float(os.environ.get("CRITIC_FRAME_EMA_ALPHA", "0.25").strip() or "0.25")
+            require_cust_gt0 = (os.environ.get("CRITIC_FRAME_REQUIRE_CUST_GT0", "1").strip() != "0")
 
-            # If 1, require cust>0 starts (recommended for matching your cache/training intent)
-            require_cust_gt0 = (os.environ.get("CRITIC_MINIMAL_REQUIRE_CUST_GT0", "1").strip() != "0")
-
-            print(f"[Serve] Inferencing CriticMinimal (hold={hold}, seq_len={seq_len}, start_stride={start_stride}, ema_alpha={ema_alpha})...")
+            print(f"[Serve] Inferencing CriticFrame (ema_alpha={ema_alpha})...")
 
             t0 = time.time()
-            res = _CRITIC.infer_from_frames(
-                frames=response["frames"],
-                hold=hold,
-                seq_len=seq_len,
-                start_stride=start_stride,
-                require_cust_gt0=require_cust_gt0,
-            )
+            res = _CRITIC.infer_values_dense(frames=response["frames"], require_cust_gt0=require_cust_gt0)
             dt = time.time() - t0
 
-            # res.values_by_frame is sparse at raw indices (0,hold,2hold,...)
-            # Densify + smooth ONLY inside cust_mask segments (same pattern as before)
-            critic_values, densified_pre_ema = _densify_and_smooth_masked(
-                res.values_by_frame,
-                n_frames,
-                mask=cust_mask,
-                ema_alpha=float(ema_alpha),
-            )
+            # smooth only inside battle
+            critic_values_raw = res.values_by_frame
+            critic_values = _ema_smooth_masked(critic_values_raw, cust_mask, alpha=float(ema_alpha))
 
-            # IMPORTANT: store aux needed by probe (exact EMA-at-idx override)
+            # store aux for probe/find_best
             CRITIC_AUX_CACHE[replay_name] = {
                 "mask": cust_mask,
-                "densified": densified_pre_ema,   # pre-EMA so probe can override a raw point
+                "raw": critic_values_raw,     # baseline raw (dense)
                 "ema_alpha": float(ema_alpha),
-                "hold": int(hold),
-                "seq_len": int(seq_len),
-                "start_stride": int(start_stride),
-                "require_cust_gt0": bool(require_cust_gt0),
             }
 
             critic_meta = dict(res.meta or {})
-            critic_meta.update({
-                "source": "critic_minimal",
-                "took_s": float(dt),
-                "ema_alpha": float(ema_alpha),
-                "hold": int(hold),
-                "seq_len": int(seq_len),
-                "start_stride": int(start_stride),
-                "require_cust_gt0": bool(require_cust_gt0),
-            })
+            critic_meta.update(
+                {
+                    "source": "critic_frame",
+                    "took_s": float(dt),
+                    "ema_alpha": float(ema_alpha),
+                    "require_cust_gt0": bool(require_cust_gt0),
+                }
+            )
 
-
-            print(f"[Serve] CriticMinimal inference complete in {dt:.3f}s.")
-
+            print(f"[Serve] CriticFrame inference complete in {dt:.3f}s.")
         except Exception as e:
             critic_values = None
             critic_meta = {"error": str(e)}
-            print(f"[Serve] CriticMinimal inference failed: {e}")
+            print(f"[Serve] CriticFrame inference failed: {e}")
             import traceback
             traceback.print_exc()
 
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
 
     # 6) Attach critic_v
@@ -3068,15 +3330,12 @@ def api_critic_find_best():
 
             try:
                 try:
-                    raws = _CRITIC.infer_last_raw_batch(
-                        frames_window=base_window,
+                    raws = _CRITIC.infer_raw_at_frame_with_action_batch(
+                        frames=frames,
+                        frame_idx=int(frame_idx),
                         overrides_list=overrides_list,
-                        hold=int(hold),
-                        seq_len=int(seq_len),
-                        start_stride=int(start_stride),
-                        require_cust_gt0=bool(require_cust_gt0),
-                        batch_seqs=int(batch_seqs),
                     )
+
                 except TypeError:
                     # older signature
                     raws = _CRITIC.infer_last_raw_batch(
@@ -3108,15 +3367,12 @@ def api_critic_find_best():
                         overrides[sk] = 0
 
             try:
-                raw = _minimal_raw_value_for_overrides(
-                    _CRITIC,
-                    base_window=base_window,
-                    overrides=overrides,
-                    hold=int(hold),
-                    seq_len=int(seq_len),
-                    start_stride=int(start_stride),
-                    require_cust_gt0=bool(require_cust_gt0),
-                )
+                raw = _CRITIC.infer_raw_at_frame_with_action_batch(
+                    frames=frames,
+                    frame_idx=int(frame_idx),
+                    overrides_list=[buttons],
+                )[0]
+
             except Exception:
                 continue
 
