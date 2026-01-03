@@ -11,8 +11,9 @@ from .mcts import (
     MCTSStatsStore,
     fmt_joint,
     parse_joint,
-    run_mcts,
     recommend_root_maximin,
+    run_mcts,
+    stable_state_key,
 )
 from .state import ActorId, GameState
 
@@ -83,6 +84,11 @@ class TreeStore:
 
         self.mcts = MCTSStatsStore()
 
+        # Transposition cache: stable_state_key(state) -> node_id
+        # NOTE: This makes the structure a DAG (multiple parents can point at same node).
+        # TreeNode.parent_id remains the first parent that created the node.
+        self.transpo: Dict[Tuple[Any, ...], str] = {}
+
         # Planning / replay
         self.plan: Optional[PlanResult] = None
         self.plan_replay_index: int = 0  # 0 means "at base"
@@ -91,6 +97,7 @@ class TreeStore:
 
     def reset(self) -> None:
         self.nodes.clear()
+        self.transpo.clear()
         self._next_id = 1
         self.mcts.reset()
         self.plan = None
@@ -108,6 +115,10 @@ class TreeStore:
         self.nodes[root.node_id] = root
         self.root_id = root.node_id
         self.current_id = root.node_id
+
+        # Seed transposition cache with root
+        self.transpo[stable_state_key(root_state)] = root.node_id
+
         self._reset_cursor_from_current()
 
     def _alloc_id(self) -> str:
@@ -199,8 +210,18 @@ class TreeStore:
         if joint in node.children:
             return node.children[joint]
 
+        # Apply joint to get child state
         st = copy.deepcopy(node.state)
         self.apply_joint_to_state(st, joint)
+
+        # Transposition lookup
+        key = stable_state_key(st)
+        existing_id = self.transpo.get(key)
+        if existing_id is not None:
+            node.children[joint] = existing_id
+            return existing_id
+
+        # Create new node
         child = TreeNode(
             node_id=self._alloc_id(),
             parent_id=node.node_id,
@@ -211,6 +232,7 @@ class TreeStore:
         )
         self.nodes[child.node_id] = child
         node.children[joint] = child.node_id
+        self.transpo[key] = child.node_id
         return child.node_id
 
     def apply_joint_to_state(self, st: GameState, joint: JointActionId) -> None:
@@ -313,17 +335,6 @@ class TreeStore:
         time_penalty: float = 0.002,
         jitter_eps: float = 1e-4,
     ) -> PlanResult:
-        """
-        Generates an entire sequence of joint actions from current node until target_cust.
-
-        This is *receding-horizon planning*:
-          for each cust:
-            - run MCTS with lookahead toward target_cust
-            - pick recommended (P1 maximin, P2 minimax)
-            - commit that joint and continue
-
-        Result is deterministic given the seed and current tree state.
-        """
         target_cust = int(target_cust)
         if target_cust <= 0:
             raise ValueError("target_cust must be > 0")
@@ -372,7 +383,6 @@ class TreeStore:
             nid = child_id
             step_i += 1
 
-            # safety
             if step_i > 512:
                 raise RuntimeError("plan exceeded safety bound")
 
@@ -436,7 +446,13 @@ class TreeStore:
         out_edge_stats: Dict[str, Dict[str, Dict[str, Any]]] = {}
         out_node_stats: Dict[str, Dict[str, Any]] = {}
 
+        visited: set[str] = set()
+
         def rec(nid: str, d: int) -> None:
+            if nid in visited:
+                return
+            visited.add(nid)
+
             n = self.nodes[nid]
             out_nodes[nid] = n.summary()
             out_edges[nid] = {a: cid for a, cid in n.children.items()}

@@ -1,14 +1,14 @@
 # mmbn_sim/simcore/mcts.py
-# (ONLY showing the full file because you asked for complete updates in this repo style.)
 from __future__ import annotations
 
 import copy
 import math
 import random
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .actions import ACTIONS, ACT_HOLD_OFF, ACT_HOLD_ON, ACT_NOOP, ActionId
+from .coords import idx_to_rc
 from .state import ActorId, GameState
 
 JointActionId = str
@@ -102,6 +102,54 @@ def is_terminal(st: GameState) -> bool:
     return (p1.hp <= 0) or (p2.hp <= 0)
 
 
+# -----------------------------------------------------------------------------
+# Stable key + hash (used for jitter and TreeStore transpositions)
+# -----------------------------------------------------------------------------
+def stable_state_key(st: GameState) -> Tuple[Any, ...]:
+    """
+    A deterministic, hashable summary of state used for:
+      - transposition caching
+      - stable tie-breaks
+      - stable hashing
+
+    Must stay in sync with gameplay-relevant state.
+    """
+    k: List[Any] = []
+    k.append(int(st.cust))
+
+    for aid in ("P1", "P2"):
+        a = st.actors[aid]
+        k.extend(
+            [
+                aid,
+                int(a.hp),
+                int(a.idx),
+                int(a.form),
+                int(a.locked_until),
+                1 if a.charge.hold else 0,
+                int(a.charge.progress),
+                1 if a.charge.queued_release else 0,
+            ]
+        )
+
+    # Scheduled events: order matters for determinism.
+    # Keep it bounded so key doesn't explode (matches hash mixing).
+    k.append(int(len(st.scheduled)))
+    for ev in st.scheduled[:16]:
+        k.extend(
+            [
+                int(ev.due_cust),
+                ev.actor,
+                str(ev.spec.type),
+                str(ev.source_action),
+            ]
+        )
+        # payload may be large; we avoid it for key stability unless needed.
+        # If payload becomes gameplay-relevant in future, add a compact digest.
+
+    return tuple(k)
+
+
 def _fnv1a32_init() -> int:
     return 2166136261
 
@@ -112,36 +160,73 @@ def _fnv1a32_mix(h: int, v: int) -> int:
     return h
 
 
-def _stable_state_hash32(st: GameState) -> int:
+def stable_state_hash32(st: GameState) -> int:
+    """
+    Stable 32-bit hash derived from stable_state_key.
+    Fast enough for per-step usage.
+    """
     h = _fnv1a32_init()
-    h = _fnv1a32_mix(h, int(st.cust))
-
-    for aid in ("P1", "P2"):
-        a = st.actors[aid]
-        h = _fnv1a32_mix(h, int(a.hp))
-        h = _fnv1a32_mix(h, int(a.idx))
-        h = _fnv1a32_mix(h, int(a.form))  # <-- IMPORTANT for cross matchups
-        h = _fnv1a32_mix(h, int(a.locked_until))
-        h = _fnv1a32_mix(h, 1 if a.charge.hold else 0)
-        h = _fnv1a32_mix(h, int(a.charge.progress))
-        h = _fnv1a32_mix(h, 1 if a.charge.queued_release else 0)
-
-    h = _fnv1a32_mix(h, len(st.scheduled))
-    for ev in st.scheduled[:16]:
-        h = _fnv1a32_mix(h, int(ev.due_cust))
-        h = _fnv1a32_mix(h, 1 if ev.actor == "P1" else 2)
-        for ch in ev.spec.type.encode("utf-8", errors="ignore")[:16]:
-            h = _fnv1a32_mix(h, int(ch))
-
+    # We mix ints; for strings we mix bytes.
+    for item in stable_state_key(st):
+        if isinstance(item, int):
+            h = _fnv1a32_mix(h, int(item))
+        else:
+            bs = str(item).encode("utf-8", errors="ignore")
+            # bound bytes mixed per item
+            for ch in bs[:32]:
+                h = _fnv1a32_mix(h, int(ch))
     return h
 
 
 def _jitter(st: GameState, eps: float) -> float:
     if eps <= 0:
         return 0.0
-    h = _stable_state_hash32(st)
+    h = stable_state_hash32(st)
     x = (h % 1000003) / 500001.5 - 1.0
     return float(eps) * float(x)
+
+
+# -----------------------------------------------------------------------------
+# Shaped evaluation (deterministic + bounded)
+# -----------------------------------------------------------------------------
+def _can_attack_now(st: GameState, actor: ActorId) -> bool:
+    """
+    Immediate "can deal damage this cust" approximation.
+    We only model buster/charge. Requires:
+      - unlocked
+      - same row (ray hits only then)
+      - has a legal attack action this cust
+    """
+    a = st.actors[actor]
+    if a.is_locked(st.cust):
+        return False
+
+    e = st.actors["P2" if actor == "P1" else "P1"]
+    ar, _ac = idx_to_rc(a.idx)
+    er, _ec = idx_to_rc(e.idx)
+    if ar != er:
+        return False
+
+    legal = set(st.legal_action_ids(actor))
+    # At full charge, SHOOT is disallowed; RELEASE_CHARGE is the attack.
+    if "RELEASE_CHARGE" in legal:
+        return True
+    if "SHOOT" in legal:
+        return True
+    return False
+
+
+def _mobility_score(st: GameState, actor: ActorId) -> float:
+    """
+    Rough mobility score in [0,1].
+    Counts directional moves available this cust.
+    """
+    legal = set(st.legal_action_ids(actor))
+    moves = 0
+    for a in ("MOVE_UP", "MOVE_DOWN", "MOVE_LEFT", "MOVE_RIGHT"):
+        if a in legal:
+            moves += 1
+    return float(moves) / 4.0
 
 
 def eval_p1_at_target(
@@ -150,17 +235,61 @@ def eval_p1_at_target(
     time_penalty: float,
     jitter_eps: float,
 ) -> float:
-    p1 = st.actors["P1"].hp
-    p2 = st.actors["P2"].hp
+    """
+    Deterministic bounded value in [-1, +1], from P1 perspective.
 
-    if p2 <= 0 and p1 > 0:
+    Components:
+      - HP diff (dominant)
+      - lock advantage
+      - immediate threat advantage (can attack this cust)
+      - charge advantage (0/1/2)
+      - position/mobility (small)
+      - time penalty + small deterministic jitter
+    """
+    p1 = st.actors["P1"]
+    p2 = st.actors["P2"]
+
+    # Terminal first (crisp)
+    if p2.hp <= 0 and p1.hp > 0:
         v = 1.0
-    elif p1 <= 0 and p2 > 0:
+    elif p1.hp <= 0 and p2.hp > 0:
         v = -1.0
     else:
-        diff = float(p1 - p2)
-        v = math.tanh(diff / 350.0)
+        hp_diff = float(p1.hp - p2.hp)
+        hp_term = math.tanh(hp_diff / 350.0)  # [-1,1]
 
+        p1_locked = 1.0 if p1.is_locked(st.cust) else 0.0
+        p2_locked = 1.0 if p2.is_locked(st.cust) else 0.0
+        lock_adv = (p2_locked - p1_locked)  # good for P1 if P2 locked
+
+        p1_threat = 1.0 if _can_attack_now(st, "P1") else 0.0
+        p2_threat = 1.0 if _can_attack_now(st, "P2") else 0.0
+        threat_adv = p1_threat - p2_threat  # {-1,0,1}
+
+        # Charge advantage: treat queued_release as full (2)
+        p1_lvl = 2 if p1.charge.queued_release else int(p1.charge.level)
+        p2_lvl = 2 if p2.charge.queued_release else int(p2.charge.level)
+        charge_adv = float(p1_lvl - p2_lvl) / 2.0  # [-1,1]
+
+        # Small positional bias: center row + mobility
+        p1r, _ = idx_to_rc(p1.idx)
+        p2r, _ = idx_to_rc(p2.idx)
+        center_adv = (1.0 if p1r == 1 else 0.0) - (1.0 if p2r == 1 else 0.0)
+
+        mob_adv = _mobility_score(st, "P1") - _mobility_score(st, "P2")
+
+        # Weighted sum -> squash
+        raw = (
+            1.00 * hp_term
+            + 0.35 * lock_adv
+            + 0.25 * threat_adv
+            + 0.20 * charge_adv
+            + 0.10 * center_adv
+            + 0.10 * mob_adv
+        )
+        v = math.tanh(raw)  # keep bounded and smooth
+
+    # Time penalty: prefer winning sooner / avoid endless stalling.
     if time_penalty != 0.0:
         if target_cust is None:
             v -= float(time_penalty) * (float(st.cust) / 64.0)
@@ -169,9 +298,12 @@ def eval_p1_at_target(
                 v -= float(time_penalty) * (float(st.cust) / float(max(1, target_cust)))
 
     v += _jitter(st, jitter_eps)
-    return max(-1.0, min(1.0, v))
+    return max(-1.0, min(1.0, float(v)))
 
 
+# -----------------------------------------------------------------------------
+# Action listing (unchanged) + deterministic rollout policy (NEW)
+# -----------------------------------------------------------------------------
 def _canonical_commit_actions(st: GameState, actor: ActorId) -> List[ActionId]:
     legal = list(st.legal_action_ids(actor))
     a = st.actors[actor]
@@ -249,6 +381,137 @@ def apply_joint_in_place(st: GameState, joint: JointActionId) -> None:
     st.advance_cust()
 
 
+def _tie_break_key(st: GameState, actor: ActorId, act: ActionId) -> int:
+    """
+    Deterministic tie-breaker: no RNG, but stable per (state, actor, action).
+    """
+    h = stable_state_hash32(st)
+    # Mix in actor/action strings
+    for ch in (actor + ":" + act).encode("utf-8", errors="ignore")[:32]:
+        h = _fnv1a32_mix(h, int(ch))
+    return h
+
+
+def _prefer_center_row_action(st: GameState, actor: ActorId, legal: Set[ActionId]) -> Optional[ActionId]:
+    a = st.actors[actor]
+    r, _c = idx_to_rc(a.idx)
+    if r == 1:
+        return None
+    # Move toward row 1
+    if r == 0 and "MOVE_DOWN" in legal:
+        return "MOVE_DOWN"
+    if r == 2 and "MOVE_UP" in legal:
+        return "MOVE_UP"
+    return None
+
+
+def _prefer_match_enemy_row_action(st: GameState, actor: ActorId, legal: Set[ActionId]) -> Optional[ActionId]:
+    a = st.actors[actor]
+    e = st.actors["P2" if actor == "P1" else "P1"]
+    ar, _ = idx_to_rc(a.idx)
+    er, _ = idx_to_rc(e.idx)
+    if ar == er:
+        return None
+    if er < ar and "MOVE_UP" in legal:
+        return "MOVE_UP"
+    if er > ar and "MOVE_DOWN" in legal:
+        return "MOVE_DOWN"
+    return None
+
+
+def _prefer_forward_pressure_action(st: GameState, actor: ActorId, legal: Set[ActionId]) -> Optional[ActionId]:
+    """
+    In local view, "forward" is MOVE_RIGHT.
+    This tends to move closer to center line for both actors (due to canonical mirroring).
+    """
+    if "MOVE_RIGHT" in legal:
+        return "MOVE_RIGHT"
+    if "MOVE_LEFT" in legal:
+        return "MOVE_LEFT"
+    return None
+
+
+def _choose_rollout_action_for_actor(st: GameState, actor: ActorId) -> ActionId:
+    """
+    Deterministic heuristic rollout policy.
+    No randomness unless tie-break (and tie-break is deterministic too).
+    """
+    legal_list = _canonical_commit_actions(st, actor)
+    legal: Set[ActionId] = set(legal_list)
+
+    a = st.actors[actor]
+
+    # If queued release and unlocked, the sim forces it anyway.
+    if (not a.is_locked(st.cust)) and a.charge.queued_release and ("RELEASE_CHARGE" in legal):
+        return "RELEASE_CHARGE"
+
+    # While locked: prefer turning hold on (so charge can build immediately when unlocked).
+    if a.is_locked(st.cust):
+        if (not a.charge.hold) and ("HOLD_ON" in legal):
+            return "HOLD_ON"
+        return ACT_NOOP
+
+    # If full charge, prefer releasing (strong immediate value).
+    if a.charge.level == 2 and ("RELEASE_CHARGE" in legal):
+        return "RELEASE_CHARGE"
+
+    # If we can attack now (same row), do it.
+    if _can_attack_now(st, actor):
+        # If full charge exists, we'd have returned above; otherwise SHOOT is the attack.
+        if "SHOOT" in legal:
+            return "SHOOT"
+        if "RELEASE_CHARGE" in legal:
+            return "RELEASE_CHARGE"
+
+    # If not holding and not yet level 2, start holding to build charge.
+    if (not a.charge.hold) and a.charge.level < 2 and ("HOLD_ON" in legal):
+        return "HOLD_ON"
+
+    # Movement heuristics (in priority order)
+    cand: List[ActionId] = []
+    x = _prefer_center_row_action(st, actor, legal)
+    if x:
+        cand.append(x)
+
+    x = _prefer_match_enemy_row_action(st, actor, legal)
+    if x:
+        cand.append(x)
+
+    x = _prefer_forward_pressure_action(st, actor, legal)
+    if x:
+        cand.append(x)
+
+    # Fall back to any legal move if we couldn't pick a preferred one.
+    for a_id in ("MOVE_UP", "MOVE_DOWN", "MOVE_LEFT", "MOVE_RIGHT"):
+        if a_id in legal and a_id not in cand:
+            cand.append(a_id)
+
+    if cand:
+        # Deterministic tie-break among candidates by stable hash.
+        best = cand[0]
+        best_k = _tie_break_key(st, actor, best)
+        for act in cand[1:]:
+            kk = _tie_break_key(st, actor, act)
+            if kk < best_k:
+                best = act
+                best_k = kk
+        return best
+
+    return ACT_NOOP
+
+
+def rollout_policy_joint(st: GameState) -> JointActionId:
+    """
+    Returns a deterministic joint action (P1 + P2) using heuristics.
+    """
+    a1 = _choose_rollout_action_for_actor(st, "P1")
+    a2 = _choose_rollout_action_for_actor(st, "P2")
+    return fmt_joint(a1, a2)
+
+
+# -----------------------------------------------------------------------------
+# UCB + selection (mostly unchanged)
+# -----------------------------------------------------------------------------
 def _ucb_score(parent_n: int, edge: EdgeStats, c_ucb: float) -> float:
     if parent_n < 1:
         parent_n = 1
@@ -286,14 +549,19 @@ def _pick_unexpanded(
 
 
 def _rollout_value(st: GameState, rng: random.Random, cfg: MCTSConfig) -> float:
-    start_cust = st.cust
-    for d in range(max(0, int(cfg.max_depth))):
+    """
+    Rollout no longer samples random joints.
+    It uses deterministic rollout_policy_joint(st) at each step.
+    (rng kept in signature so run_mcts callsites don't change.)
+    """
+    _ = rng  # intentionally unused now; kept for API stability
+
+    for _d in range(max(0, int(cfg.max_depth))):
         if is_terminal(st):
             break
         if cfg.target_cust is not None and st.cust >= cfg.target_cust:
             break
-        joints = list_joint_actions(st)
-        j = rng.choice(joints)
+        j = rollout_policy_joint(st)
         apply_joint_in_place(st, j)
 
     return eval_p1_at_target(

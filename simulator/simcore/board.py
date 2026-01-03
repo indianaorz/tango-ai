@@ -14,6 +14,9 @@ def default_owners() -> List[int]:
     for r in range(ROWS):
         for c in range(COLS):
             owners.append(OWNER_P1 if c < 3 else OWNER_P2)
+
+    #for a test turn one center panel to p1 owned
+    owners[rc_to_idx(1, 2)] = OWNER_P2
     return owners
 
 
