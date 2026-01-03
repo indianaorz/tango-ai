@@ -2011,10 +2011,11 @@ from critic_minimal.features import extract_flow_features, BUTTON_KEYS
 
 # --- CONFIG ---
 # Point this to flow_v3_cfg/best.pt if you retrained, or try flow_v2/best.pt
-_FLOW_CKPT_PATH = r"checkpoints/flow_v10_8s/last.pt"
+_FLOW_CKPT_PATH = r"checkpoints/flow_v10_8s_nocust/last.pt"
 _CHIP_LIB_PATH = r"data/chip_library.json"
 _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
+_CRITIC = None
+_CRITIC_ERR = None
 _MODEL = None
 _CHIPS = {}
 def _encode_prompt_return(x: float, *, ret_scale: float = 50.0, ret_clip: float = 200.0) -> float:

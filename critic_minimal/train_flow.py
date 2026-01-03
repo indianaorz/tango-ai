@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
-from critic_minimal.model_flow import ActionFlowDiT
 from critic_minimal.dataset import FlowDataset
+from critic_minimal.model_flow import ActionFlowDiT
 
 
 def _seed_everything(seed: int) -> None:
@@ -60,6 +61,44 @@ def _save_ckpt(
     torch.save(payload, path)
 
 
+_STEP_RE = re.compile(r"^step_(\d{9})\.pt$")
+
+
+def _prune_step_checkpoints(save_dir: Path, keep_last: int) -> None:
+    """
+    Keep only the most recent `keep_last` step_*.pt snapshots.
+    Never touches best.pt / last.pt.
+
+    keep_last <= 0 => keep everything.
+    """
+    if keep_last <= 0:
+        return
+
+    items: list[tuple[int, Path]] = []
+    for p in save_dir.iterdir():
+        if not p.is_file():
+            continue
+        m = _STEP_RE.match(p.name)
+        if not m:
+            continue
+        step = int(m.group(1))
+        items.append((step, p))
+
+    if len(items) <= keep_last:
+        return
+
+    items.sort(key=lambda t: t[0])  # ascending by step
+    to_delete = items[: max(0, len(items) - keep_last)]
+
+    for _, path in to_delete:
+        try:
+            path.unlink()
+        except Exception:
+            # On Windows you can hit transient file locks (AV/indexer).
+            # Failing to prune is non-fatal; next prune attempt will try again.
+            pass
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache_dir", default="data/cache_flow_v5_eventweighted")
@@ -93,7 +132,7 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=123)
     ap.add_argument("--resume", action="store_true", help="resume from save_dir/last.pt if present")
 
-    # ✅ NEW: step-based saving
+    # Step-based saving
     ap.add_argument(
         "--save_every_steps",
         type=int,
@@ -105,6 +144,18 @@ def main() -> None:
         action="store_true",
         help="Also write last.pt at the end of every epoch (in addition to step saves).",
     )
+    ap.add_argument(
+        "--keep_step_ckpts",
+        type=int,
+        default=25,
+        help="Keep only the most recent N step_*.pt snapshots (0 keeps all). best.pt/last.pt are always kept.",
+    )
+
+    # Optional AMP
+    ap.add_argument("--amp", action="store_true", help="Enable torch autocast AMP")
+
+    # Optional max_steps (0 = no limit)
+    ap.add_argument("--max_steps", type=int, default=0, help="Stop after N optimizer steps (0 disables).")
 
     args = ap.parse_args()
     device = torch.device(args.device)
@@ -122,8 +173,9 @@ def main() -> None:
     print(f"device={device}")
     print(
         f"seq_len={args.seq_len} hist_len={args.hist_len} batch={args.batch_size} "
-        f"save_every_steps={args.save_every_steps}"
+        f"save_every_steps={args.save_every_steps} keep_step_ckpts={args.keep_step_ckpts}"
     )
+    print(f"amp={bool(args.amp)} max_steps={int(args.max_steps)}")
 
     ds = FlowDataset(
         args.cache_dir,
@@ -179,6 +231,9 @@ def main() -> None:
     # beta distribution for t sampling (bias to low t -> more noise)
     beta_dist = torch.distributions.beta.Beta(args.beta_a, args.beta_b)
 
+    use_amp = bool(args.amp) and (device.type == "cuda")
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+
     # helps avoid double-saving on resume if global_step already lands on boundary
     last_saved_step = global_step
 
@@ -217,15 +272,23 @@ def main() -> None:
             x_t = t_view * x1 + (1.0 - t_view) * x0
             target_v = x1 - x0
 
-            pred_v = model(x_t, t, hist, ret)
-
-            raw = (pred_v - target_v) ** 2
-            loss = (raw * loss_weights).mean()
-
             opt.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
+
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                pred_v = model(x_t, t, hist, ret)
+                raw = (pred_v - target_v) ** 2
+                loss = (raw * loss_weights).mean()
+
+            if use_amp:
+                scaler.scale(loss).backward()
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(opt)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
 
             global_step += 1
             steps_in_epoch += 1
@@ -233,7 +296,7 @@ def main() -> None:
 
             pbar.set_postfix(loss=loss_sum / max(1, steps_in_epoch), step=global_step)
 
-            # ✅ STEP-BASED SAVE: fires immediately when crossing N steps
+            # STEP-BASED SAVE: fires immediately when hitting multiples of N steps
             if args.save_every_steps and args.save_every_steps > 0:
                 if (global_step % args.save_every_steps == 0) and (global_step != last_saved_step):
                     # write last.pt for resume safety
@@ -245,7 +308,7 @@ def main() -> None:
                         best_loss=best_loss,
                         global_step=global_step,
                     )
-                    # also write a snapshot (optional but very handy)
+                    # snapshot
                     snap_path = save_dir / f"step_{global_step:09d}.pt"
                     _save_ckpt(
                         snap_path,
@@ -255,8 +318,25 @@ def main() -> None:
                         best_loss=best_loss,
                         global_step=global_step,
                     )
+
+                    # prune old snapshots
+                    _prune_step_checkpoints(save_dir, int(args.keep_step_ckpts))
+
                     last_saved_step = global_step
                     print(f"\n💾 Saved checkpoint at global_step={global_step} -> {snap_path.name}")
+
+            # Optional stop condition
+            if args.max_steps and args.max_steps > 0 and global_step >= int(args.max_steps):
+                print(f"\n🛑 Reached max_steps={args.max_steps}. Saving last.pt and exiting.")
+                _save_ckpt(
+                    last_path,
+                    model,
+                    opt,
+                    epoch=epoch,
+                    best_loss=best_loss,
+                    global_step=global_step,
+                )
+                return
 
         avg_loss = loss_sum / max(1, steps_in_epoch)
         print(f"Epoch {epoch} complete. Avg Loss: {avg_loss:.6f}")

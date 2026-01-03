@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>MMBN Mini Sim</title>
+    <style>
+        body {
+            background: #111;
+            color: #eee;
+            font-family: 'Consolas', monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            user-select: none;
+        }
+
+        .layout {
+            display: flex;
+            gap: 20px;
+            align-items: flex-start;
+            justify-content: center;
+            width: 100%;
+            max-width: 1800px;
+        }
+
+        .panel {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            width: 440px;
+            flex-shrink: 0;
+        }
+
+        .panel h4 {
+            margin: 0 0 10px 0;
+            color: #888;
+            border-bottom: 1px solid #444;
+            font-size: 12px;
+            text-transform: uppercase;
+            padding-bottom: 5px;
+        }
+
+        .row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 12px;
+            gap: 12px;
+        }
+
+        .badge {
+            padding: 2px 8px;
+            border: 1px solid #444;
+            border-radius: 999px;
+            background: #0f0f0f;
+            color: #ddd;
+        }
+
+        .badge.cyan {
+            border-color: #00ffff55;
+            color: #7ffcff;
+        }
+
+        .badge.red {
+            border-color: #ff4d4d55;
+            color: #ff9b9b;
+        }
+
+        .badge.gold {
+            border-color: #ffd54f55;
+            color: #ffe082;
+        }
+
+        .grid-wrap {
+            position: relative;
+        }
+
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(6, 50px);
+            grid-template-rows: repeat(3, 40px);
+            gap: 2px;
+            background: #000;
+            border: 2px solid #444;
+            margin-bottom: 10px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .grid-overlay {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 3;
+        }
+
+        .cell {
+            background: #222;
+            border: 2px solid #333;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            color: #555;
+        }
+
+        .cell.p0 {
+            border-color: #4db8ff;
+        }
+
+        .cell.p1 {
+            border-color: #ff4d4d;
+        }
+
+        .tile-1 {
+            background: #000;
+        }
+
+        .tile-2 {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .tile-3 {
+            background: repeating-linear-gradient(45deg, #333 0, #333 2px, transparent 2px, transparent 4px);
+        }
+
+        .tile-4 {
+            background: rgba(160, 80, 255, 0.3);
+        }
+
+        .tile-5 {
+            background: rgba(255, 220, 80, 0.3);
+        }
+
+        .tile-6 {
+            background: rgba(80, 220, 120, 0.3);
+        }
+
+        .tile-7 {
+            background: rgba(80, 220, 255, 0.3);
+        }
+
+        .entity {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            position: absolute;
+            pointer-events: none;
+            z-index: 10;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            transition: transform 70ms linear;
+            box-shadow: 0 0 5px #000;
+        }
+
+        .ent-p {
+            background: cyan;
+            box-shadow: 0 0 8px cyan;
+            border: 1px solid #fff;
+        }
+
+        .ent-e {
+            background: red;
+            box-shadow: 0 0 8px red;
+            border: 1px solid #fff;
+        }
+
+        .entity.aura-chg1::after,
+        .entity.aura-chg2::after {
+            content: "";
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 30px;
+            height: 30px;
+            border-radius: 999px;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+        }
+
+        .entity.aura-chg1::after {
+            border: 2px solid rgba(80, 160, 255, 0.85);
+            box-shadow: 0 0 10px rgba(80, 160, 255, 0.65);
+        }
+
+        .entity.aura-chg2::after {
+            border: 2px solid rgba(255, 80, 220, 0.90);
+            box-shadow: 0 0 12px rgba(255, 80, 220, 0.75);
+        }
+
+        .hint {
+            font-size: 12px;
+            color: #aaa;
+            margin-top: 8px;
+            line-height: 1.4;
+        }
+
+        kbd {
+            background: #000;
+            border: 1px solid #444;
+            border-bottom-color: #222;
+            padding: 2px 6px;
+            border-radius: 6px;
+            font-family: inherit;
+            font-size: 11px;
+        }
+
+        .events {
+            margin-top: 10px;
+            padding: 8px;
+            border: 1px solid #333;
+            background: #0d0d0d;
+            border-radius: 6px;
+            font-size: 11px;
+            color: #bbb;
+            max-height: 160px;
+            overflow: auto;
+            line-height: 1.35;
+        }
+
+        .btnrow {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 6px;
+        }
+
+        button.big-btn {
+            padding: 8px 10px;
+            background: #222;
+            color: #ddd;
+            border: 1px solid #444;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 12px;
+        }
+
+        button.big-btn:hover {
+            background: #2a2a2a;
+            border-color: #666;
+        }
+
+        /* ---- Charge gauge ---- */
+        .charge-wrap {
+            margin-top: 6px;
+        }
+
+        .charge-label {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 11px;
+            color: #aaa;
+            margin-bottom: 6px;
+        }
+
+        .charge-bar {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 4px;
+            padding: 6px;
+            border: 1px solid #333;
+            background: #0b0b0b;
+            border-radius: 8px;
+        }
+
+        .charge-seg {
+            height: 10px;
+            border-radius: 4px;
+            background: #161616;
+            border: 1px solid #222;
+        }
+
+        .charge-seg.on {
+            background: rgba(0, 255, 180, 0.35);
+            border-color: rgba(0, 255, 180, 0.35);
+        }
+
+        .charge-bar.locked .charge-seg.on {
+            background: rgba(0, 255, 180, 0.18);
+            border-color: rgba(0, 255, 180, 0.18);
+        }
+
+        .charge-bar.locked {
+            opacity: 0.8;
+        }
+
+        /* ---- MCTS tree ---- */
+        .tree-node {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 6px;
+            border-radius: 6px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .tree-node:hover {
+            background: #151515;
+        }
+
+        .tree-node.current {
+            outline: 1px solid rgba(127, 252, 255, 0.25);
+        }
+
+        .tree-caret {
+            width: 14px;
+            text-align: center;
+            color: #aaa;
+            cursor: pointer;
+            flex: 0 0 auto;
+        }
+
+        .tree-label {
+            color: #ffe082;
+        }
+
+        .tree-id {
+            color: #888;
+        }
+
+        .tree-sum {
+            color: #aaa;
+            margin-left: 6px;
+        }
+
+        .toast {
+            margin-top: 10px;
+            font-size: 12px;
+            color: #ffb74d;
+            min-height: 16px;
+        }
+    </style>
+</head>
+
+<body>
+    <h2 style="margin:0 0 14px 0;">MMBN Mini Sim (server-authoritative + tree)</h2>
+
+    <div class="layout">
+        <!-- Left: state + controls -->
+        <div class="panel">
+            <h4>State</h4>
+            <div class="row"><span>Cust</span><span class="badge" id="cust">0</span></div>
+            <div class="row"><span>Locked?</span><span class="badge" id="lock">NO</span></div>
+            <div class="row"><span>Player</span><span class="badge cyan" id="p_pos">?</span></div>
+            <div class="row"><span>Enemy</span><span class="badge red" id="e_pos">?</span></div>
+            <div class="row"><span>Pending</span><span class="badge" id="pending">None</span></div>
+            <div class="row"><span>Last Action</span><span class="badge" id="last_action">None</span></div>
+
+            <h4 style="margin-top:14px;">Combat</h4>
+            <div class="row"><span>P HP</span><span class="badge cyan" id="p_hp">1000</span></div>
+            <div class="row"><span>E HP</span><span class="badge red" id="e_hp">1000</span></div>
+
+            <div class="row"><span>P Charge Level</span><span class="badge" id="p_chg">0</span></div>
+            <div class="row"><span>P Hold</span><span class="badge" id="p_hold">OFF</span></div>
+            <div class="charge-wrap">
+                <div class="charge-label"><span>P Charge Progress</span><span id="p_prog_txt">0/5</span></div>
+                <div class="charge-bar" id="p_charge_bar"></div>
+            </div>
+
+            <div class="btnrow">
+                <button class="big-btn" id="btn_p_toggle">P: Toggle Charge Hold</button>
+                <button class="big-btn" id="btn_p_hold_on">P: Hold ON</button>
+                <button class="big-btn" id="btn_p_hold_off">P: Hold OFF</button>
+            </div>
+
+            <div class="btnrow">
+                <button class="big-btn" id="btn_p_shoot">P: Shoot (5)</button>
+                <button class="big-btn" id="btn_p_release">P: Release Charge (50)</button>
+            </div>
+
+            <div class="hint">
+                <div><kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> choose pending action</div>
+                <div style="margin-top:6px;"><kbd>SPACE</kbd> commit one cust step (creates/reuses child node)</div>
+            </div>
+
+            <div class="events" id="events"></div>
+            <div class="toast" id="toast"></div>
+        </div>
+
+        <!-- Middle: grid -->
+        <div style="display:flex; flex-direction:column; align-items:center;">
+            <div class="grid-wrap" id="grid_wrap">
+                <div class="grid-container" id="grid"></div>
+                <svg class="grid-overlay" id="overlay"></svg>
+            </div>
+            <div style="font-size:11px; color:#888;">
+                Cyan border = owner 0 (allowed) • Red border = owner 1 (blocked)
+            </div>
+        </div>
+
+        <!-- Right: MCTS tree -->
+        <div class="panel" style="width:520px;">
+            <h4>State Tree</h4>
+
+            <div class="row">
+                <span>Current</span>
+                <span class="badge cyan" id="tree_current">?</span>
+            </div>
+
+            <div class="row" style="margin-top:6px;">
+                <span>Depth</span>
+                <input id="tree_depth" type="range" min="2" max="10" step="1" value="8" style="width:220px;">
+                <span class="badge" id="tree_depth_val">8</span>
+            </div>
+
+            <div class="btnrow" style="margin-top:8px;">
+                <button class="big-btn" id="btn_tree_collapse_all">Collapse All</button>
+                <button class="big-btn" id="btn_tree_refresh">Refresh</button>
+            </div>
+
+            <div class="tree-wrap" id="tree_view"></div>
+
+            <div class="hint" style="margin-top:10px;">
+                <div>Click a node to load its state.</div>
+                <div>Click ▶ to expand (server generates children), ▼ to collapse.</div>
+            </div>
+        </div>
+
+    </div>
+
+    <script src="/static/sim.js"></script>
+</body>
+
+</html>
