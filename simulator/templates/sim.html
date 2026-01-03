@@ -3,11 +3,11 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>MMBN Mini Sim (Dual View + Tree)</title>
+  <title>MMBN Mini Sim (Dual View + Tree + MCTS)</title>
   <link rel="stylesheet" href="/static/sim.css">
 </head>
 <body>
-  <h2 class="title">MMBN Mini Sim (server-authoritative + dual views + joint commit)</h2>
+  <h2 class="title">MMBN Mini Sim (server-authoritative + dual views + joint commit + MCTS)</h2>
 
   <div class="layout">
     <div class="panel">
@@ -23,8 +23,55 @@
       <div class="row"><span>Cust</span><span class="badge" id="cust">0</span></div>
       <div class="row"><span>Tree Current</span><span class="badge cyan" id="tree_current">?</span></div>
 
+      <h4 style="margin-top:14px;">Plan (to cust 64)</h4>
+      <div class="row"><span>Status</span><span class="badge" id="plan_status">None</span></div>
+      <div class="row"><span>Replay</span><span class="badge" id="plan_replay">0/0</span></div>
+
+      <div class="row" style="margin-top:8px;">
+        <span>Plan Iters/step</span>
+        <input id="plan_iters" type="range" min="100" max="4000" step="50" value="800" style="width:220px;">
+        <span class="badge" id="plan_iters_val">800</span>
+      </div>
+      <div class="row">
+        <span>Lookahead</span>
+        <input id="plan_look" type="range" min="4" max="40" step="1" value="16" style="width:220px;">
+        <span class="badge" id="plan_look_val">16</span>
+      </div>
+
+      <div class="btnrow" style="margin-top:8px;">
+        <button class="big-btn" id="btn_plan_run">Plan → 64 cust</button>
+        <button class="big-btn" id="btn_plan_replay_reset">Replay: Reset</button>
+        <button class="big-btn" id="btn_plan_replay_step">Replay: Step</button>
+        <button class="big-btn" id="btn_plan_replay_auto">Replay: Auto</button>
+        <button class="big-btn" id="btn_plan_replay_stop">Stop</button>
+      </div>
+
+      <h4 style="margin-top:14px;">MCTS (single-step)</h4>
+      <div class="row"><span>Root Visits</span><span class="badge" id="mcts_root_visits">0</span></div>
+      <div class="row"><span>P1 Maximin</span><span class="badge cyan" id="mcts_p1_best">?</span></div>
+      <div class="row"><span>P2 Minimax</span><span class="badge red" id="mcts_p2_best">?</span></div>
+
+      <div class="row" style="margin-top:8px;">
+        <span>Iters</span>
+        <input id="mcts_iters" type="range" min="50" max="4000" step="50" value="600" style="width:220px;">
+        <span class="badge" id="mcts_iters_val">600</span>
+      </div>
+      <div class="row">
+        <span>Depth</span>
+        <input id="mcts_depth" type="range" min="2" max="40" step="1" value="12" style="width:220px;">
+        <span class="badge" id="mcts_depth_val">12</span>
+      </div>
+
+      <div class="btnrow" style="margin-top:8px;">
+        <button class="big-btn" id="btn_mcts_run">Run MCTS</button>
+        <button class="big-btn" id="btn_mcts_apply_p1">Apply → P1</button>
+        <button class="big-btn" id="btn_mcts_apply_p2">Apply → P2</button>
+        <button class="big-btn" id="btn_mcts_apply_both">Apply → Both</button>
+      </div>
+
       <h4 style="margin-top:14px;">P1 (Local-left view)</h4>
       <div class="row"><span>Locked?</span><span class="badge" id="p1_lock">NO</span></div>
+      <div class="row"><span>Form</span><span class="badge cyan" id="p1_form">?</span></div>
       <div class="row"><span>Pos</span><span class="badge cyan" id="p1_pos">?</span></div>
       <div class="row"><span>Enemy</span><span class="badge red" id="p1_enemy_pos">?</span></div>
       <div class="row"><span>Pending</span><span class="badge" id="p1_pending">None</span></div>
@@ -49,6 +96,7 @@
 
       <h4 style="margin-top:14px;">P2 (Local-left view)</h4>
       <div class="row"><span>Locked?</span><span class="badge" id="p2_lock">NO</span></div>
+      <div class="row"><span>Form</span><span class="badge cyan" id="p2_form">?</span></div>
       <div class="row"><span>Pos</span><span class="badge cyan" id="p2_pos">?</span></div>
       <div class="row"><span>Enemy</span><span class="badge red" id="p2_enemy_pos">?</span></div>
       <div class="row"><span>Pending</span><span class="badge" id="p2_pending">None</span></div>
@@ -116,6 +164,7 @@
 
       <div class="hint" style="margin-top:10px;">
         <div>Click a node to load its state. Chevron toggles collapse only.</div>
+        <div style="margin-top:6px;">Tree labels show joint action + MCTS edge stats (N,Q) when available.</div>
       </div>
     </div>
   </div>

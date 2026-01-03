@@ -7,7 +7,7 @@ function toast(msg) {
   const el = $("toast");
   if (!el) return;
   el.textContent = msg || "";
-  if (msg) setTimeout(() => { if (el.textContent === msg) el.textContent = ""; }, 1200);
+  if (msg) setTimeout(() => { if (el.textContent === msg) el.textContent = ""; }, 1400);
 }
 
 async function fetchJSON(url, opts) {
@@ -28,6 +28,40 @@ async function apiUi(actor, action) {
 }
 async function apiCommit() { return fetchJSON("/api/commit", { method: "POST" }); }
 
+async function apiMctsRun(iterations, maxDepth) {
+  return fetchJSON("/api/mcts/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ iterations, max_depth: maxDepth, seed: 0 }),
+  });
+}
+async function apiMctsApply(who) {
+  return fetchJSON("/api/mcts/apply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ who }),
+  });
+}
+
+async function apiPlanRun(itersPerStep, lookaheadDepth) {
+  return fetchJSON("/api/plan/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      target_cust: 64,
+      iters_per_step: itersPerStep,
+      lookahead_depth: lookaheadDepth,
+      seed: 0,
+    }),
+  });
+}
+async function apiPlanReplayReset() {
+  return fetchJSON("/api/plan/replay_reset", { method: "POST" });
+}
+async function apiPlanReplayStep() {
+  return fetchJSON("/api/plan/replay_step", { method: "POST" });
+}
+
 async function fetchTreeSubtree(depth) {
   const qs = new URLSearchParams({ node_id: "ROOT", depth: String(depth ?? 8) });
   return fetchJSON(`/api/tree/subtree?${qs.toString()}`);
@@ -43,9 +77,12 @@ async function setCurrentNode(nodeId) {
 // -------------------------------
 // Client state
 // -------------------------------
-let state = null; // {p1, p2, tree}
+let state = null; // {p1, p2, tree, mcts, plan}
 let tree = null;
+let treeMcts = null;
 const collapsed = new Set();
+
+let replayTimer = null;
 
 // -------------------------------
 // Charge bar
@@ -79,16 +116,68 @@ function renderChargeBar(el, progress, fullAt, isLocked) {
 }
 
 // -------------------------------
+// Button enable/disable based on server legal actions
+// -------------------------------
+function setBtnEnabled(id, enabled) {
+  const el = $(id);
+  if (!el) return;
+  el.disabled = !enabled;
+}
+
+function validActionSet(view) {
+  const arr = view?.valid_actions || [];
+  return new Set(arr.map(String));
+}
+
+function renderActionButtons(prefix, view) {
+  const valid = validActionSet(view);
+
+  setBtnEnabled(`btn_${prefix}_hold_on`, valid.has("HOLD_ON"));
+  setBtnEnabled(`btn_${prefix}_hold_off`, valid.has("HOLD_OFF"));
+  setBtnEnabled(`btn_${prefix}_toggle`, valid.has("HOLD_ON") || valid.has("HOLD_OFF") || valid.has("NOOP"));
+  setBtnEnabled(`btn_${prefix}_shoot`, valid.has("SHOOT"));
+  setBtnEnabled(`btn_${prefix}_release`, valid.has("RELEASE_CHARGE"));
+}
+
+// -------------------------------
 // HUD render
 // -------------------------------
+function renderMctsSummary() {
+  const m = state?.mcts;
+  if (!m) return;
+
+  $("mcts_root_visits").textContent = String(m.root_visits ?? 0);
+  $("mcts_p1_best").textContent = String(m.p1_maximin?.best ?? "?");
+  $("mcts_p2_best").textContent = String(m.p2_minimax?.best ?? "?");
+}
+
+function renderPlanStatus() {
+  const p = state?.plan;
+  if (!p || !p.has_plan) {
+    $("plan_status").textContent = "None";
+    $("plan_replay").textContent = "0/0";
+    return;
+  }
+  const idx = p.replay_index ?? 0;
+  const len = p.replay_len ?? 0;
+  $("plan_status").textContent = `Ready (len ${len})`;
+  $("plan_replay").textContent = `${idx}/${len}`;
+}
+
 function renderHUD() {
   if (!state) return;
 
   $("cust").textContent = String(state.p1.cust ?? 0);
   $("tree_current").textContent = String(state.tree?.current_id ?? "?");
 
+  renderPlanStatus();
+  renderMctsSummary();
+
   renderSideHUD("p1", state.p1);
   renderSideHUD("p2", state.p2);
+
+  renderActionButtons("p1", state.p1);
+  renderActionButtons("p2", state.p2);
 
   const eventsEl = $("events");
   const lines = (state.p1.last_events || []);
@@ -102,6 +191,13 @@ function renderHUD() {
 
 function renderSideHUD(prefix, v) {
   $(`${prefix}_lock`).textContent = v.is_locked ? `YES (${v.lock_remaining ?? 0})` : "NO";
+
+  // NEW: form label
+  const fname = v.p_form_name ?? "?";
+  const fid = v.p_form ?? "?";
+  const formEl = $(`${prefix}_form`);
+  if (formEl) formEl.textContent = `${fname} [${fid}]`;
+
   $(`${prefix}_pos`).textContent = `r${v.p_rc[0]},c${v.p_rc[1]}`;
   $(`${prefix}_enemy_pos`).textContent = `r${v.e_rc[0]},c${v.e_rc[1]}`;
   $(`${prefix}_pending`).textContent = v.pending_action ? String(v.pending_action) : "None";
@@ -139,7 +235,6 @@ function dirToOffset(dir, magnitudePx) {
 }
 
 function applyEntityTransform(entEl, leanDir, entryDir, isEntering) {
-  // Tune these to taste
   const LEAN_MAG = 10;
   const ENTRY_MAG = 6;
 
@@ -149,10 +244,8 @@ function applyEntityTransform(entEl, leanDir, entryDir, isEntering) {
   const dx = a.dx + b.dx;
   const dy = a.dy + b.dy;
 
-  // Base center transform plus directional offsets.
   entEl.style.transform = `translate(-50%, -50%) translate(${dx}px, ${dy}px)`;
 }
-
 
 function renderGrid(view, gridId, overlayId) {
   const gridEl = $(gridId);
@@ -162,12 +255,28 @@ function renderGrid(view, gridId, overlayId) {
   const owners = view.grid_owner_state || [];
   const tiles = view.grid_state || [];
 
+  // Track which panel indices should be highlighted, and by what kind.
+  // Map: idx -> "charge" | "buster"
+  const hotKindByIdx = new Map();
+  const hotPanels = view.hot_panels || [];
+  for (const hp of hotPanels) {
+    if (!hp) continue;
+    const idx = hp.idx | 0;
+    const kind = String(hp.kind || "");
+    if (kind === "charge" || kind === "buster") {
+      hotKindByIdx.set(idx, kind);
+    }
+  }
+
+
   gridEl.innerHTML = "";
   for (let i = 0; i < owners.length; i++) {
     const d = document.createElement("div");
-    d.className = `cell tile-${tiles[i] ?? 2} p${owners[i] ?? 0}`;
+    const kind = hotKindByIdx.get(i) || "";
+    d.className = `cell tile-${tiles[i] ?? 2} p${owners[i] ?? 0}` + (kind ? ` hot-${kind}` : "");
     gridEl.appendChild(d);
   }
+
 
   const pCell = gridEl.children[view.p_idx ?? 0];
   const eCell = gridEl.children[view.e_idx ?? 0];
@@ -180,16 +289,9 @@ function renderGrid(view, gridId, overlayId) {
     if (lvl === 1) ent.classList.add("aura-chg1");
     if (lvl === 2) ent.classList.add("aura-chg2");
 
-    applyEntityTransform(
-      ent,
-      view.p_lean_dir,
-      view.p_entry_dir,
-      !!view.p_is_entering
-    );
-
+    applyEntityTransform(ent, view.p_lean_dir, view.p_entry_dir, !!view.p_is_entering);
     pCell.appendChild(ent);
   }
-
 
   if (eCell) {
     const ent = document.createElement("div");
@@ -199,18 +301,10 @@ function renderGrid(view, gridId, overlayId) {
     if (lvl === 1) ent.classList.add("aura-chg1");
     if (lvl === 2) ent.classList.add("aura-chg2");
 
-    applyEntityTransform(
-      ent,
-      view.e_lean_dir,
-      view.e_entry_dir,
-      !!view.e_is_entering
-    );
-
+    applyEntityTransform(ent, view.e_lean_dir, view.e_entry_dir, !!view.e_is_entering);
     eCell.appendChild(ent);
   }
 
-
-  // Overlay shot lines (may be multiple)
   const rect = gridEl.getBoundingClientRect();
   overlayEl.setAttribute("viewBox", `0 0 ${rect.width} ${rect.height}`);
   overlayEl.innerHTML = "";
@@ -242,7 +336,7 @@ function renderBoards() {
 }
 
 // -------------------------------
-// Tree
+// Tree (unchanged)
 // -------------------------------
 function getChildren(nid) {
   if (!tree || !tree.edges) return [];
@@ -272,14 +366,26 @@ function uncollapsePathToCurrent() {
   }
 }
 
-function fmtNodeSummary(n) {
+function fmtNodeSummary(n, nid) {
   const s = n.s;
-  return `cust${s.cust} hp ${s.p1_hp}/${s.p2_hp} L(${s.p1_locked ? 1 : 0},${s.p2_locked ? 1 : 0})`;
+  const ns = treeMcts?.node_stats?.[nid];
+  const nvis = ns?.N ?? 0;
+  const nq = ns?.Q ?? 0;
+  return `cust${s.cust} hp ${s.p1_hp}/${s.p2_hp} L(${s.p1_locked ? 1 : 0},${s.p2_locked ? 1 : 0}) · N${nvis} Q${nq.toFixed(3)}`;
+}
+
+function fmtEdgeStats(parentId, joint) {
+  const es = treeMcts?.edge_stats?.[parentId]?.[joint];
+  if (!es) return "";
+  const n = es.N ?? 0;
+  const q = es.Q ?? 0;
+  return ` · eN${n} eQ${q.toFixed(3)}`;
 }
 
 async function refreshTree() {
   const depth = parseInt($("tree_depth")?.value || "8", 10);
   tree = await fetchTreeSubtree(depth);
+  treeMcts = tree?.mcts || null;
 
   const nodes = tree?.nodes || {};
   for (const nid of Object.keys(nodes)) {
@@ -331,11 +437,17 @@ function renderTreeView() {
 
     const label = document.createElement("span");
     label.className = "tree-label";
-    label.textContent = n.action ? n.action : "(root)";
+    const actionText = n.action ? n.action : "(root)";
+    label.textContent = actionText;
 
     const sum = document.createElement("span");
     sum.className = "tree-sum";
-    sum.textContent = fmtNodeSummary(n);
+    sum.textContent = fmtNodeSummary(n, nid);
+
+    if (n.parent && n.action) {
+      const extra = fmtEdgeStats(n.parent, n.action);
+      if (extra) sum.textContent += extra;
+    }
 
     row.appendChild(caret);
     row.appendChild(idSpan);
@@ -345,6 +457,7 @@ function renderTreeView() {
     row.onclick = async () => {
       try {
         state = await setCurrentNode(nid);
+        stopAutoReplay();
         renderHUD();
         renderBoards();
         await refreshTree();
@@ -371,8 +484,10 @@ function renderTreeView() {
 }
 
 // -------------------------------
-// Inputs
+// Inputs + replay + buttons + init
+// (UNCHANGED from your current file)
 // -------------------------------
+
 async function commit() {
   state = await apiCommit();
   renderHUD();
@@ -380,34 +495,39 @@ async function commit() {
   await refreshTree();
 }
 
+function isActionValidForActor(actor, action) {
+  if (!state) return true;
+  const view = actor === "P1" ? state.p1 : state.p2;
+  const valid = validActionSet(view);
+  return valid.has(String(action));
+}
+
 async function onKeyDown(ev) {
   if (ev.repeat) return;
-
   const k = ev.key;
 
-  // Prevent scrolling on these
   if (k.startsWith("Arrow") || k === " " || k === "Space") ev.preventDefault();
 
   try {
-    // P1
-    if (k === "ArrowUp") state = await apiUi("P1", "MOVE_UP");
-    else if (k === "ArrowDown") state = await apiUi("P1", "MOVE_DOWN");
-    else if (k === "ArrowLeft") state = await apiUi("P1", "MOVE_LEFT");
-    else if (k === "ArrowRight") state = await apiUi("P1", "MOVE_RIGHT");
-    else if (k === "z" || k === "Z") state = await apiUi("P1", "SHOOT");
-    else if (k === "c" || k === "C") state = await apiUi("P1", "RELEASE_CHARGE");
-    else if (k === "x" || k === "X") state = await apiUi("P1", "TOGGLE_HOLD");
+    let actor = null;
+    let action = null;
 
-    // P2
-    else if (k === "w" || k === "W") state = await apiUi("P2", "MOVE_UP");
-    else if (k === "s" || k === "S") state = await apiUi("P2", "MOVE_DOWN");
-    else if (k === "a" || k === "A") state = await apiUi("P2", "MOVE_LEFT");
-    else if (k === "d" || k === "D") state = await apiUi("P2", "MOVE_RIGHT");
-    else if (k === "f" || k === "F") state = await apiUi("P2", "SHOOT");
-    else if (k === "g" || k === "G") state = await apiUi("P2", "RELEASE_CHARGE");
-    else if (k === "r" || k === "R") state = await apiUi("P2", "TOGGLE_HOLD");
+    if (k === "ArrowUp") { actor = "P1"; action = "MOVE_UP"; }
+    else if (k === "ArrowDown") { actor = "P1"; action = "MOVE_DOWN"; }
+    else if (k === "ArrowLeft") { actor = "P1"; action = "MOVE_LEFT"; }
+    else if (k === "ArrowRight") { actor = "P1"; action = "MOVE_RIGHT"; }
+    else if (k === "z" || k === "Z") { actor = "P1"; action = "SHOOT"; }
+    else if (k === "c" || k === "C") { actor = "P1"; action = "RELEASE_CHARGE"; }
+    else if (k === "x" || k === "X") { actor = "P1"; action = "TOGGLE_HOLD"; }
 
-    // Commit
+    else if (k === "w" || k === "W") { actor = "P2"; action = "MOVE_UP"; }
+    else if (k === "s" || k === "S") { actor = "P2"; action = "MOVE_DOWN"; }
+    else if (k === "a" || k === "A") { actor = "P2"; action = "MOVE_LEFT"; }
+    else if (k === "d" || k === "D") { actor = "P2"; action = "MOVE_RIGHT"; }
+    else if (k === "f" || k === "F") { actor = "P2"; action = "SHOOT"; }
+    else if (k === "g" || k === "G") { actor = "P2"; action = "RELEASE_CHARGE"; }
+    else if (k === "r" || k === "R") { actor = "P2"; action = "TOGGLE_HOLD"; }
+
     else if (k === " " || k === "Space") {
       await commit();
       return;
@@ -415,6 +535,15 @@ async function onKeyDown(ev) {
       return;
     }
 
+    if (actor && action && action !== "TOGGLE_HOLD") {
+      if (!isActionValidForActor(actor, action)) {
+        toast(`Invalid now: ${actor} ${action}`);
+        return;
+      }
+    }
+
+    state = await apiUi(actor, action);
+    stopAutoReplay();
     renderHUD();
     renderBoards();
   } catch (e) {
@@ -422,9 +551,37 @@ async function onKeyDown(ev) {
   }
 }
 
-// -------------------------------
-// Buttons
-// -------------------------------
+function stopAutoReplay() {
+  if (replayTimer) {
+    clearInterval(replayTimer);
+    replayTimer = null;
+  }
+}
+
+async function autoReplayTick() {
+  try {
+    state = await apiPlanReplayStep();
+    renderHUD();
+    renderBoards();
+    await refreshTree();
+
+    const p = state?.plan;
+    if (!p || !p.has_plan) {
+      stopAutoReplay();
+      return;
+    }
+    const idx = p.replay_index ?? 0;
+    const len = p.replay_len ?? 0;
+    if (idx >= len) {
+      stopAutoReplay();
+      toast("Replay complete");
+    }
+  } catch (e) {
+    stopAutoReplay();
+    toast(String(e));
+  }
+}
+
 function hookButtons() {
   const hook = (id, fn) => {
     const el = $(id);
@@ -434,23 +591,22 @@ function hookButtons() {
     });
   };
 
-  hook("btn_p1_hold_on", async () => { state = await apiUi("P1", "HOLD_ON"); renderHUD(); renderBoards(); });
-  hook("btn_p1_hold_off", async () => { state = await apiUi("P1", "HOLD_OFF"); renderHUD(); renderBoards(); });
-  hook("btn_p1_toggle", async () => { state = await apiUi("P1", "TOGGLE_HOLD"); renderHUD(); renderBoards(); });
-  hook("btn_p1_shoot", async () => { state = await apiUi("P1", "SHOOT"); renderHUD(); renderBoards(); });
-  hook("btn_p1_release", async () => { state = await apiUi("P1", "RELEASE_CHARGE"); renderHUD(); renderBoards(); });
+  hook("btn_p1_hold_on", async () => { state = await apiUi("P1", "HOLD_ON"); stopAutoReplay(); renderHUD(); renderBoards(); });
+  hook("btn_p1_hold_off", async () => { state = await apiUi("P1", "HOLD_OFF"); stopAutoReplay(); renderHUD(); renderBoards(); });
+  hook("btn_p1_toggle", async () => { state = await apiUi("P1", "TOGGLE_HOLD"); stopAutoReplay(); renderHUD(); renderBoards(); });
+  hook("btn_p1_shoot", async () => { state = await apiUi("P1", "SHOOT"); stopAutoReplay(); renderHUD(); renderBoards(); });
+  hook("btn_p1_release", async () => { state = await apiUi("P1", "RELEASE_CHARGE"); stopAutoReplay(); renderHUD(); renderBoards(); });
 
-  hook("btn_p2_hold_on", async () => { state = await apiUi("P2", "HOLD_ON"); renderHUD(); renderBoards(); });
-  hook("btn_p2_hold_off", async () => { state = await apiUi("P2", "HOLD_OFF"); renderHUD(); renderBoards(); });
-  hook("btn_p2_toggle", async () => { state = await apiUi("P2", "TOGGLE_HOLD"); renderHUD(); renderBoards(); });
-  hook("btn_p2_shoot", async () => { state = await apiUi("P2", "SHOOT"); renderHUD(); renderBoards(); });
-  hook("btn_p2_release", async () => { state = await apiUi("P2", "RELEASE_CHARGE"); renderHUD(); renderBoards(); });
+  hook("btn_p2_hold_on", async () => { state = await apiUi("P2", "HOLD_ON"); stopAutoReplay(); renderHUD(); renderBoards(); });
+  hook("btn_p2_hold_off", async () => { state = await apiUi("P2", "HOLD_OFF"); stopAutoReplay(); renderHUD(); renderBoards(); });
+  hook("btn_p2_toggle", async () => { state = await apiUi("P2", "TOGGLE_HOLD"); stopAutoReplay(); renderHUD(); renderBoards(); });
+  hook("btn_p2_shoot", async () => { state = await apiUi("P2", "SHOOT"); stopAutoReplay(); renderHUD(); renderBoards(); });
+  hook("btn_p2_release", async () => { state = await apiUi("P2", "RELEASE_CHARGE"); stopAutoReplay(); renderHUD(); renderBoards(); });
 
-  hook("btn_commit", async () => { await commit(); });
-  hook("btn_reset", async () => { state = await apiReset(); renderHUD(); renderBoards(); await refreshTree(); });
+  hook("btn_commit", async () => { stopAutoReplay(); await commit(); });
+  hook("btn_reset", async () => { stopAutoReplay(); state = await apiReset(); renderHUD(); renderBoards(); await refreshTree(); });
 
   hook("btn_tree_refresh", async () => { await refreshTree(); });
-
   hook("btn_tree_collapse_all", async () => {
     if (!tree || !tree.nodes) return;
     collapsed.clear();
@@ -461,6 +617,73 @@ function hookButtons() {
     renderTreeView();
   });
 
+  hook("btn_mcts_run", async () => {
+    const iters = parseInt($("mcts_iters")?.value || "600", 10);
+    const depth = parseInt($("mcts_depth")?.value || "12", 10);
+    state = await apiMctsRun(iters, depth);
+    toast(`MCTS ran: ${iters} iters depth ${depth}`);
+    stopAutoReplay();
+    renderHUD();
+    renderBoards();
+    await refreshTree();
+  });
+
+  hook("btn_mcts_apply_p1", async () => {
+    state = await apiMctsApply("P1");
+    toast(`Applied P1: ${state?.mcts_applied?.p1 ?? "?"}`);
+    stopAutoReplay();
+    renderHUD(); renderBoards();
+  });
+  hook("btn_mcts_apply_p2", async () => {
+    state = await apiMctsApply("P2");
+    toast(`Applied P2: ${state?.mcts_applied?.p2 ?? "?"}`);
+    stopAutoReplay();
+    renderHUD(); renderBoards();
+  });
+  hook("btn_mcts_apply_both", async () => {
+    state = await apiMctsApply("BOTH");
+    toast(`Applied Both: P1=${state?.mcts_applied?.p1 ?? "?"} P2=${state?.mcts_applied?.p2 ?? "?"}`);
+    stopAutoReplay();
+    renderHUD(); renderBoards();
+  });
+
+  hook("btn_plan_run", async () => {
+    const iters = parseInt($("plan_iters")?.value || "800", 10);
+    const look = parseInt($("plan_look")?.value || "16", 10);
+    stopAutoReplay();
+    state = await apiPlanRun(iters, look);
+    toast(`Planned to 64 (iters/step ${iters}, lookahead ${look})`);
+    renderHUD();
+    renderBoards();
+    await refreshTree();
+  });
+
+  hook("btn_plan_replay_reset", async () => {
+    stopAutoReplay();
+    state = await apiPlanReplayReset();
+    toast("Replay reset");
+    renderHUD(); renderBoards();
+    await refreshTree();
+  });
+
+  hook("btn_plan_replay_step", async () => {
+    stopAutoReplay();
+    state = await apiPlanReplayStep();
+    renderHUD(); renderBoards();
+    await refreshTree();
+  });
+
+  hook("btn_plan_replay_auto", async () => {
+    stopAutoReplay();
+    replayTimer = setInterval(autoReplayTick, 160);
+    toast("Auto replay started");
+  });
+
+  hook("btn_plan_replay_stop", async () => {
+    stopAutoReplay();
+    toast("Stopped");
+  });
+
   const depth = $("tree_depth");
   const depthVal = $("tree_depth_val");
   if (depth && depthVal) {
@@ -468,11 +691,34 @@ function hookButtons() {
     depth.addEventListener("input", () => depthVal.textContent = depth.value);
     depth.addEventListener("change", async () => { await refreshTree(); });
   }
+
+  const mi = $("mcts_iters");
+  const miV = $("mcts_iters_val");
+  if (mi && miV) {
+    miV.textContent = mi.value;
+    mi.addEventListener("input", () => miV.textContent = mi.value);
+  }
+  const md = $("mcts_depth");
+  const mdV = $("mcts_depth_val");
+  if (md && mdV) {
+    mdV.textContent = md.value;
+    md.addEventListener("input", () => mdV.textContent = md.value);
+  }
+
+  const pi = $("plan_iters");
+  const piV = $("plan_iters_val");
+  if (pi && piV) {
+    piV.textContent = pi.value;
+    pi.addEventListener("input", () => piV.textContent = pi.value);
+  }
+  const pl = $("plan_look");
+  const plV = $("plan_look_val");
+  if (pl && plV) {
+    plV.textContent = pl.value;
+    pl.addEventListener("input", () => plV.textContent = pl.value);
+  }
 }
 
-// -------------------------------
-// Init
-// -------------------------------
 async function init() {
   try {
     state = await apiState();
