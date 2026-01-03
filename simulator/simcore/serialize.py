@@ -4,9 +4,11 @@ from __future__ import annotations
 from typing import Any, Dict, List, Literal
 
 from .board import mirror_owners, mirror_tiles
+from .chips import chip_name
 from .coords import idx_to_rc, mirror_idx
 from .forms import form_name
 from .state import ActorId, GameState, other
+
 
 
 ViewActorLabel = Literal["P", "E"]
@@ -17,7 +19,6 @@ def _view_map_idx(viewer: ActorId, idx_canon: int) -> int:
 
 
 def _view_map_dir_local(_viewer: ActorId, dir_local: str | None) -> str | None:
-    # Stored as local dirs already, so no transform needed.
     return dir_local
 
 
@@ -75,7 +76,6 @@ def view_state(st: GameState, viewer: ActorId) -> Dict[str, Any]:
             }
         )
 
-
     return {
         "viewer": viewer,
         "cust": st.cust,
@@ -89,11 +89,21 @@ def view_state(st: GameState, viewer: ActorId) -> Dict[str, Any]:
         "p_rc": [pr, pc],
         "e_rc": [er, ec],
 
-        # Forms (player_game_emotion)
+        # Forms
         "p_form": p.form,
         "p_form_name": form_name(p.form),
         "e_form": e.form,
         "e_form_name": form_name(e.form),
+
+        # Chips (stack top at index 0)
+        # Raw ids (kept for debugging / MCTS stable keys)
+        "p_chip_hand": [int(x) for x in p.chip_hand],
+        "e_chip_hand": [int(x) for x in e.chip_hand],
+
+        # UI-friendly: [{id, name}, ...]
+        "p_hand": [{"id": int(x), "name": chip_name(int(x))} for x in p.chip_hand],
+        "e_hand": [{"id": int(x), "name": chip_name(int(x))} for x in e.chip_hand],
+
 
         "pending_action": p.pending_action,
         "is_locked": is_locked,
@@ -115,10 +125,9 @@ def view_state(st: GameState, viewer: ActorId) -> Dict[str, Any]:
         "e_entry_dir": _view_map_dir_local(viewer, e.entry_dir_local),
         "p_is_entering": (p.entry_dir_local is not None) and (st.cust < p.entry_until),
         "e_is_entering": (e.entry_dir_local is not None) and (st.cust < e.entry_until),
-        
+
         "shot_lines": shot_lines,
         "hot_panels": hot_panels,
-
 
         "last_action_started": st.last_action_started,
         "last_events": st.last_events,

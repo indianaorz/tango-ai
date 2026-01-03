@@ -2,6 +2,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import threading
 from typing import Any, Dict
 
@@ -13,6 +14,9 @@ from simcore.tree import TreeStore
 app = Flask(__name__)
 _LOCK = threading.Lock()
 _TREE = TreeStore()
+
+# You said: 48 workers available + 256GB RAM. Default to 48, but clamp to CPU count.
+_DEFAULT_WORKERS = min(48, (os.cpu_count() or 1))
 
 
 def _payload() -> Dict[str, Any]:
@@ -83,19 +87,30 @@ def api_commit():
 @app.post("/api/mcts/run")
 def api_mcts_run():
     data = request.get_json(silent=True) or {}
+
     iterations = data.get("iterations", 400)
     max_depth = data.get("max_depth", 10)
     seed = data.get("seed", 0)
+
+    # optional tuning
+    workers = data.get("workers", _DEFAULT_WORKERS)
+    c_puct = data.get("c_puct", 1.25)
+    progress = data.get("progress", True)
 
     try:
         iterations = int(iterations)
         max_depth = int(max_depth)
         seed = int(seed)
+        workers = int(workers)
+        c_puct = float(c_puct)
+        progress = bool(progress)
     except Exception:
-        return jsonify({"error": "iterations/max_depth/seed must be ints"}), 400
+        return jsonify({"error": "iterations/max_depth/seed/workers must be ints; c_puct float"}), 400
 
     iterations = max(0, min(20000, iterations))
     max_depth = max(1, min(120, max_depth))
+    workers = max(1, min(_DEFAULT_WORKERS, workers))
+    c_puct = max(0.01, min(10.0, c_puct))
 
     with _LOCK:
         try:
@@ -104,6 +119,9 @@ def api_mcts_run():
                 max_depth=max_depth,
                 seed=seed,
                 target_cust=None,
+                workers=workers,
+                progress=progress,
+                c_puct=c_puct,
             )
         except Exception as e:
             return jsonify({"error": str(e)}), 400
@@ -113,6 +131,8 @@ def api_mcts_run():
             "iterations": iterations,
             "max_depth": max_depth,
             "seed": seed,
+            "workers": workers,
+            "c_puct": c_puct,
             "summary": summary,
         }
         return jsonify(payload)
@@ -153,17 +173,27 @@ def api_plan_run():
     lookahead_depth = data.get("lookahead_depth", 16)
     seed = data.get("seed", 0)
 
+    # optional tuning
+    workers = data.get("workers", _DEFAULT_WORKERS)
+    c_puct = data.get("c_puct", 1.25)
+    progress = data.get("progress", True)
+
     try:
         target_cust = int(target_cust)
         iters_per_step = int(iters_per_step)
         lookahead_depth = int(lookahead_depth)
         seed = int(seed)
+        workers = int(workers)
+        c_puct = float(c_puct)
+        progress = bool(progress)
     except Exception:
-        return jsonify({"error": "target_cust/iters_per_step/lookahead_depth/seed must be ints"}), 400
+        return jsonify({"error": "target_cust/iters_per_step/lookahead_depth/seed/workers must be ints; c_puct float"}), 400
 
     target_cust = max(1, min(256, target_cust))
     iters_per_step = max(0, min(20000, iters_per_step))
     lookahead_depth = max(1, min(120, lookahead_depth))
+    workers = max(1, min(_DEFAULT_WORKERS, workers))
+    c_puct = max(0.01, min(10.0, c_puct))
 
     with _LOCK:
         try:
@@ -174,6 +204,9 @@ def api_plan_run():
                 seed=seed,
                 time_penalty=0.002,
                 jitter_eps=1e-4,
+                workers=workers,
+                progress=progress,
+                c_puct=c_puct,
             )
         except Exception as e:
             return jsonify({"error": str(e)}), 400
@@ -184,6 +217,8 @@ def api_plan_run():
             "iters_per_step": iters_per_step,
             "lookahead_depth": lookahead_depth,
             "seed": seed,
+            "workers": workers,
+            "c_puct": c_puct,
             "steps": len(plan.steps),
         }
         return jsonify(payload)
@@ -253,4 +288,6 @@ def api_tree_set_current():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    # Important on Windows: Flask reloader + multiprocessing = duplicated worker spawn.
+    # Keep debug on if you like, but disable reloader.
+    app.run(host="127.0.0.1", port=5000, debug=True, use_reloader=False, threaded=True)

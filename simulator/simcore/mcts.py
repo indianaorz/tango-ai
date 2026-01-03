@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 import random
+import sys
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .actions import ACTIONS, ACT_HOLD_OFF, ACT_HOLD_ON, ACT_NOOP, ActionId
+from .actions import ACTIONS, ACT_HOLD_OFF, ACT_HOLD_ON, ACT_NOOP, ACT_USE_CHIP, ActionId
 from .coords import idx_to_rc
 from .state import ActorId, GameState
 
@@ -31,11 +35,28 @@ def parse_joint(j: JointActionId) -> Tuple[ActionId, ActionId]:
 class MCTSConfig:
     iterations: int = 400
     max_depth: int = 10
+
+    # PUCT:
+    # score = Q + c_puct * P(a|s) * sqrt(parentN) / (1 + edgeN)
+    c_puct: float = 1.25
+
+    # legacy (unused when use_puct=True, kept for compatibility)
     c_ucb: float = 1.25
+    use_puct: bool = True
+
     seed: int = 0
     target_cust: Optional[int] = None
     time_penalty: float = 0.002
     jitter_eps: float = 1e-4
+
+    # Parallel rollout evaluation
+    workers: int = 1
+    inflight_per_worker: int = 4  # how many rollouts to keep queued per worker
+
+    # Console progress
+    progress: bool = False
+    progress_every_sec: float = 0.35  # rate-limit prints
+    progress_label: str = ""
 
 
 @dataclass
@@ -70,9 +91,14 @@ class MCTSStatsStore:
         self.node: Dict[str, NodeStats] = {}
         self.edge: Dict[Tuple[str, JointActionId], EdgeStats] = {}
 
+        # Cached priors per node:
+        #   node_id -> {joint_action: prior_prob}
+        self.prior: Dict[str, Dict[JointActionId, float]] = {}
+
     def reset(self) -> None:
         self.node.clear()
         self.edge.clear()
+        self.prior.clear()
 
     def node_stats(self, node_id: str) -> NodeStats:
         ns = self.node.get(node_id)
@@ -129,11 +155,11 @@ def stable_state_key(st: GameState) -> Tuple[Any, ...]:
                 1 if a.charge.hold else 0,
                 int(a.charge.progress),
                 1 if a.charge.queued_release else 0,
+                # Chips are gameplay-relevant (stack order matters).
+                ("hand", tuple(int(x) for x in a.chip_hand)),
             ]
         )
 
-    # Scheduled events: order matters for determinism.
-    # Keep it bounded so key doesn't explode (matches hash mixing).
     k.append(int(len(st.scheduled)))
     for ev in st.scheduled[:16]:
         k.extend(
@@ -144,8 +170,6 @@ def stable_state_key(st: GameState) -> Tuple[Any, ...]:
                 str(ev.source_action),
             ]
         )
-        # payload may be large; we avoid it for key stability unless needed.
-        # If payload becomes gameplay-relevant in future, add a compact digest.
 
     return tuple(k)
 
@@ -166,13 +190,11 @@ def stable_state_hash32(st: GameState) -> int:
     Fast enough for per-step usage.
     """
     h = _fnv1a32_init()
-    # We mix ints; for strings we mix bytes.
     for item in stable_state_key(st):
         if isinstance(item, int):
             h = _fnv1a32_mix(h, int(item))
         else:
             bs = str(item).encode("utf-8", errors="ignore")
-            # bound bytes mixed per item
             for ch in bs[:32]:
                 h = _fnv1a32_mix(h, int(ch))
     return h
@@ -190,13 +212,6 @@ def _jitter(st: GameState, eps: float) -> float:
 # Shaped evaluation (deterministic + bounded)
 # -----------------------------------------------------------------------------
 def _can_attack_now(st: GameState, actor: ActorId) -> bool:
-    """
-    Immediate "can deal damage this cust" approximation.
-    We only model buster/charge. Requires:
-      - unlocked
-      - same row (ray hits only then)
-      - has a legal attack action this cust
-    """
     a = st.actors[actor]
     if a.is_locked(st.cust):
         return False
@@ -208,19 +223,16 @@ def _can_attack_now(st: GameState, actor: ActorId) -> bool:
         return False
 
     legal = set(st.legal_action_ids(actor))
-    # At full charge, SHOOT is disallowed; RELEASE_CHARGE is the attack.
     if "RELEASE_CHARGE" in legal:
         return True
     if "SHOOT" in legal:
+        return True
+    if ACT_USE_CHIP in legal:
         return True
     return False
 
 
 def _mobility_score(st: GameState, actor: ActorId) -> float:
-    """
-    Rough mobility score in [0,1].
-    Counts directional moves available this cust.
-    """
     legal = set(st.legal_action_ids(actor))
     moves = 0
     for a in ("MOVE_UP", "MOVE_DOWN", "MOVE_LEFT", "MOVE_RIGHT"):
@@ -235,50 +247,35 @@ def eval_p1_at_target(
     time_penalty: float,
     jitter_eps: float,
 ) -> float:
-    """
-    Deterministic bounded value in [-1, +1], from P1 perspective.
-
-    Components:
-      - HP diff (dominant)
-      - lock advantage
-      - immediate threat advantage (can attack this cust)
-      - charge advantage (0/1/2)
-      - position/mobility (small)
-      - time penalty + small deterministic jitter
-    """
     p1 = st.actors["P1"]
     p2 = st.actors["P2"]
 
-    # Terminal first (crisp)
     if p2.hp <= 0 and p1.hp > 0:
         v = 1.0
     elif p1.hp <= 0 and p2.hp > 0:
         v = -1.0
     else:
         hp_diff = float(p1.hp - p2.hp)
-        hp_term = math.tanh(hp_diff / 350.0)  # [-1,1]
+        hp_term = math.tanh(hp_diff / 350.0)
 
         p1_locked = 1.0 if p1.is_locked(st.cust) else 0.0
         p2_locked = 1.0 if p2.is_locked(st.cust) else 0.0
-        lock_adv = (p2_locked - p1_locked)  # good for P1 if P2 locked
+        lock_adv = (p2_locked - p1_locked)
 
         p1_threat = 1.0 if _can_attack_now(st, "P1") else 0.0
         p2_threat = 1.0 if _can_attack_now(st, "P2") else 0.0
-        threat_adv = p1_threat - p2_threat  # {-1,0,1}
+        threat_adv = p1_threat - p2_threat
 
-        # Charge advantage: treat queued_release as full (2)
         p1_lvl = 2 if p1.charge.queued_release else int(p1.charge.level)
         p2_lvl = 2 if p2.charge.queued_release else int(p2.charge.level)
-        charge_adv = float(p1_lvl - p2_lvl) / 2.0  # [-1,1]
+        charge_adv = float(p1_lvl - p2_lvl) / 2.0
 
-        # Small positional bias: center row + mobility
         p1r, _ = idx_to_rc(p1.idx)
         p2r, _ = idx_to_rc(p2.idx)
         center_adv = (1.0 if p1r == 1 else 0.0) - (1.0 if p2r == 1 else 0.0)
 
         mob_adv = _mobility_score(st, "P1") - _mobility_score(st, "P2")
 
-        # Weighted sum -> squash
         raw = (
             1.00 * hp_term
             + 0.35 * lock_adv
@@ -287,9 +284,8 @@ def eval_p1_at_target(
             + 0.10 * center_adv
             + 0.10 * mob_adv
         )
-        v = math.tanh(raw)  # keep bounded and smooth
+        v = math.tanh(raw)
 
-    # Time penalty: prefer winning sooner / avoid endless stalling.
     if time_penalty != 0.0:
         if target_cust is None:
             v -= float(time_penalty) * (float(st.cust) / 64.0)
@@ -302,7 +298,7 @@ def eval_p1_at_target(
 
 
 # -----------------------------------------------------------------------------
-# Action listing (unchanged) + deterministic rollout policy (NEW)
+# Action listing + deterministic rollout policy
 # -----------------------------------------------------------------------------
 def _canonical_commit_actions(st: GameState, actor: ActorId) -> List[ActionId]:
     legal = list(st.legal_action_ids(actor))
@@ -382,11 +378,7 @@ def apply_joint_in_place(st: GameState, joint: JointActionId) -> None:
 
 
 def _tie_break_key(st: GameState, actor: ActorId, act: ActionId) -> int:
-    """
-    Deterministic tie-breaker: no RNG, but stable per (state, actor, action).
-    """
     h = stable_state_hash32(st)
-    # Mix in actor/action strings
     for ch in (actor + ":" + act).encode("utf-8", errors="ignore")[:32]:
         h = _fnv1a32_mix(h, int(ch))
     return h
@@ -397,7 +389,6 @@ def _prefer_center_row_action(st: GameState, actor: ActorId, legal: Set[ActionId
     r, _c = idx_to_rc(a.idx)
     if r == 1:
         return None
-    # Move toward row 1
     if r == 0 and "MOVE_DOWN" in legal:
         return "MOVE_DOWN"
     if r == 2 and "MOVE_UP" in legal:
@@ -420,10 +411,6 @@ def _prefer_match_enemy_row_action(st: GameState, actor: ActorId, legal: Set[Act
 
 
 def _prefer_forward_pressure_action(st: GameState, actor: ActorId, legal: Set[ActionId]) -> Optional[ActionId]:
-    """
-    In local view, "forward" is MOVE_RIGHT.
-    This tends to move closer to center line for both actors (due to canonical mirroring).
-    """
     if "MOVE_RIGHT" in legal:
         return "MOVE_RIGHT"
     if "MOVE_LEFT" in legal:
@@ -432,42 +419,35 @@ def _prefer_forward_pressure_action(st: GameState, actor: ActorId, legal: Set[Ac
 
 
 def _choose_rollout_action_for_actor(st: GameState, actor: ActorId) -> ActionId:
-    """
-    Deterministic heuristic rollout policy.
-    No randomness unless tie-break (and tie-break is deterministic too).
-    """
     legal_list = _canonical_commit_actions(st, actor)
     legal: Set[ActionId] = set(legal_list)
 
     a = st.actors[actor]
 
-    # If queued release and unlocked, the sim forces it anyway.
     if (not a.is_locked(st.cust)) and a.charge.queued_release and ("RELEASE_CHARGE" in legal):
         return "RELEASE_CHARGE"
 
-    # While locked: prefer turning hold on (so charge can build immediately when unlocked).
     if a.is_locked(st.cust):
         if (not a.charge.hold) and ("HOLD_ON" in legal):
             return "HOLD_ON"
         return ACT_NOOP
 
-    # If full charge, prefer releasing (strong immediate value).
     if a.charge.level == 2 and ("RELEASE_CHARGE" in legal):
         return "RELEASE_CHARGE"
 
-    # If we can attack now (same row), do it.
+    # If we can hit now and have a chip, bias to chip first (phase 0 behavior).
+    if _can_attack_now(st, actor) and (ACT_USE_CHIP in legal):
+        return ACT_USE_CHIP
+
     if _can_attack_now(st, actor):
-        # If full charge exists, we'd have returned above; otherwise SHOOT is the attack.
         if "SHOOT" in legal:
             return "SHOOT"
         if "RELEASE_CHARGE" in legal:
             return "RELEASE_CHARGE"
 
-    # If not holding and not yet level 2, start holding to build charge.
     if (not a.charge.hold) and a.charge.level < 2 and ("HOLD_ON" in legal):
         return "HOLD_ON"
 
-    # Movement heuristics (in priority order)
     cand: List[ActionId] = []
     x = _prefer_center_row_action(st, actor, legal)
     if x:
@@ -481,13 +461,11 @@ def _choose_rollout_action_for_actor(st: GameState, actor: ActorId) -> ActionId:
     if x:
         cand.append(x)
 
-    # Fall back to any legal move if we couldn't pick a preferred one.
     for a_id in ("MOVE_UP", "MOVE_DOWN", "MOVE_LEFT", "MOVE_RIGHT"):
         if a_id in legal and a_id not in cand:
             cand.append(a_id)
 
     if cand:
-        # Deterministic tie-break among candidates by stable hash.
         best = cand[0]
         best_k = _tie_break_key(st, actor, best)
         for act in cand[1:]:
@@ -501,36 +479,129 @@ def _choose_rollout_action_for_actor(st: GameState, actor: ActorId) -> ActionId:
 
 
 def rollout_policy_joint(st: GameState) -> JointActionId:
-    """
-    Returns a deterministic joint action (P1 + P2) using heuristics.
-    """
     a1 = _choose_rollout_action_for_actor(st, "P1")
     a2 = _choose_rollout_action_for_actor(st, "P2")
     return fmt_joint(a1, a2)
 
 
 # -----------------------------------------------------------------------------
-# UCB + selection (mostly unchanged)
+# Priors for PUCT (heuristic, policy-free)
 # -----------------------------------------------------------------------------
-def _ucb_score(parent_n: int, edge: EdgeStats, c_ucb: float) -> float:
+def _softmaxish_normalize(weights: Dict[str, float]) -> Dict[str, float]:
+    s = 0.0
+    for v in weights.values():
+        s += float(max(0.0, v))
+    if s <= 0.0:
+        n = float(max(1, len(weights)))
+        return {k: 1.0 / n for k in weights.keys()}
+    return {k: float(max(0.0, v)) / s for k, v in weights.items()}
+
+
+def _actor_action_prior(st: GameState, actor: ActorId, act: ActionId) -> float:
+    a = st.actors[actor]
+    legal = set(st.legal_action_ids(actor))
+    if act not in legal and act not in (ACT_NOOP,):
+        return 0.0
+
+    w = 1.0
+
+    if act == ACT_NOOP:
+        w = 0.25 if (not a.is_locked(st.cust)) else 0.75
+
+    elif act == ACT_HOLD_ON:
+        if (not a.charge.hold) and a.charge.level < 2:
+            w = 1.8
+        else:
+            w = 0.6
+
+    elif act == ACT_HOLD_OFF:
+        w = 0.5
+
+    elif act == "RELEASE_CHARGE":
+        if a.charge.level == 2 or a.charge.queued_release:
+            w = 3.5
+        else:
+            w = 0.05
+
+    elif act == ACT_USE_CHIP:
+        # Prefer chip usage if available, especially when it can connect (same row).
+        has_chip = len(a.chip_hand) > 0
+        w = 2.6 if (has_chip and _can_attack_now(st, actor)) else (1.2 if has_chip else 0.0)
+
+    elif act == "SHOOT":
+        w = 2.2 if _can_attack_now(st, actor) else 1.1
+
+    elif act.startswith("MOVE_"):
+        legal_set = set(_canonical_commit_actions(st, actor))
+        bias = 1.0
+
+        x = _prefer_center_row_action(st, actor, legal_set)
+        if x == act:
+            bias *= 1.35
+
+        x = _prefer_match_enemy_row_action(st, actor, legal_set)
+        if x == act:
+            bias *= 1.25
+
+        x = _prefer_forward_pressure_action(st, actor, legal_set)
+        if x == act:
+            bias *= 1.10
+
+        w = 1.0 * bias
+
+    return float(max(0.0, w))
+
+
+def _joint_priors_for_node(
+    stats: MCTSStatsStore,
+    node_id: str,
+    st: GameState,
+    joint_actions: List[JointActionId],
+) -> Dict[JointActionId, float]:
+    cached = stats.prior.get(node_id)
+    if cached is not None:
+        return cached
+
+    p1_legal = _canonical_commit_actions(st, "P1")
+    p2_legal = _canonical_commit_actions(st, "P2")
+    p1w = {a: _actor_action_prior(st, "P1", a) for a in p1_legal}
+    p2w = {b: _actor_action_prior(st, "P2", b) for b in p2_legal}
+    p1p = _softmaxish_normalize(p1w)
+    p2p = _softmaxish_normalize(p2w)
+
+    jw: Dict[JointActionId, float] = {}
+    for j in joint_actions:
+        a, b = parse_joint(j)
+        jw[j] = float(p1p.get(a, 0.0)) * float(p2p.get(b, 0.0))
+
+    jp = _softmaxish_normalize(jw)
+    stats.prior[node_id] = jp
+    return jp
+
+
+def _puct_score(parent_n: int, edge: EdgeStats, prior_p: float, c_puct: float) -> float:
     if parent_n < 1:
         parent_n = 1
-    bonus = c_ucb * math.sqrt(math.log(parent_n + 1.0) / (edge.n + 1.0))
+    bonus = float(c_puct) * float(prior_p) * math.sqrt(float(parent_n)) / (1.0 + float(edge.n))
     return edge.q + bonus
 
 
-def _select_joint_ucb(
+def _select_joint_puct(
     stats: MCTSStatsStore,
     node_id: str,
+    st: GameState,
     joint_actions: List[JointActionId],
-    c_ucb: float,
+    c_puct: float,
 ) -> JointActionId:
     ns = stats.node_stats(node_id)
+    priors = _joint_priors_for_node(stats, node_id, st, joint_actions)
+
     best_j = joint_actions[0]
     best_s = -1e18
     for j in joint_actions:
         es = stats.edge_stats(node_id, j)
-        s = _ucb_score(ns.n, es, c_ucb)
+        p = float(priors.get(j, 0.0))
+        s = _puct_score(ns.n, es, p, c_puct)
         if s > best_s:
             best_s = s
             best_j = j
@@ -548,14 +619,7 @@ def _pick_unexpanded(
     return rng.choice(unexp)
 
 
-def _rollout_value(st: GameState, rng: random.Random, cfg: MCTSConfig) -> float:
-    """
-    Rollout no longer samples random joints.
-    It uses deterministic rollout_policy_joint(st) at each step.
-    (rng kept in signature so run_mcts callsites don't change.)
-    """
-    _ = rng  # intentionally unused now; kept for API stability
-
+def _rollout_value(st: GameState, cfg: MCTSConfig) -> float:
     for _d in range(max(0, int(cfg.max_depth))):
         if is_terminal(st):
             break
@@ -570,6 +634,33 @@ def _rollout_value(st: GameState, rng: random.Random, cfg: MCTSConfig) -> float:
         time_penalty=cfg.time_penalty,
         jitter_eps=cfg.jitter_eps,
     )
+
+
+def _rollout_worker(payload: Tuple[GameState, MCTSConfig]) -> float:
+    st, cfg = payload
+    st2 = copy.deepcopy(st)
+    return _rollout_value(st2, cfg)
+
+
+def _clamp_workers(w: int) -> int:
+    w = int(w)
+    if w <= 1:
+        return 1
+    cpu = os.cpu_count() or 1
+    return max(1, min(w, cpu))
+
+
+def _progress_line(done: int, total: int, start_t: float, label: str) -> str:
+    total = max(1, int(total))
+    done = max(0, min(int(done), total))
+    frac = float(done) / float(total)
+    width = 28
+    filled = int(round(frac * width))
+    bar = "█" * filled + "░" * (width - filled)
+    dt = max(1e-6, time.monotonic() - start_t)
+    it_s = float(done) / dt
+    prefix = f"[MCTS{(' ' + label) if label else ''}]"
+    return f"{prefix} {done}/{total} {frac*100:5.1f}% |{bar}| {it_s:6.1f} it/s"
 
 
 def recommend_root_maximin(
@@ -628,15 +719,58 @@ def run_mcts(
     get_node_state_fn,
     get_node_children_fn,
     config: MCTSConfig,
+    *,
+    executor: Optional[ProcessPoolExecutor] = None,
 ) -> Dict[str, Any]:
-    if config.iterations <= 0:
+    iters = int(config.iterations)
+    if iters <= 0:
         return recommend_root_maximin(stats, root_id, root_state)
 
     rng = random.Random(int(config.seed))
 
-    for _ in range(int(config.iterations)):
+    workers = _clamp_workers(int(config.workers))
+    inflight_limit = max(1, int(config.inflight_per_worker)) * workers
+
+    start_t = time.monotonic()
+    last_print = 0.0
+    completed = 0
+
+    last_print_done = -1
+
+    def maybe_print(force: bool = False) -> None:
+        nonlocal last_print, last_print_done
+        if not config.progress:
+            return
+        now = time.monotonic()
+        if completed == last_print_done and not force:
+            return
+        if force or (now - last_print) >= float(config.progress_every_sec) or completed >= iters:
+            last_print = now
+            last_print_done = completed
+            print(_progress_line(completed, iters, start_t, config.progress_label), file=sys.stderr, flush=True)
+
+    inflight: List[Tuple[Any, List[Tuple[str, JointActionId]], str]] = []
+
+    def backprop(value: float, edge_path: List[Tuple[str, JointActionId]], leaf_id: str) -> None:
+        visited_nodes: List[str] = [root_id]
+        for parent_id, joint in edge_path:
+            if parent_id != root_id:
+                visited_nodes.append(parent_id)
+            es = stats.edge_stats(parent_id, joint)
+            es.n += 1
+            es.w += float(value)
+
+        if leaf_id not in visited_nodes:
+            visited_nodes.append(leaf_id)
+
+        for nid in visited_nodes:
+            ns = stats.node_stats(nid)
+            ns.n += 1
+            ns.w += float(value)
+
+    def select_and_expand_one() -> Tuple[GameState, List[Tuple[str, JointActionId]], str]:
         node_id = root_id
-        path: List[Tuple[str, JointActionId]] = []
+        edge_path: List[Tuple[str, JointActionId]] = []
         depth = 0
 
         while True:
@@ -655,28 +789,81 @@ def run_mcts(
             unexp = _pick_unexpanded(children, joint_actions, rng)
             if unexp is not None:
                 child_id = ensure_child_fn(node_id, unexp)
-                path.append((node_id, unexp))
+                edge_path.append((node_id, unexp))
                 node_id = child_id
                 depth += 1
                 break
 
-            chosen = _select_joint_ucb(stats, node_id, joint_actions, config.c_ucb)
+            if config.use_puct:
+                chosen = _select_joint_puct(stats, node_id, st, joint_actions, config.c_puct)
+            else:
+                ns = stats.node_stats(node_id)
+                best_j = joint_actions[0]
+                best_s = -1e18
+                for j in joint_actions:
+                    es = stats.edge_stats(node_id, j)
+                    parent_n = max(1, ns.n)
+                    bonus = config.c_ucb * math.sqrt(math.log(parent_n + 1.0) / (es.n + 1.0))
+                    s = es.q + bonus
+                    if s > best_s:
+                        best_s = s
+                        best_j = j
+                chosen = best_j
+
             child_id = ensure_child_fn(node_id, chosen)
-            path.append((node_id, chosen))
+            edge_path.append((node_id, chosen))
             node_id = child_id
             depth += 1
 
         leaf_state = copy.deepcopy(get_node_state_fn(node_id))
-        value = _rollout_value(leaf_state, rng, config)
+        return leaf_state, edge_path, node_id
 
-        stats.node_stats(root_id).n += 1
-        stats.node_stats(root_id).w += value
+    if workers <= 1:
+        for _ in range(iters):
+            leaf_state, edge_path, leaf_id = select_and_expand_one()
+            v = _rollout_value(leaf_state, config)
+            backprop(v, edge_path, leaf_id)
+            completed += 1
+            maybe_print()
+        maybe_print()
+        return recommend_root_maximin(stats, root_id, root_state)
 
-        for parent_id, joint in path:
-            stats.node_stats(parent_id).n += 1
-            stats.node_stats(parent_id).w += value
-            es = stats.edge_stats(parent_id, joint)
-            es.n += 1
-            es.w += value
+    pool = executor
+    owns_pool = False
+    if pool is None:
+        pool = ProcessPoolExecutor(max_workers=workers)
+        owns_pool = True
+
+    try:
+        while len(inflight) < min(inflight_limit, iters):
+            leaf_state, edge_path, leaf_id = select_and_expand_one()
+            fut = pool.submit(_rollout_worker, (leaf_state, config))
+            inflight.append((fut, edge_path, leaf_id))
+
+        while inflight:
+            still: List[Tuple[Any, List[Tuple[str, JointActionId]], str]] = []
+            for fut, edge_path, leaf_id in inflight:
+                if fut.done():
+                    v = float(fut.result())
+                    backprop(v, edge_path, leaf_id)
+                    completed += 1
+                    maybe_print()
+                else:
+                    still.append((fut, edge_path, leaf_id))
+            inflight = still
+
+            while completed + len(inflight) < iters and len(inflight) < inflight_limit:
+                leaf_state, edge_path, leaf_id = select_and_expand_one()
+                fut = pool.submit(_rollout_worker, (leaf_state, config))
+                inflight.append((fut, edge_path, leaf_id))
+
+            if inflight and all(not fut.done() for fut, _, _ in inflight):
+                _ = next(as_completed([x[0] for x in inflight], timeout=None))
+                time.sleep(0.001)
+
+        maybe_print(force=True)
+    finally:
+        if owns_pool:
+            pool.shutdown(wait=True)
 
     return recommend_root_maximin(stats, root_id, root_state)

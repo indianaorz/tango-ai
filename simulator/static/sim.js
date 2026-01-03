@@ -55,12 +55,8 @@ async function apiPlanRun(itersPerStep, lookaheadDepth) {
     }),
   });
 }
-async function apiPlanReplayReset() {
-  return fetchJSON("/api/plan/replay_reset", { method: "POST" });
-}
-async function apiPlanReplayStep() {
-  return fetchJSON("/api/plan/replay_step", { method: "POST" });
-}
+async function apiPlanReplayReset() { return fetchJSON("/api/plan/replay_reset", { method: "POST" }); }
+async function apiPlanReplayStep() { return fetchJSON("/api/plan/replay_step", { method: "POST" }); }
 
 async function fetchTreeSubtree(depth) {
   const qs = new URLSearchParams({ node_id: "ROOT", depth: String(depth ?? 8) });
@@ -77,9 +73,9 @@ async function setCurrentNode(nodeId) {
 // -------------------------------
 // Client state
 // -------------------------------
-let state = null; // {p1, p2, tree, mcts, plan}
-let tree = null;
-let treeMcts = null;
+let state = null;     // {p1, p2, tree, mcts, plan}
+let tree = null;      // subtree payload
+let treeMcts = null;  // tree.mcts
 const collapsed = new Set();
 
 let replayTimer = null;
@@ -111,7 +107,8 @@ function renderChargeBar(el, progress, fullAt, isLocked) {
 
   const filled = Math.round(frac * segCount);
   for (let i = 0; i < segCount; i++) {
-    if (i < filled) segs[i].classList.add("on"); else segs[i].classList.remove("on");
+    if (i < filled) segs[i].classList.add("on");
+    else segs[i].classList.remove("on");
   }
 }
 
@@ -134,7 +131,14 @@ function renderActionButtons(prefix, view) {
 
   setBtnEnabled(`btn_${prefix}_hold_on`, valid.has("HOLD_ON"));
   setBtnEnabled(`btn_${prefix}_hold_off`, valid.has("HOLD_OFF"));
-  setBtnEnabled(`btn_${prefix}_toggle`, valid.has("HOLD_ON") || valid.has("HOLD_OFF") || valid.has("NOOP"));
+
+  // TOGGLE_HOLD is always allowed even if HOLD_ON/HOLD_OFF are the only legal moves;
+  // but if your server encodes this differently, keep this permissive logic.
+  setBtnEnabled(
+    `btn_${prefix}_toggle`,
+    valid.has("TOGGLE_HOLD") || valid.has("HOLD_ON") || valid.has("HOLD_OFF") || valid.has("NOOP")
+  );
+
   setBtnEnabled(`btn_${prefix}_shoot`, valid.has("SHOOT"));
   setBtnEnabled(`btn_${prefix}_release`, valid.has("RELEASE_CHARGE"));
 }
@@ -145,84 +149,104 @@ function renderActionButtons(prefix, view) {
 function renderMctsSummary() {
   const m = state?.mcts;
   if (!m) return;
-
-  $("mcts_root_visits").textContent = String(m.root_visits ?? 0);
-  $("mcts_p1_best").textContent = String(m.p1_maximin?.best ?? "?");
-  $("mcts_p2_best").textContent = String(m.p2_minimax?.best ?? "?");
+  if ($("mcts_root_visits")) $("mcts_root_visits").textContent = String(m.root_visits ?? 0);
+  if ($("mcts_p1_best")) $("mcts_p1_best").textContent = String(m.p1_maximin?.best ?? "?");
+  if ($("mcts_p2_best")) $("mcts_p2_best").textContent = String(m.p2_minimax?.best ?? "?");
 }
 
 function renderPlanStatus() {
   const p = state?.plan;
   if (!p || !p.has_plan) {
-    $("plan_status").textContent = "None";
-    $("plan_replay").textContent = "0/0";
+    if ($("plan_status")) $("plan_status").textContent = "None";
+    if ($("plan_replay")) $("plan_replay").textContent = "0/0";
     return;
   }
   const idx = p.replay_index ?? 0;
   const len = p.replay_len ?? 0;
-  $("plan_status").textContent = `Ready (len ${len})`;
-  $("plan_replay").textContent = `${idx}/${len}`;
-}
-
-function renderHUD() {
-  if (!state) return;
-
-  $("cust").textContent = String(state.p1.cust ?? 0);
-  $("tree_current").textContent = String(state.tree?.current_id ?? "?");
-
-  renderPlanStatus();
-  renderMctsSummary();
-
-  renderSideHUD("p1", state.p1);
-  renderSideHUD("p2", state.p2);
-
-  renderActionButtons("p1", state.p1);
-  renderActionButtons("p2", state.p2);
-
-  const eventsEl = $("events");
-  const lines = (state.p1.last_events || []);
-  eventsEl.innerHTML = "";
-  for (const line of lines.slice().reverse()) {
-    const d = document.createElement("div");
-    d.textContent = line;
-    eventsEl.appendChild(d);
-  }
+  if ($("plan_status")) $("plan_status").textContent = `Ready (len ${len})`;
+  if ($("plan_replay")) $("plan_replay").textContent = `${idx}/${len}`;
 }
 
 function renderSideHUD(prefix, v) {
-  $(`${prefix}_lock`).textContent = v.is_locked ? `YES (${v.lock_remaining ?? 0})` : "NO";
+  const lockEl = $(`${prefix}_lock`);
+  if (lockEl) lockEl.textContent = v.is_locked ? `YES (${v.lock_remaining ?? 0})` : "NO";
 
-  // NEW: form label
   const fname = v.p_form_name ?? "?";
   const fid = v.p_form ?? "?";
   const formEl = $(`${prefix}_form`);
   if (formEl) formEl.textContent = `${fname} [${fid}]`;
 
-  $(`${prefix}_pos`).textContent = `r${v.p_rc[0]},c${v.p_rc[1]}`;
-  $(`${prefix}_enemy_pos`).textContent = `r${v.e_rc[0]},c${v.e_rc[1]}`;
-  $(`${prefix}_pending`).textContent = v.pending_action ? String(v.pending_action) : "None";
-  $(`${prefix}_hp`).textContent = String(v.p_hp ?? 0);
-  $(`${prefix}_ehp`).textContent = String(v.e_hp ?? 0);
+  const posEl = $(`${prefix}_pos`);
+  if (posEl) posEl.textContent = `r${v.p_rc?.[0] ?? "?"},c${v.p_rc?.[1] ?? "?"}`;
 
-  $(`${prefix}_hold`).textContent = v.p_charge_hold ? "ON" : "OFF";
+  const eposEl = $(`${prefix}_enemy_pos`);
+  if (eposEl) eposEl.textContent = `r${v.e_rc?.[0] ?? "?"},c${v.e_rc?.[1] ?? "?"}`;
+
+  const pendEl = $(`${prefix}_pending`);
+  if (pendEl) pendEl.textContent = v.pending_action ? String(v.pending_action) : "None";
+
+  const hpEl = $(`${prefix}_hp`);
+  if (hpEl) hpEl.textContent = String(v.p_hp ?? 0);
+
+  const ehpEl = $(`${prefix}_ehp`);
+  if (ehpEl) ehpEl.textContent = String(v.e_hp ?? 0);
+
+  const holdEl = $(`${prefix}_hold`);
+  if (holdEl) holdEl.textContent = v.p_charge_hold ? "ON" : "OFF";
+
   const fullAt = v.charge_full_at ?? 5;
-  $(`${prefix}_prog_txt`).textContent = `${v.p_charge_progress ?? 0}/${fullAt}`;
+  const progTxt = $(`${prefix}_prog_txt`);
+  if (progTxt) progTxt.textContent = `${v.p_charge_progress ?? 0}/${fullAt}`;
+
   renderChargeBar($(`${prefix}_charge_bar`), v.p_charge_progress ?? 0, fullAt, !!v.is_locked);
+}
+
+function renderHUD() {
+  if (!state) return;
+
+  if ($("cust")) $("cust").textContent = String(state.p1?.cust ?? 0);
+  if ($("tree_current")) $("tree_current").textContent = String(state.tree?.current_id ?? "?");
+
+  renderPlanStatus();
+  renderMctsSummary();
+
+  if (state.p1) renderSideHUD("p1", state.p1);
+  if (state.p2) renderSideHUD("p2", state.p2);
+
+  if (state.p1) renderHand("p1", state.p1);
+  if (state.p2) renderHand("p2", state.p2);
+
+  renderActionButtons("p1", state.p1);
+  renderActionButtons("p2", state.p2);
+
+  const eventsEl = $("events");
+  if (eventsEl) {
+    const lines = (state.p1?.last_events || []);
+    eventsEl.innerHTML = "";
+    for (const line of lines.slice().reverse()) {
+      const d = document.createElement("div");
+      d.textContent = line;
+      eventsEl.appendChild(d);
+    }
+  }
 }
 
 // -------------------------------
 // Grid render + entities + shot overlay
 // -------------------------------
-function cellCenterInOverlay(gridEl, idx) {
+function cellCenterInOverlay(gridEl, overlayEl, idx) {
   const cell = gridEl?.children?.[idx];
-  if (!cell) return { x: 0, y: 0 };
+  if (!cell || !overlayEl) return { x: 0, y: 0 };
+
   const cellRect = cell.getBoundingClientRect();
-  const gridRect = gridEl.getBoundingClientRect();
+  const overlayRect = overlayEl.getBoundingClientRect();
+
   return {
-    x: cellRect.left - gridRect.left + cellRect.width / 2,
-    y: cellRect.top - gridRect.top + cellRect.height / 2,
+    x: cellRect.left - overlayRect.left + cellRect.width / 2,
+    y: cellRect.top - overlayRect.top + cellRect.height / 2,
   };
 }
+
 function dirToOffset(dir, magnitudePx) {
   const m = magnitudePx | 0;
   switch (dir) {
@@ -241,54 +265,51 @@ function applyEntityTransform(entEl, leanDir, entryDir, isEntering) {
   const a = dirToOffset(leanDir, LEAN_MAG);
   const b = isEntering ? dirToOffset(entryDir, ENTRY_MAG) : { dx: 0, dy: 0 };
 
-  const dx = a.dx + b.dx;
-  const dy = a.dy + b.dy;
-
-  entEl.style.transform = `translate(-50%, -50%) translate(${dx}px, ${dy}px)`;
+  entEl.style.transform = `translate(-50%, -50%) translate(${a.dx + b.dx}px, ${a.dy + b.dy}px)`;
 }
 
 function renderGrid(view, gridId, overlayId) {
   const gridEl = $(gridId);
   const overlayEl = $(overlayId);
-  if (!gridEl || !overlayEl) return;
+  if (!gridEl || !overlayEl || !view) return;
 
   const owners = view.grid_owner_state || [];
   const tiles = view.grid_state || [];
 
-  // Track which panel indices should be highlighted, and by what kind.
-  // Map: idx -> "charge" | "buster"
+  // idx -> "charge"|"buster"
   const hotKindByIdx = new Map();
-  const hotPanels = view.hot_panels || [];
-  for (const hp of hotPanels) {
+  for (const hp of (view.hot_panels || [])) {
     if (!hp) continue;
-    const idx = hp.idx | 0;
+    const idx = (hp.idx == null) ? null : (hp.idx | 0);
     const kind = String(hp.kind || "");
-    if (kind === "charge" || kind === "buster") {
-      hotKindByIdx.set(idx, kind);
-    }
+    if (idx == null) continue;
+    if (kind === "charge" || kind === "buster") hotKindByIdx.set(idx, kind);
   }
 
-
+  // Build 18 cells always
   gridEl.innerHTML = "";
-  for (let i = 0; i < owners.length; i++) {
-    const d = document.createElement("div");
+  for (let i = 0; i < 18; i++) {
+    const owner = owners[i] ?? 0;
+    const tile = tiles[i] ?? 0;
     const kind = hotKindByIdx.get(i) || "";
-    d.className = `cell tile-${tiles[i] ?? 2} p${owners[i] ?? 0}` + (kind ? ` hot-${kind}` : "");
+
+    const d = document.createElement("div");
+    d.className = `cell tile-${tile} p${owner}` + (kind ? ` hot-${kind}` : "");
     gridEl.appendChild(d);
   }
 
+  const pIdx = view.p_idx ?? 0;
+  const eIdx = view.e_idx ?? 0;
 
-  const pCell = gridEl.children[view.p_idx ?? 0];
-  const eCell = gridEl.children[view.e_idx ?? 0];
+  const pCell = gridEl.children[pIdx];
+  const eCell = gridEl.children[eIdx];
 
   if (pCell) {
     const ent = document.createElement("div");
     ent.className = "entity ent-p";
-
     const lvl = view.p_charge_level ?? 0;
     if (lvl === 1) ent.classList.add("aura-chg1");
     if (lvl === 2) ent.classList.add("aura-chg2");
-
     applyEntityTransform(ent, view.p_lean_dir, view.p_entry_dir, !!view.p_is_entering);
     pCell.appendChild(ent);
   }
@@ -296,23 +317,25 @@ function renderGrid(view, gridId, overlayId) {
   if (eCell) {
     const ent = document.createElement("div");
     ent.className = "entity ent-e";
-
     const lvl = view.e_charge_level ?? 0;
     if (lvl === 1) ent.classList.add("aura-chg1");
     if (lvl === 2) ent.classList.add("aura-chg2");
-
     applyEntityTransform(ent, view.e_lean_dir, view.e_entry_dir, !!view.e_is_entering);
     eCell.appendChild(ent);
   }
 
-  const rect = gridEl.getBoundingClientRect();
-  overlayEl.setAttribute("viewBox", `0 0 ${rect.width} ${rect.height}`);
+  // SVG overlay sizing
+  const orect = overlayEl.getBoundingClientRect();
+  const w = Math.max(1, Math.round(orect.width || 1));
+  const h = Math.max(1, Math.round(orect.height || 1));
+  overlayEl.setAttribute("viewBox", `0 0 ${w} ${h}`);
   overlayEl.innerHTML = "";
 
+  // Shots
   const shots = view.shot_lines || [];
   for (const sh of shots) {
-    const a = cellCenterInOverlay(gridEl, sh.from_idx);
-    const b = cellCenterInOverlay(gridEl, sh.to_idx);
+    const a = cellCenterInOverlay(gridEl, overlayEl, sh.from_idx);
+    const b = cellCenterInOverlay(gridEl, overlayEl, sh.to_idx);
 
     const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
     line.setAttribute("x1", String(a.x));
@@ -321,7 +344,6 @@ function renderGrid(view, gridId, overlayId) {
     line.setAttribute("y2", String(b.y));
     line.setAttribute("stroke-width", "3");
     line.setAttribute("stroke-linecap", "round");
-    line.setAttribute("opacity", "1");
 
     const isCharged = sh.kind === "charge";
     line.setAttribute("stroke", isCharged ? "rgba(255, 80, 220, 0.95)" : "rgba(255, 235, 80, 0.95)");
@@ -336,7 +358,164 @@ function renderBoards() {
 }
 
 // -------------------------------
-// Tree (unchanged)
+// Chip / Hand rendering
+// -------------------------------
+function _firstDefined(obj, keys, fallback) {
+  for (const k of keys) {
+    if (obj && Object.prototype.hasOwnProperty.call(obj, k) && obj[k] != null) return obj[k];
+  }
+  return fallback;
+}
+
+function extractHand(view) {
+  const h = _firstDefined(view, ["hand", "p_hand", "current_hand", "hand_chips"], null);
+  if (Array.isArray(h)) return h;
+
+  const names = _firstDefined(view, ["hand_names", "p_hand_names"], null);
+  if (Array.isArray(names)) return names.map(n => ({ name: String(n) }));
+
+  return [];
+}
+
+function chipRowLabel(ch) {
+  if (ch == null) return { name: "?", meta: "" };
+  if (typeof ch === "string") return { name: ch, meta: "" };
+
+  const name =
+    (ch.name != null ? String(ch.name) :
+    ch.chip_name != null ? String(ch.chip_name) :
+    ch.title != null ? String(ch.title) : "?");
+
+  const code =
+    (ch.code != null ? String(ch.code) :
+    ch.letter != null ? String(ch.letter) :
+    ch.chip_code != null ? String(ch.chip_code) : "");
+
+  const dmg =
+    (ch.dmg != null ? `dmg ${String(ch.dmg)}` :
+    ch.damage != null ? `dmg ${String(ch.damage)}` : "");
+
+  const extra =
+    (ch.desc != null ? String(ch.desc) :
+    ch.description != null ? String(ch.description) : "");
+
+  const bits = [];
+  if (code) bits.push(code);
+  if (dmg) bits.push(dmg);
+  if (extra) bits.push(extra);
+
+  return { name, meta: bits.join(" · ") };
+}
+
+function extractSelectedChipIdx(view) {
+  const v = _firstDefined(view, ["selected_chip_idx", "pending_chip_idx", "chip_selected_idx"], null);
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? (n | 0) : null;
+}
+
+function findChipActionForIndex(validSet, idx) {
+  if (idx === 0 && validSet.has("USE_CHIP")) return "USE_CHIP";
+
+  const candidates = [
+    `CHIP_${idx}`,
+    `USE_CHIP_${idx}`,
+    `SELECT_CHIP_${idx}`,
+    `CHIP_SELECT_${idx}`,
+    `CHIP_USE_${idx}`,
+  ];
+  for (const c of candidates) {
+    if (validSet.has(c)) return c;
+  }
+
+  for (const a of validSet) {
+    const s = String(a);
+    if (s === `CHIP:${idx}` || s === `USE_CHIP:${idx}` || s === `SELECT_CHIP:${idx}`) return s;
+  }
+
+  return null;
+}
+
+function renderHand(prefix, view) {
+  const listEl = $(`${prefix}_hand_list`);
+  const stateEl = $(`${prefix}_hand_state`);
+  if (!listEl) return;
+
+  const valid = validActionSet(view);
+  const hand = extractHand(view);
+  const selIdx = extractSelectedChipIdx(view);
+  const inChip = !!_firstDefined(view, ["in_chip_window", "chip_window_open", "is_in_chip_select"], false);
+
+  if (stateEl) stateEl.textContent = inChip ? "chip window" : "battle";
+
+  listEl.innerHTML = "";
+
+  if (!hand.length) {
+    const empty = document.createElement("div");
+    empty.style.fontSize = "11px";
+    empty.style.color = "#777";
+    empty.textContent = "(hand empty / not provided by server yet)";
+    listEl.appendChild(empty);
+    return;
+  }
+
+  hand.forEach((ch, idx) => {
+    const { name, meta } = chipRowLabel(ch);
+    const act = findChipActionForIndex(valid, idx);
+    const enabled = !!act;
+
+    const row = document.createElement("div");
+    row.className = "chip-row" + (enabled ? "" : " disabled") + ((selIdx === idx) ? " selected" : "");
+
+    const main = document.createElement("div");
+    main.className = "chip-main";
+
+    const nm = document.createElement("div");
+    nm.className = "chip-name";
+    nm.textContent = name;
+
+    const mt = document.createElement("div");
+    mt.className = "chip-meta";
+    mt.textContent = meta || `slot ${idx}`;
+
+    main.appendChild(nm);
+    main.appendChild(mt);
+
+    const actWrap = document.createElement("div");
+    actWrap.className = "chip-act";
+
+    const btn = document.createElement("button");
+    btn.className = "chip-btn";
+    btn.textContent = enabled ? "Use" : "N/A";
+    btn.disabled = !enabled;
+
+    const doUse = async (ev) => {
+      if (ev) ev.stopPropagation();
+      if (!enabled) return;
+      try {
+        const actor = prefix === "p1" ? "P1" : "P2";
+        state = await apiUi(actor, act);
+        stopAutoReplay();
+        renderHUD();
+        renderBoards();
+      } catch (e) {
+        toast(String(e));
+      }
+    };
+
+    btn.onclick = doUse;
+    actWrap.appendChild(btn);
+
+    row.appendChild(main);
+    row.appendChild(actWrap);
+    row.onclick = doUse;
+
+    listEl.appendChild(row);
+  });
+}
+
+// -------------------------------
+// Tree (from your working version)
 // -------------------------------
 function getChildren(nid) {
   if (!tree || !tree.edges) return [];
@@ -367,11 +546,13 @@ function uncollapsePathToCurrent() {
 }
 
 function fmtNodeSummary(n, nid) {
-  const s = n.s;
+  const s = n.s || {};
   const ns = treeMcts?.node_stats?.[nid];
   const nvis = ns?.N ?? 0;
   const nq = ns?.Q ?? 0;
-  return `cust${s.cust} hp ${s.p1_hp}/${s.p2_hp} L(${s.p1_locked ? 1 : 0},${s.p2_locked ? 1 : 0}) · N${nvis} Q${nq.toFixed(3)}`;
+  const p1l = (s.p1_locked ? 1 : 0);
+  const p2l = (s.p2_locked ? 1 : 0);
+  return `cust${s.cust ?? "?"} hp ${s.p1_hp ?? "?"}/${s.p2_hp ?? "?"} L(${p1l},${p2l}) · N${nvis} Q${Number(nq).toFixed(3)}`;
 }
 
 function fmtEdgeStats(parentId, joint) {
@@ -379,7 +560,7 @@ function fmtEdgeStats(parentId, joint) {
   if (!es) return "";
   const n = es.N ?? 0;
   const q = es.Q ?? 0;
-  return ` · eN${n} eQ${q.toFixed(3)}`;
+  return ` · eN${n} eQ${Number(q).toFixed(3)}`;
 }
 
 async function refreshTree() {
@@ -415,7 +596,7 @@ function renderTreeView() {
     if (nid === currentId) row.classList.add("current");
 
     const hasKids = nodeHasAnyKnownChildren(nid);
-    const isCollapsed = collapsed.has(nid);
+    const isCol = collapsed.has(nid);
 
     const caret = document.createElement("span");
     caret.className = "tree-caret";
@@ -423,10 +604,11 @@ function renderTreeView() {
       caret.textContent = " ";
       caret.style.cursor = "default";
     } else {
-      caret.textContent = isCollapsed ? "▶" : "▼";
+      caret.textContent = isCol ? "▶" : "▼";
       caret.onclick = (ev) => {
         ev.stopPropagation();
-        if (collapsed.has(nid)) collapsed.delete(nid); else collapsed.add(nid);
+        if (collapsed.has(nid)) collapsed.delete(nid);
+        else collapsed.add(nid);
         renderTreeView();
       };
     }
@@ -437,8 +619,7 @@ function renderTreeView() {
 
     const label = document.createElement("span");
     label.className = "tree-label";
-    const actionText = n.action ? n.action : "(root)";
-    label.textContent = actionText;
+    label.textContent = n.action ? n.action : "(root)";
 
     const sum = document.createElement("span");
     sum.className = "tree-sum";
@@ -485,9 +666,7 @@ function renderTreeView() {
 
 // -------------------------------
 // Inputs + replay + buttons + init
-// (UNCHANGED from your current file)
 // -------------------------------
-
 async function commit() {
   state = await apiCommit();
   renderHUD();
@@ -535,6 +714,7 @@ async function onKeyDown(ev) {
       return;
     }
 
+    // For non-toggle actions, enforce legality
     if (actor && action && action !== "TOGGLE_HOLD") {
       if (!isActionValidForActor(actor, action)) {
         toast(`Invalid now: ${actor} ${action}`);
@@ -591,21 +771,25 @@ function hookButtons() {
     });
   };
 
+  // P1
   hook("btn_p1_hold_on", async () => { state = await apiUi("P1", "HOLD_ON"); stopAutoReplay(); renderHUD(); renderBoards(); });
   hook("btn_p1_hold_off", async () => { state = await apiUi("P1", "HOLD_OFF"); stopAutoReplay(); renderHUD(); renderBoards(); });
   hook("btn_p1_toggle", async () => { state = await apiUi("P1", "TOGGLE_HOLD"); stopAutoReplay(); renderHUD(); renderBoards(); });
   hook("btn_p1_shoot", async () => { state = await apiUi("P1", "SHOOT"); stopAutoReplay(); renderHUD(); renderBoards(); });
   hook("btn_p1_release", async () => { state = await apiUi("P1", "RELEASE_CHARGE"); stopAutoReplay(); renderHUD(); renderBoards(); });
 
+  // P2
   hook("btn_p2_hold_on", async () => { state = await apiUi("P2", "HOLD_ON"); stopAutoReplay(); renderHUD(); renderBoards(); });
   hook("btn_p2_hold_off", async () => { state = await apiUi("P2", "HOLD_OFF"); stopAutoReplay(); renderHUD(); renderBoards(); });
   hook("btn_p2_toggle", async () => { state = await apiUi("P2", "TOGGLE_HOLD"); stopAutoReplay(); renderHUD(); renderBoards(); });
   hook("btn_p2_shoot", async () => { state = await apiUi("P2", "SHOOT"); stopAutoReplay(); renderHUD(); renderBoards(); });
   hook("btn_p2_release", async () => { state = await apiUi("P2", "RELEASE_CHARGE"); stopAutoReplay(); renderHUD(); renderBoards(); });
 
+  // Commit/reset
   hook("btn_commit", async () => { stopAutoReplay(); await commit(); });
   hook("btn_reset", async () => { stopAutoReplay(); state = await apiReset(); renderHUD(); renderBoards(); await refreshTree(); });
 
+  // Tree
   hook("btn_tree_refresh", async () => { await refreshTree(); });
   hook("btn_tree_collapse_all", async () => {
     if (!tree || !tree.nodes) return;
@@ -617,6 +801,7 @@ function hookButtons() {
     renderTreeView();
   });
 
+  // MCTS
   hook("btn_mcts_run", async () => {
     const iters = parseInt($("mcts_iters")?.value || "600", 10);
     const depth = parseInt($("mcts_depth")?.value || "12", 10);
@@ -647,9 +832,10 @@ function hookButtons() {
     renderHUD(); renderBoards();
   });
 
+  // Plan
   hook("btn_plan_run", async () => {
     const iters = parseInt($("plan_iters")?.value || "800", 10);
-    const look = parseInt($("plan_look")?.value || "16", 10);
+    const look = parseInt($("plan_look")?.value || "16", 10); // IMPORTANT: plan_look (not plan_depth)
     stopAutoReplay();
     state = await apiPlanRun(iters, look);
     toast(`Planned to 64 (iters/step ${iters}, lookahead ${look})`);
@@ -684,6 +870,7 @@ function hookButtons() {
     toast("Stopped");
   });
 
+  // Slider labels
   const depth = $("tree_depth");
   const depthVal = $("tree_depth_val");
   if (depth && depthVal) {
@@ -698,6 +885,7 @@ function hookButtons() {
     miV.textContent = mi.value;
     mi.addEventListener("input", () => miV.textContent = mi.value);
   }
+
   const md = $("mcts_depth");
   const mdV = $("mcts_depth_val");
   if (md && mdV) {
@@ -711,6 +899,7 @@ function hookButtons() {
     piV.textContent = pi.value;
     pi.addEventListener("input", () => piV.textContent = pi.value);
   }
+
   const pl = $("plan_look");
   const plV = $("plan_look_val");
   if (pl && plV) {
@@ -733,6 +922,7 @@ async function init() {
   window.addEventListener("keydown", onKeyDown, { passive: false });
   window.addEventListener("resize", () => renderBoards());
 
+  // One more pass after layout settles
   setTimeout(() => renderBoards(), 50);
 }
 

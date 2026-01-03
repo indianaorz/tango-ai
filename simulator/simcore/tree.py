@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
-
+from concurrent.futures import ProcessPoolExecutor 
 from .actions import ACTIONS, ACT_HOLD_OFF, ACT_HOLD_ON, ACT_NOOP, ActionId
 from .mcts import (
     MCTSConfig,
@@ -16,7 +16,6 @@ from .mcts import (
     stable_state_key,
 )
 from .state import ActorId, GameState
-
 JointActionId = str
 
 
@@ -84,14 +83,10 @@ class TreeStore:
 
         self.mcts = MCTSStatsStore()
 
-        # Transposition cache: stable_state_key(state) -> node_id
-        # NOTE: This makes the structure a DAG (multiple parents can point at same node).
-        # TreeNode.parent_id remains the first parent that created the node.
         self.transpo: Dict[Tuple[Any, ...], str] = {}
 
-        # Planning / replay
         self.plan: Optional[PlanResult] = None
-        self.plan_replay_index: int = 0  # 0 means "at base"
+        self.plan_replay_index: int = 0
 
         self.reset()
 
@@ -116,7 +111,6 @@ class TreeStore:
         self.root_id = root.node_id
         self.current_id = root.node_id
 
-        # Seed transposition cache with root
         self.transpo[stable_state_key(root_state)] = root.node_id
 
         self._reset_cursor_from_current()
@@ -210,18 +204,15 @@ class TreeStore:
         if joint in node.children:
             return node.children[joint]
 
-        # Apply joint to get child state
         st = copy.deepcopy(node.state)
         self.apply_joint_to_state(st, joint)
 
-        # Transposition lookup
         key = stable_state_key(st)
         existing_id = self.transpo.get(key)
         if existing_id is not None:
             node.children[joint] = existing_id
             return existing_id
 
-        # Create new node
         child = TreeNode(
             node_id=self._alloc_id(),
             parent_id=node.node_id,
@@ -286,7 +277,8 @@ class TreeStore:
         target_cust: Optional[int] = None,
         time_penalty: float = 0.002,
         jitter_eps: float = 1e-4,
-    ) -> Dict[str, Any]:
+        *, workers: int = 1, progress: bool = False, c_puct: float = 1.25,
+                          progress_label: str = "", executor: Optional[ProcessPoolExecutor] = None) -> Dict[str, Any]:
         root_id = self.current_id
         root_state = self.nodes[root_id].state
 
@@ -297,6 +289,11 @@ class TreeStore:
             target_cust=target_cust,
             time_penalty=float(time_penalty),
             jitter_eps=float(jitter_eps),
+            use_puct=True,
+            c_puct=float(c_puct), 
+            workers=int(workers), 
+            progress=bool(progress), 
+            progress_label=str(progress_label)
         )
 
         def ensure_child_fn(pid: str, j: JointActionId) -> str:
@@ -315,7 +312,8 @@ class TreeStore:
             ensure_child_fn=ensure_child_fn,
             get_node_state_fn=get_state_fn,
             get_node_children_fn=get_children_fn,
-            config=cfg,
+            config=cfg, 
+            executor=executor
         )
 
     def mcts_summary_current(self) -> Dict[str, Any]:
@@ -334,7 +332,15 @@ class TreeStore:
         seed: int = 0,
         time_penalty: float = 0.002,
         jitter_eps: float = 1e-4,
+        *,
+        workers: int = 1,
+        progress: bool = False,
+        c_puct: float = 1.25,
     ) -> PlanResult:
+        import sys
+        import time
+        from typing import List
+
         target_cust = int(target_cust)
         if target_cust <= 0:
             raise ValueError("target_cust must be > 0")
@@ -346,49 +352,92 @@ class TreeStore:
         if lookahead_depth < 1:
             raise ValueError("lookahead_depth must be >= 1")
 
+        # Keep current pointer stable even if planning errors out.
         base_id = self.current_id
         nid = base_id
 
         steps: List[PlanStep] = []
         step_i = 0
 
-        while True:
-            st = self.nodes[nid].state
-            if st.cust >= target_cust:
-                break
+        # Plan-level progress (so the user knows this is N separate MCTS runs).
+        start_cust = int(self.nodes[nid].state.cust)
+        total_steps = max(0, target_cust - start_cust)
 
-            remaining = target_cust - st.cust
-            depth = min(lookahead_depth, remaining)
+        last_plan_print = 0.0
 
-            # temporarily set current for MCTS callbacks
-            self.current_id = nid
+        def _plan_line(done: int, total: int, cust_now: int) -> str:
+            total = max(1, int(total))
+            done = max(0, min(int(done), total))
+            frac = float(done) / float(total)
+            width = 28
+            filled = int(round(frac * width))
+            bar = "█" * filled + "░" * (width - filled)
+            return f"[PLAN] {done}/{total} {frac*100:5.1f}% |{bar}| cust={cust_now}->{target_cust}"
 
-            summary = self.run_mcts_from_current(
-                iterations=iters_per_step,
-                max_depth=depth,
-                seed=seed + step_i,
-                target_cust=target_cust,
-                time_penalty=time_penalty,
-                jitter_eps=jitter_eps,
-            )
+        def _maybe_print_plan(done: int, cust_now: int, force: bool = False) -> None:
+            nonlocal last_plan_print
+            if not progress:
+                return
+            now = time.monotonic()
+            if force or (now - last_plan_print) >= 0.25:
+                last_plan_print = now
+                print(_plan_line(done, total_steps, cust_now), file=sys.stderr, flush=True)
 
-            p1_best = summary["p1_maximin"]["best"]
-            p2_best = summary["p2_minimax"]["best"]
-            joint = fmt_joint(p1_best, p2_best)
+        try:
+            while True:
+                st = self.nodes[nid].state
+                cust_now = int(st.cust)
+                if cust_now >= target_cust:
+                    break
 
-            child_id = self.ensure_child(nid, joint)
-            cust_after = self.nodes[child_id].state.cust
-            steps.append(PlanStep(node_id=child_id, joint=joint, cust_after=cust_after))
+                remaining = target_cust - cust_now
+                depth = min(lookahead_depth, remaining)
 
-            nid = child_id
-            step_i += 1
+                self.current_id = nid
 
-            if step_i > 512:
-                raise RuntimeError("plan exceeded safety bound")
+                # Plan-level progress tells you WHY MCTS progress repeats:
+                # this is step_i-th MCTS call in the overall plan.
+                _maybe_print_plan(step_i, cust_now, force=True)
+                if progress:
+                    print(
+                        f"[PLAN] step {step_i + 1}/{max(1, total_steps)}: running MCTS "
+                        f"(iters={iters_per_step}, depth={depth}) at cust={cust_now}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
-        # restore current to base (planning doesn't auto-move you)
-        self.current_id = base_id
-        self._reset_cursor_from_current()
+                summary = self.run_mcts_from_current(
+                    iterations=iters_per_step,
+                    max_depth=depth,
+                    seed=seed + step_i,
+                    target_cust=target_cust,
+                    time_penalty=time_penalty,
+                    jitter_eps=jitter_eps,
+                    workers=workers,
+                    progress=progress,
+                    c_puct=c_puct,
+                )
+
+                p1_best = summary["p1_maximin"]["best"]
+                p2_best = summary["p2_minimax"]["best"]
+                joint = fmt_joint(p1_best, p2_best)
+
+                child_id = self.ensure_child(nid, joint)
+                cust_after = int(self.nodes[child_id].state.cust)
+                steps.append(PlanStep(node_id=child_id, joint=joint, cust_after=cust_after))
+
+                nid = child_id
+                step_i += 1
+
+                _maybe_print_plan(step_i, cust_after, force=True)
+
+                if step_i > 512:
+                    raise RuntimeError("plan exceeded safety bound")
+
+        finally:
+            # Always restore cursor state invariants even if something throws.
+            self.current_id = base_id
+            self._reset_cursor_from_current()
 
         self.plan = PlanResult(base_node_id=base_id, target_cust=target_cust, steps=steps)
         self.plan_replay_index = 0

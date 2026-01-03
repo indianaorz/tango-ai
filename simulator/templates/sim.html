@@ -1,174 +1,249 @@
 <!-- mmbn_sim/templates/sim.html -->
 <!DOCTYPE html>
 <html>
+
 <head>
-  <meta charset="utf-8" />
-  <title>MMBN Mini Sim (Dual View + Tree + MCTS)</title>
-  <link rel="stylesheet" href="/static/sim.css">
+    <meta charset="utf-8" />
+    <title>MMBN Mini Sim (Dual View + Tree + MCTS)</title>
+    <link rel="stylesheet" href="/static/sim.css">
 </head>
+
 <body>
-  <h2 class="title">MMBN Mini Sim (server-authoritative + dual views + joint commit + MCTS)</h2>
+    <div class="app">
+        <header class="app-header">
+            <div class="app-title">
+                <h2 class="title">MMBN Mini Sim</h2>
+                <div class="subtitle">server-authoritative · dual views · joint commit · tree · MCTS</div>
+            </div>
 
-  <div class="layout">
-    <div class="panel">
-      <h4>Controls</h4>
+            <div class="header-stats">
+                <div class="stat">
+                    <div class="stat-label">Cust</div>
+                    <div class="badge" id="cust">0</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Tree Current</div>
+                    <div class="badge cyan" id="tree_current">?</div>
+                </div>
+            </div>
+        </header>
 
-      <div class="hint">
-        <div><b>P1</b> pending: <kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> • <kbd>Z</kbd> shoot • <kbd>C</kbd> release • <kbd>X</kbd> toggle hold</div>
-        <div style="margin-top:6px;"><b>P2</b> pending: <kbd>W</kbd><kbd>S</kbd><kbd>A</kbd><kbd>D</kbd> • <kbd>F</kbd> shoot • <kbd>G</kbd> release • <kbd>R</kbd> toggle hold</div>
-        <div style="margin-top:6px;"><kbd>SPACE</kbd> commits BOTH decisions and advances 1 cust (creates/reuses child node)</div>
-      </div>
+        <!-- LEFT SIDEBAR -->
+        <aside class="sidebar left">
+            <section class="card">
+                <h4>Controls</h4>
+                <div class="hint">
+                    <div><b>P1</b> pending: <kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> • <kbd>Z</kbd> shoot •
+                        <kbd>C</kbd> release • <kbd>X</kbd> toggle hold</div>
+                    <div style="margin-top:6px;"><b>P2</b> pending: <kbd>W</kbd><kbd>S</kbd><kbd>A</kbd><kbd>D</kbd> •
+                        <kbd>F</kbd> shoot • <kbd>G</kbd> release • <kbd>R</kbd> toggle hold</div>
+                    <div style="margin-top:6px;"><kbd>SPACE</kbd> commits BOTH decisions and advances 1 cust</div>
+                </div>
+            </section>
 
-      <h4 style="margin-top:14px;">State</h4>
-      <div class="row"><span>Cust</span><span class="badge" id="cust">0</span></div>
-      <div class="row"><span>Tree Current</span><span class="badge cyan" id="tree_current">?</span></div>
+            <section class="card">
+                <h4>Plan (to cust 64)</h4>
 
-      <h4 style="margin-top:14px;">Plan (to cust 64)</h4>
-      <div class="row"><span>Status</span><span class="badge" id="plan_status">None</span></div>
-      <div class="row"><span>Replay</span><span class="badge" id="plan_replay">0/0</span></div>
+                <div class="row"><span>Status</span><span class="badge" id="plan_status">None</span></div>
+                <div class="row"><span>Replay</span><span class="badge" id="plan_replay">0/0</span></div>
 
-      <div class="row" style="margin-top:8px;">
-        <span>Plan Iters/step</span>
-        <input id="plan_iters" type="range" min="100" max="4000" step="50" value="800" style="width:220px;">
-        <span class="badge" id="plan_iters_val">800</span>
-      </div>
-      <div class="row">
-        <span>Lookahead</span>
-        <input id="plan_look" type="range" min="4" max="40" step="1" value="16" style="width:220px;">
-        <span class="badge" id="plan_look_val">16</span>
-      </div>
+                <div class="row" style="margin-top:8px;">
+                    <span>Plan Iters/step</span>
+                    <input id="plan_iters" type="range" min="100" max="4000" step="50" value="800">
+                    <span class="badge" id="plan_iters_val">800</span>
+                </div>
 
-      <div class="btnrow" style="margin-top:8px;">
-        <button class="big-btn" id="btn_plan_run">Plan → 64 cust</button>
-        <button class="big-btn" id="btn_plan_replay_reset">Replay: Reset</button>
-        <button class="big-btn" id="btn_plan_replay_step">Replay: Step</button>
-        <button class="big-btn" id="btn_plan_replay_auto">Replay: Auto</button>
-        <button class="big-btn" id="btn_plan_replay_stop">Stop</button>
-      </div>
+                <div class="row">
+                    <span>Lookahead</span>
+                    <input id="plan_look" type="range" min="4" max="64" step="1" value="16">
+                    <span class="badge" id="plan_look_val">16</span>
+                </div>
 
-      <h4 style="margin-top:14px;">MCTS (single-step)</h4>
-      <div class="row"><span>Root Visits</span><span class="badge" id="mcts_root_visits">0</span></div>
-      <div class="row"><span>P1 Maximin</span><span class="badge cyan" id="mcts_p1_best">?</span></div>
-      <div class="row"><span>P2 Minimax</span><span class="badge red" id="mcts_p2_best">?</span></div>
+                <div class="btnrow" style="margin-top:10px;">
+                    <button class="big-btn" id="btn_plan_run">Plan → 64 cust</button>
+                    <button class="big-btn" id="btn_plan_replay_reset">Replay: Reset</button>
+                    <button class="big-btn" id="btn_plan_replay_step">Replay: Step</button>
+                    <button class="big-btn" id="btn_plan_replay_auto">Replay: Auto</button>
+                    <button class="big-btn" id="btn_plan_replay_stop">Stop</button>
+                </div>
+            </section>
 
-      <div class="row" style="margin-top:8px;">
-        <span>Iters</span>
-        <input id="mcts_iters" type="range" min="50" max="4000" step="50" value="600" style="width:220px;">
-        <span class="badge" id="mcts_iters_val">600</span>
-      </div>
-      <div class="row">
-        <span>Depth</span>
-        <input id="mcts_depth" type="range" min="2" max="40" step="1" value="12" style="width:220px;">
-        <span class="badge" id="mcts_depth_val">12</span>
-      </div>
+            <section class="card">
+                <h4>MCTS (single-step)</h4>
 
-      <div class="btnrow" style="margin-top:8px;">
-        <button class="big-btn" id="btn_mcts_run">Run MCTS</button>
-        <button class="big-btn" id="btn_mcts_apply_p1">Apply → P1</button>
-        <button class="big-btn" id="btn_mcts_apply_p2">Apply → P2</button>
-        <button class="big-btn" id="btn_mcts_apply_both">Apply → Both</button>
-      </div>
+                <div class="row"><span>Root Visits</span><span class="badge" id="mcts_root_visits">0</span></div>
+                <div class="row"><span>P1 Maximin</span><span class="badge cyan" id="mcts_p1_best">?</span></div>
+                <div class="row"><span>P2 Minimax</span><span class="badge red" id="mcts_p2_best">?</span></div>
 
-      <h4 style="margin-top:14px;">P1 (Local-left view)</h4>
-      <div class="row"><span>Locked?</span><span class="badge" id="p1_lock">NO</span></div>
-      <div class="row"><span>Form</span><span class="badge cyan" id="p1_form">?</span></div>
-      <div class="row"><span>Pos</span><span class="badge cyan" id="p1_pos">?</span></div>
-      <div class="row"><span>Enemy</span><span class="badge red" id="p1_enemy_pos">?</span></div>
-      <div class="row"><span>Pending</span><span class="badge" id="p1_pending">None</span></div>
-      <div class="row"><span>P HP</span><span class="badge cyan" id="p1_hp">1000</span></div>
-      <div class="row"><span>E HP</span><span class="badge red" id="p1_ehp">1000</span></div>
+                <div class="row" style="margin-top:8px;">
+                    <span>Iters</span>
+                    <input id="mcts_iters" type="range" min="50" max="4000" step="50" value="600">
+                    <span class="badge" id="mcts_iters_val">600</span>
+                </div>
 
-      <div class="row"><span>Hold</span><span class="badge" id="p1_hold">OFF</span></div>
-      <div class="charge-wrap">
-        <div class="charge-label"><span>Charge</span><span id="p1_prog_txt">0/5</span></div>
-        <div class="charge-bar" id="p1_charge_bar"></div>
-      </div>
+                <div class="row">
+                    <span>Depth</span>
+                    <input id="mcts_depth" type="range" min="2" max="40" step="1" value="12">
+                    <span class="badge" id="mcts_depth_val">12</span>
+                </div>
 
-      <div class="btnrow">
-        <button class="big-btn" id="btn_p1_hold_on">P1 Hold ON</button>
-        <button class="big-btn" id="btn_p1_hold_off">P1 Hold OFF</button>
-        <button class="big-btn" id="btn_p1_toggle">P1 Toggle Hold</button>
-      </div>
-      <div class="btnrow">
-        <button class="big-btn" id="btn_p1_shoot">P1 Shoot</button>
-        <button class="big-btn" id="btn_p1_release">P1 Release</button>
-      </div>
+                <div class="btnrow" style="margin-top:10px;">
+                    <button class="big-btn" id="btn_mcts_run">Run MCTS</button>
+                    <button class="big-btn" id="btn_mcts_apply_p1">Apply → P1</button>
+                    <button class="big-btn" id="btn_mcts_apply_p2">Apply → P2</button>
+                    <button class="big-btn" id="btn_mcts_apply_both">Apply → Both</button>
+                </div>
+            </section>
 
-      <h4 style="margin-top:14px;">P2 (Local-left view)</h4>
-      <div class="row"><span>Locked?</span><span class="badge" id="p2_lock">NO</span></div>
-      <div class="row"><span>Form</span><span class="badge cyan" id="p2_form">?</span></div>
-      <div class="row"><span>Pos</span><span class="badge cyan" id="p2_pos">?</span></div>
-      <div class="row"><span>Enemy</span><span class="badge red" id="p2_enemy_pos">?</span></div>
-      <div class="row"><span>Pending</span><span class="badge" id="p2_pending">None</span></div>
-      <div class="row"><span>P HP</span><span class="badge cyan" id="p2_hp">1000</span></div>
-      <div class="row"><span>E HP</span><span class="badge red" id="p2_ehp">1000</span></div>
+            <section class="card">
+                <h4>Commit</h4>
+                <div class="btnrow" style="margin-top:6px;">
+                    <button class="big-btn primary" id="btn_commit">Commit (SPACE)</button>
+                    <button class="big-btn" id="btn_reset">Reset</button>
+                </div>
+                <div class="hint" style="margin-top:10px;">
+                    Tip: Use the Tree panel to jump to any prior state.
+                </div>
+            </section>
+        </aside>
 
-      <div class="row"><span>Hold</span><span class="badge" id="p2_hold">OFF</span></div>
-      <div class="charge-wrap">
-        <div class="charge-label"><span>Charge</span><span id="p2_prog_txt">0/5</span></div>
-        <div class="charge-bar" id="p2_charge_bar"></div>
-      </div>
+        <!-- CENTER -->
+        <main class="main">
+            <section class="card boards-card">
+                <h4>Boards</h4>
 
-      <div class="btnrow">
-        <button class="big-btn" id="btn_p2_hold_on">P2 Hold ON</button>
-        <button class="big-btn" id="btn_p2_hold_off">P2 Hold OFF</button>
-        <button class="big-btn" id="btn_p2_toggle">P2 Toggle Hold</button>
-      </div>
-      <div class="btnrow">
-        <button class="big-btn" id="btn_p2_shoot">P2 Shoot</button>
-        <button class="big-btn" id="btn_p2_release">P2 Release</button>
-      </div>
+                <div class="boards-grid">
+                    <div class="board-col">
+                        <div class="board-title">P1 View (local player on left)</div>
+                        <div class="grid-wrap">
+                            <div class="grid-container" id="grid_p1"></div>
+                            <svg class="grid-overlay" id="overlay_p1"></svg>
+                        </div>
+                    </div>
 
-      <div class="btnrow" style="margin-top:10px;">
-        <button class="big-btn" id="btn_commit">Commit (SPACE)</button>
-        <button class="big-btn" id="btn_reset">Reset</button>
-      </div>
+                    <div class="board-col">
+                        <div class="board-title">P2 View (local player on left)</div>
+                        <div class="grid-wrap">
+                            <div class="grid-container" id="grid_p2"></div>
+                            <svg class="grid-overlay" id="overlay_p2"></svg>
+                        </div>
+                    </div>
+                </div>
+            </section>
 
-      <div class="events" id="events"></div>
-      <div class="toast" id="toast"></div>
+            <!-- MOVED: State Tree now lives under Boards in the center column -->
+            <section class="card tree-card">
+                <h4>State Tree</h4>
+
+                <div class="row">
+                    <span>Depth</span>
+                    <input id="tree_depth" type="range" min="2" max="10" step="1" value="8">
+                    <span class="badge" id="tree_depth_val">8</span>
+                </div>
+
+                <div class="btnrow" style="margin-top:10px;">
+                    <button class="big-btn" id="btn_tree_collapse_all">Collapse All</button>
+                    <button class="big-btn" id="btn_tree_refresh">Refresh</button>
+                </div>
+
+                <div class="tree-wrap" id="tree_view"></div>
+
+                <div class="hint" style="margin-top:10px;">
+                    <div>Click a node to load its state. Chevron toggles collapse only.</div>
+                    <div style="margin-top:6px;">Tree labels show joint action + edge stats (N,Q) when available.</div>
+                </div>
+            </section>
+        </main>
+
+        <!-- RIGHT SIDEBAR -->
+        <aside class="sidebar right">
+            <details class="card" open>
+                <summary class="card-summary">
+                    <span>P1 (Local-left view)</span>
+                </summary>
+
+                <div class="row"><span>Locked?</span><span class="badge" id="p1_lock">NO</span></div>
+                <div class="row"><span>Form</span><span class="badge cyan" id="p1_form">?</span></div>
+                <div class="row"><span>Pos</span><span class="badge cyan" id="p1_pos">?</span></div>
+                <div class="row"><span>Enemy</span><span class="badge red" id="p1_enemy_pos">?</span></div>
+                <div class="row"><span>Pending</span><span class="badge" id="p1_pending">None</span></div>
+                <div class="row"><span>P HP</span><span class="badge cyan" id="p1_hp">1000</span></div>
+                <div class="row"><span>E HP</span><span class="badge red" id="p1_ehp">1000</span></div>
+
+                <div class="row"><span>Hold</span><span class="badge" id="p1_hold">OFF</span></div>
+                <div class="charge-wrap">
+                    <div class="charge-label"><span>Charge</span><span id="p1_prog_txt">0/5</span></div>
+                    <div class="charge-bar" id="p1_charge_bar"></div>
+                </div>
+
+                <div class="btnrow">
+                    <button class="big-btn" id="btn_p1_hold_on">P1 Hold ON</button>
+                    <button class="big-btn" id="btn_p1_hold_off">P1 Hold OFF</button>
+                    <button class="big-btn" id="btn_p1_toggle">P1 Toggle Hold</button>
+                </div>
+                <div class="btnrow">
+                    <button class="big-btn" id="btn_p1_shoot">P1 Shoot</button>
+                    <button class="big-btn" id="btn_p1_release">P1 Release</button>
+                </div>
+
+                <h4 style="margin-top:14px;">P1 Hand</h4>
+                <div class="hand-wrap">
+                    <div class="hand-title">
+                        <div class="label">chips</div>
+                        <div class="state" id="p1_hand_state">battle</div>
+                    </div>
+                    <div class="hand-list" id="p1_hand_list"></div>
+                </div>
+            </details>
+
+            <details class="card" open>
+                <summary class="card-summary">
+                    <span>P2 (Local-left view)</span>
+                </summary>
+
+                <div class="row"><span>Locked?</span><span class="badge" id="p2_lock">NO</span></div>
+                <div class="row"><span>Form</span><span class="badge cyan" id="p2_form">?</span></div>
+                <div class="row"><span>Pos</span><span class="badge cyan" id="p2_pos">?</span></div>
+                <div class="row"><span>Enemy</span><span class="badge red" id="p2_enemy_pos">?</span></div>
+                <div class="row"><span>Pending</span><span class="badge" id="p2_pending">None</span></div>
+                <div class="row"><span>P HP</span><span class="badge cyan" id="p2_hp">1000</span></div>
+                <div class="row"><span>E HP</span><span class="badge red" id="p2_ehp">1000</span></div>
+
+                <div class="row"><span>Hold</span><span class="badge" id="p2_hold">OFF</span></div>
+                <div class="charge-wrap">
+                    <div class="charge-label"><span>Charge</span><span id="p2_prog_txt">0/5</span></div>
+                    <div class="charge-bar" id="p2_charge_bar"></div>
+                </div>
+
+                <div class="btnrow">
+                    <button class="big-btn" id="btn_p2_hold_on">P2 Hold ON</button>
+                    <button class="big-btn" id="btn_p2_hold_off">P2 Hold OFF</button>
+                    <button class="big-btn" id="btn_p2_toggle">P2 Toggle Hold</button>
+                </div>
+                <div class="btnrow">
+                    <button class="big-btn" id="btn_p2_shoot">P2 Shoot</button>
+                    <button class="big-btn" id="btn_p2_release">P2 Release</button>
+                </div>
+
+                <h4 style="margin-top:14px;">P2 Hand</h4>
+                <div class="hand-wrap">
+                    <div class="hand-title">
+                        <div class="label">chips</div>
+                        <div class="state" id="p2_hand_state">battle</div>
+                    </div>
+                    <div class="hand-list" id="p2_hand_list"></div>
+                </div>
+            </details>
+
+            <section class="card">
+                <h4>Events</h4>
+                <div class="events" id="events"></div>
+                <div class="toast" id="toast"></div>
+            </section>
+        </aside>
     </div>
 
-    <div class="boards">
-      <div class="board-col">
-        <div class="board-title">P1 View (local player on left)</div>
-        <div class="grid-wrap">
-          <div class="grid-container" id="grid_p1"></div>
-          <svg class="grid-overlay" id="overlay_p1"></svg>
-        </div>
-      </div>
-
-      <div class="board-col">
-        <div class="board-title">P2 View (local player on left)</div>
-        <div class="grid-wrap">
-          <div class="grid-container" id="grid_p2"></div>
-          <svg class="grid-overlay" id="overlay_p2"></svg>
-        </div>
-      </div>
-    </div>
-
-    <div class="panel treepanel">
-      <h4>State Tree</h4>
-
-      <div class="row">
-        <span>Depth</span>
-        <input id="tree_depth" type="range" min="2" max="10" step="1" value="8" style="width:220px;">
-        <span class="badge" id="tree_depth_val">8</span>
-      </div>
-
-      <div class="btnrow" style="margin-top:8px;">
-        <button class="big-btn" id="btn_tree_collapse_all">Collapse All</button>
-        <button class="big-btn" id="btn_tree_refresh">Refresh</button>
-      </div>
-
-      <div class="tree-wrap" id="tree_view"></div>
-
-      <div class="hint" style="margin-top:10px;">
-        <div>Click a node to load its state. Chevron toggles collapse only.</div>
-        <div style="margin-top:6px;">Tree labels show joint action + MCTS edge stats (N,Q) when available.</div>
-      </div>
-    </div>
-  </div>
-
-  <script src="/static/sim.js"></script>
+    <script src="/static/sim.js"></script>
 </body>
+
 </html>

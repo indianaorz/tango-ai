@@ -9,10 +9,12 @@ from .actions import (
     ACT_HOLD_OFF,
     ACT_HOLD_ON,
     ACT_NOOP,
+    ACT_USE_CHIP,
     ActionId,
     EventSpec,
 )
 from .board import Board
+from .chips import chip_name, chip_spec, chip_timeline, safe_chip_summary
 from .constants import COLS, DIR_DELTAS, N, OWNER_P1, OWNER_P2, ROWS, opposite_dir
 from .coords import idx_to_rc, mirror_dir, rc_to_idx
 from .forms import form_charge_spec, form_name, pattern_target_indices
@@ -112,7 +114,7 @@ class ScheduledEvent:
 @dataclass
 class ShotLineVisual:
     actor: ActorId              # canonical actor
-    kind: str                   # "buster"|"charge"
+    kind: str                   # "buster"|"charge"|"cannon"|"airshot"|...
     from_idx: int               # canonical
     to_idx: int                 # canonical
     expires_cust: int
@@ -124,13 +126,12 @@ class ShotLineVisual:
 @dataclass
 class HotPanelVisual:
     actor: ActorId          # canonical actor who caused it
-    kind: str               # "charge" (future-proof for chips, etc.)
+    kind: str               # "charge"|"buster"|...
     idx: int                # canonical panel index
     expires_cust: int
 
     def alive(self, now: int) -> bool:
         return now < self.expires_cust
-
 
 
 @dataclass
@@ -143,6 +144,9 @@ class ActorState:
     form: int = 0
 
     charge: ChargeState = field(default_factory=ChargeState)
+
+    # Chip hand stack: only top (index 0) is usable.
+    chip_hand: List[int] = field(default_factory=list)
 
     pending_action: Optional[ActionId] = None
     locked_until: int = 0
@@ -170,16 +174,18 @@ class GameState:
     # Canonical indices; serializer mirrors for P2 view.
     hot_panels: List[HotPanelVisual] = field(default_factory=list)
 
-
     last_action_started: Optional[str] = None
     last_events: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.actors:
             # Default match-up: Fire vs Slash
+            # TEST HANDS (fixed, fixed order):
+            #   P1: 1,4,1
+            #   P2: 4,1,4
             self.actors = {
-                "P1": ActorState(hp=1000, idx=rc_to_idx(1, 1), form=1),  # FireCross
-                "P2": ActorState(hp=1000, idx=rc_to_idx(1, 4), form=3),  # SlashCross
+                "P1": ActorState(hp=1000, idx=rc_to_idx(1, 1), form=1, chip_hand=[1, 4, 1]),
+                "P2": ActorState(hp=1000, idx=rc_to_idx(1, 4), form=3, chip_hand=[4, 1, 4]),
             }
         self._validate()
 
@@ -196,12 +202,18 @@ class GameState:
                 raise ValueError(f"{a}.entry_until invalid")
             if not isinstance(st.form, int):
                 raise ValueError(f"{a}.form must be int")
+            if not isinstance(st.chip_hand, list):
+                raise ValueError(f"{a}.chip_hand must be list")
 
     # ----------------------------
     # Rules: transforms
     # ----------------------------
     def _canon_dir_for_actor(self, actor: ActorId, dir_local: str) -> str:
         return dir_local if actor == "P1" else mirror_dir(dir_local)
+
+    def _local_dir_for_actor_from_canon(self, actor: ActorId, canon_dir: str) -> str:
+        # inverse mapping of _canon_dir_for_actor for LEFT/RIGHT; UP/DOWN same
+        return canon_dir if actor == "P1" else mirror_dir(canon_dir)
 
     def _forward_col_step(self, actor: ActorId) -> int:
         # Forward in local view is always "to the right".
@@ -224,7 +236,7 @@ class GameState:
         - While locked: only NOOP + hold toggles (if they would change state).
         - SHOOT is disallowed at full charge (level 2).
         - RELEASE_CHARGE is allowed if full OR if a queued full-release exists.
-        - Moves only if can_move(...).
+        - USE_CHIP is allowed iff top-of-stack exists and actor is not locked.
         """
         st = self.actors[actor]
         out: Set[ActionId] = {ACT_NOOP}
@@ -257,6 +269,10 @@ class GameState:
             out.add("SHOOT")
         else:
             out.add("RELEASE_CHARGE")
+
+        # Chips (top-of-stack only)
+        if len(st.chip_hand) > 0:
+            out.add(ACT_USE_CHIP)
 
         return sorted(out)
 
@@ -298,6 +314,39 @@ class GameState:
         st.entry_dir_local = opposite_dir(dir_local)
         st.entry_until = now + 1
 
+    def _apply_forced_push(self, target: ActorId, canon_dir: str, steps: int, now: int) -> bool:
+        """
+        Forced displacement (used by AirShot). Ignores panel ownership rules.
+        Returns True if moved.
+        """
+        steps = int(steps)
+        if steps == 0:
+            return False
+        if canon_dir not in DIR_DELTAS:
+            return False
+
+        dr, dc = DIR_DELTAS[canon_dir]
+        st = self.actors[target]
+        r, c = idx_to_rc(st.idx)
+
+        nr = r + dr * steps
+        nc = c + dc * steps
+        if nr < 0 or nr >= ROWS or nc < 0 or nc >= COLS:
+            return False
+
+        nidx = rc_to_idx(nr, nc)
+        if nidx == self.actors[other(target)].idx:
+            return False
+
+        # Apply move
+        st.idx = nidx
+
+        # Entry visual in *target-local* dirs
+        local_dir = self._local_dir_for_actor_from_canon(target, canon_dir)
+        st.entry_dir_local = opposite_dir(local_dir)
+        st.entry_until = now + 1
+        return True
+
     # ----------------------------
     # Ray shot (row LOS), forward in LOCAL
     # ----------------------------
@@ -323,10 +372,9 @@ class GameState:
             cc += step
         return out
 
-
-    def _raycast_and_damage(self, actor: ActorId, dmg: int) -> None:
+    def _raycast_and_damage(self, actor: ActorId, dmg: int) -> bool:
         if dmg <= 0:
-            return
+            return False
 
         a_st = self.actors[actor]
         t_st = self.actors[other(actor)]
@@ -334,7 +382,7 @@ class GameState:
         ar, ac = idx_to_rc(a_st.idx)
         tr, tc = idx_to_rc(t_st.idx)
         if ar != tr:
-            return
+            return False
 
         step = self._forward_col_step(actor)
         c = ac + step
@@ -342,21 +390,17 @@ class GameState:
             idx = rc_to_idx(ar, c)
             if idx == t_st.idx:
                 t_st.hp = max(0, t_st.hp - dmg)
-                return
+                return True
             c += step
+        return False
 
     # ----------------------------
     # Charge shot: form-dependent
     # ----------------------------
     def _charge_shot_targets(self, actor: ActorId) -> Tuple[str, List[int]]:
-        """
-        Returns (mode, target_indices_canonical).
-        mode is used for logging/debug.
-        """
         a = self.actors[actor]
         spec = form_charge_spec(a.form)
 
-        # Priority: Pattern > MatchY (we only use these for normal crosses right now)
         if "Pattern" in spec.ranges and spec.pattern is not None:
             targets = pattern_target_indices(
                 actor_idx_canon=a.idx,
@@ -365,20 +409,10 @@ class GameState:
             )
             return ("Pattern", targets)
 
-        # Default: MatchY row ray to the far edge
-        if "MatchY" in spec.ranges or True:
-            # Represent MatchY as a single "edge" point for visuals,
-            # and hit-check via raycast logic.
-            _from, to = self._compute_raycast_line(actor)
-            return ("MatchY", [to])
+        _from, to = self._compute_raycast_line(actor)
+        return ("MatchY", [to])
 
     def _apply_charge_shot(self, actor: ActorId, dmg: int, now: int) -> None:
-        """
-        Applies form-dependent charge shot damage + visuals.
-        Damage model is intentionally simple:
-          - MatchY: existing row raycast
-          - Pattern: if opponent is on any affected tile, they take dmg once
-        """
         if dmg <= 0:
             return
 
@@ -389,7 +423,6 @@ class GameState:
         mode, targets = self._charge_shot_targets(actor)
 
         if mode == "Pattern" and spec.pattern is not None:
-            # Visualize each affected tile as a short line segment from actor -> target tile.
             for idx in targets:
                 self.shot_lines.append(
                     ShotLineVisual(
@@ -400,8 +433,6 @@ class GameState:
                         expires_cust=now + 2,
                     )
                 )
-                # Panel highlight should survive the post-commit view,
-                # so keep it for one additional cust.
                 self.hot_panels.append(
                     HotPanelVisual(
                         actor=actor,
@@ -411,13 +442,10 @@ class GameState:
                     )
                 )
 
-
-            # Damage once if enemy is inside the pattern
             if t.idx in set(targets):
                 t.hp = max(0, t.hp - dmg)
             return
 
-        # MatchY (raycast)
         from_idx, to_idx = self._compute_raycast_line(actor)
         self.shot_lines.append(
             ShotLineVisual(
@@ -429,7 +457,6 @@ class GameState:
             )
         )
 
-        # Highlight every panel in the forward ray (even if the enemy wasn't there).
         for idx in self._ray_forward_indices(actor):
             self.hot_panels.append(
                 HotPanelVisual(
@@ -441,6 +468,99 @@ class GameState:
             )
 
         self._raycast_and_damage(actor, dmg)
+
+    # ----------------------------
+    # Chips
+    # ----------------------------
+    def _start_use_chip(self, actor: ActorId, t: int) -> None:
+        st = self.actors[actor]
+        if st.is_locked(t):
+            self._log(f"{actor}: blocked USE_CHIP (locked {st.locked_until - t} left)")
+            return
+        if st.charge.queued_release:
+            self._log(f"{actor}: blocked USE_CHIP (queued charge release)")
+            return
+        if not st.chip_hand:
+            self._log(f"{actor}: blocked USE_CHIP (empty hand)")
+            return
+
+        cid = int(st.chip_hand[0])
+        spec = chip_spec(cid)
+
+        # Consume immediately: stack behavior (top-of-stack only)
+        st.chip_hand.pop(0)
+
+        st.locked_until = t + int(spec.lock_cust)
+        self.last_action_started = f"{actor}:{ACT_USE_CHIP}:{spec.name}[{cid}]"
+
+        # NEW: chips.py now stores authoring program; use compiled timeline accessor.
+        for offset, ev in chip_timeline(cid):
+            self.scheduled.append(
+                ScheduledEvent(
+                    due_cust=t + int(offset),
+                    actor=actor,
+                    spec=ev,
+                    source_action=ACT_USE_CHIP,
+                )
+            )
+
+        self._apply_due_events(t)
+
+        self._log(
+            f"{actor}: start USE_CHIP {spec.name}[{cid}] (lock {spec.lock_cust}) "
+            f"hand_now={safe_chip_summary(st.chip_hand)}"
+        )
+
+    def _apply_chip_raycast(
+        self,
+        actor: ActorId,
+        *,
+        dmg: int,
+        kind: str,
+        push_step: int,
+        hitstun_cust: int,
+        now: int,
+    ) -> None:
+        dmg = int(dmg)
+        push_step = int(push_step)
+        hitstun_cust = int(hitstun_cust)
+
+        from_idx, to_idx = self._compute_raycast_line(actor)
+        self.shot_lines.append(
+            ShotLineVisual(
+                actor=actor,
+                kind=str(kind),
+                from_idx=from_idx,
+                to_idx=to_idx,
+                expires_cust=now + 2,
+            )
+        )
+
+        for idx in self._ray_forward_indices(actor):
+            self.hot_panels.append(
+                HotPanelVisual(
+                    actor=actor,
+                    kind="buster",
+                    idx=idx,
+                    expires_cust=now + 2,
+                )
+            )
+
+        hit = self._raycast_and_damage(actor, dmg)
+        if not hit:
+            return
+
+        tgt = other(actor)
+        tgt_st = self.actors[tgt]
+
+        if hitstun_cust > 0:
+            tgt_st.locked_until = max(int(tgt_st.locked_until), int(now) + hitstun_cust)
+
+        if push_step != 0:
+            canon_dir = "RIGHT" if actor == "P1" else "LEFT"
+            moved = self._apply_forced_push(tgt, canon_dir, push_step, now)
+            if moved:
+                self._log(f"{actor}: {kind} push -> {tgt} moved {canon_dir} by {push_step}")
 
     # ----------------------------
     # Cursor edits (server-authoritative)
@@ -461,16 +581,6 @@ class GameState:
     # Deterministic step
     # ----------------------------
     def advance_cust(self) -> None:
-        """
-        Step semantics:
-        0) If an actor has a queued full-charge release and is able to act,
-            it starts RELEASE_CHARGE immediately (takes precedence).
-        1) For each actor, if pending action exists, try start at t (independent locks)
-        2) time t->t+1
-        3) apply events due at t+1
-        4) for each actor UNLOCKED at t+1, process charge ticks; if LOCKED, no tick
-        5) clear lean each cust
-        """
         t = self.cust
 
         # 0) queued release fires ASAP when actor is able to act
@@ -478,9 +588,9 @@ class GameState:
             st = self.actors[actor]
             if st.charge.queued_release and (not st.is_locked(t)):
                 self._try_start_action(actor, "RELEASE_CHARGE", t)
-                st.pending_action = None  # cannot do anything else this cust
+                st.pending_action = None
 
-        # 1) start pending for both actors at t (if not consumed above)
+        # 1) start pending for both actors at t
         for actor in ("P1", "P2"):
             st = self.actors[actor]
             if st.pending_action is not None:
@@ -504,10 +614,8 @@ class GameState:
         for actor in ("P1", "P2"):
             self.actors[actor].lean_dir_local = None
 
-        # expire old shot lines / hot panels
         self.shot_lines = [sl for sl in self.shot_lines if sl.alive(self.cust)]
         self.hot_panels = [hp for hp in self.hot_panels if hp.alive(self.cust)]
-
 
         self._validate()
 
@@ -516,6 +624,10 @@ class GameState:
 
         if st.is_locked(t):
             self._log(f"{actor}: blocked (locked {st.locked_until - t} left)")
+            return
+
+        if action_id == ACT_USE_CHIP:
+            self._start_use_chip(actor, t)
             return
 
         if action_id not in ACTIONS:
@@ -553,7 +665,6 @@ class GameState:
 
         self._apply_due_events(t)
 
-        # form logging helps a lot when debugging pattern games
         self._log(f"{actor}: start {action_id} (lock {spec.lock_cust}) form={form_name(st.form)}[{st.form}]")
 
     def _apply_due_events(self, now: int) -> None:
@@ -604,7 +715,6 @@ class GameState:
             if kind == "charge":
                 self._apply_charge_shot(actor, dmg, now)
             else:
-                # buster stays a raycast
                 from_idx, to_idx = self._compute_raycast_line(actor)
                 self.shot_lines.append(
                     ShotLineVisual(
@@ -621,6 +731,27 @@ class GameState:
                 st.charge.reset()
 
             self._log(f"{actor}: event RAY_SHOT {kind} dmg={dmg} form={form_name(st.form)}[{st.form}]")
+            return
+
+        if et == "CHIP_RAY":
+            dmg = int(ev.payload.get("dmg", 0))
+            kind = str(ev.payload.get("kind", "chip"))
+            push_step = int(ev.payload.get("push_step", 0))
+            hitstun_cust = int(ev.payload.get("hitstun_cust", 0))
+            chip_id = int(ev.payload.get("chip_id", -1))
+
+            self._apply_chip_raycast(
+                actor,
+                dmg=dmg,
+                kind=kind,
+                push_step=push_step,
+                hitstun_cust=hitstun_cust,
+                now=now,
+            )
+            self._log(
+                f"{actor}: event CHIP_RAY {chip_name(chip_id)}[{chip_id}] kind={kind} "
+                f"dmg={dmg} push={push_step} hitstun={hitstun_cust}"
+            )
             return
 
         self._log(f"{actor}: event unknown {et}")

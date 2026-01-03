@@ -6,8 +6,10 @@ from typing import Any, Dict, List, Tuple
 
 # Damage constants (phase 0)
 DMG_BUSTER = 5
-DMG_CHARGE = 50
+DMG_CHARGE = 100
 
+# Chips are defined in simcore/chips.py; USE_CHIP is the control action.
+ACT_USE_CHIP = "USE_CHIP"
 
 ActionId = str
 
@@ -84,4 +86,8 @@ ACTIONS: Dict[ActionId, ActionSpec] = {
             )
         ],
     ),
+    # Chip usage is dynamic (depends on top-of-stack chip).
+    # We keep this in ACTIONS so UI/MCTS/Tree can refer to it as a normal action.
+    # GameState._try_start_action special-cases USE_CHIP to schedule real events.
+    ACT_USE_CHIP: ActionSpec(lock_cust=0, timeline=[]),
 }
