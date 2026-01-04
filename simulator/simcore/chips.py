@@ -194,6 +194,46 @@ _REGISTRY.register(
     )
 )
 
+# Barrier family (BN6)
+# IMPORTANT: Barrier should apply on the same cust it is used.
+# We implement that by emitting at offset 0.
+# Barrier absorbs hits; no overflow to HP (implemented in GameState damage logic).
+_REGISTRY.register(
+    ChipSpec(
+        chip_id=178,
+        chip_key="barrier",
+        name="Barrier",
+        lock_cust=1,
+        program=(
+            Emit(ev("BARRIER", chip_id=178, hp=10)),
+        ),
+    )
+)
+
+_REGISTRY.register(
+    ChipSpec(
+        chip_id=179,
+        chip_key="barrier100",
+        name="Barrier100",
+        lock_cust=1,
+        program=(
+            Emit(ev("BARRIER", chip_id=179, hp=100)),
+        ),
+    )
+)
+
+_REGISTRY.register(
+    ChipSpec(
+        chip_id=180,
+        chip_key="barrier200",
+        name="Barrier200",
+        lock_cust=1,
+        program=(
+            Emit(ev("BARRIER", chip_id=180, hp=200)),
+        ),
+    )
+)
+
 # Back-compat: old name
 CHIPS: Dict[ChipId, ChipSpec] = dict(_REGISTRY.all_specs())
 

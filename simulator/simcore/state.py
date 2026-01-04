@@ -185,6 +185,11 @@ class ActorState:
     idx: int  # canonical
     form: int = 0
 
+    # Barrier HP: absorbs hits; no overflow damage to HP.
+    barrier_hp: int = 0
+    # Remembers last-applied barrier strength so UI can compute ratio.
+    barrier_max_hp: int = 0
+
     charge: ChargeState = field(default_factory=ChargeState)
 
     chip_hand: List[int] = field(default_factory=list)
@@ -225,11 +230,9 @@ class GameState:
     def __post_init__(self) -> None:
         if not self.actors:
             # Default match-up: Fire vs Slash
-            # P1: 1,4,1
-            # P2: 163,1,163,4,4  (per your request)
             self.actors = {
-                "P1": ActorState(hp=1000, idx=rc_to_idx(1, 1), form=1, chip_hand=[1, 4, 163, 163]),
-                "P2": ActorState(hp=1000, idx=rc_to_idx(1, 4), form=3, chip_hand=[163, 1, 163, 4, 4]),
+                "P1": ActorState(hp=1000, idx=rc_to_idx(1, 1), form=3, chip_hand=[180, 163, 163, 4]),
+                "P2": ActorState(hp=1000, idx=rc_to_idx(1, 4), form=1, chip_hand=[1, 4]),
             }
         self._validate()
 
@@ -240,6 +243,13 @@ class GameState:
                 raise ValueError(f"{a}.idx out of bounds")
             if st.hp < 0:
                 raise ValueError(f"{a}.hp < 0")
+            if st.barrier_hp < 0:
+                raise ValueError(f"{a}.barrier_hp < 0")
+            if st.barrier_max_hp < 0:
+                raise ValueError(f"{a}.barrier_max_hp < 0")
+            if st.barrier_hp > st.barrier_max_hp and st.barrier_max_hp != 0:
+                # This invariant is optional, but it helps catch bugs.
+                raise ValueError(f"{a}.barrier_hp > barrier_max_hp")
             if st.locked_until < 0:
                 raise ValueError(f"{a}.locked_until invalid")
             if st.entry_until < 0:
@@ -276,6 +286,43 @@ class GameState:
 
     def _owner_required(self, actor: ActorId) -> int:
         return OWNER_P1 if actor == "P1" else OWNER_P2
+
+    # ----------------------------
+    # Damage / Barrier
+    # ----------------------------
+    def _deal_damage(self, target: ActorId, dmg: int) -> int:
+        """
+        Apply damage with Barrier semantics:
+
+        - If target has barrier_hp > 0:
+            - barrier absorbs the hit
+            - barrier_hp decreases by dmg; if dmg >= barrier_hp => barrier breaks to 0
+            - target HP takes NO overflow (even if dmg > barrier_hp)
+        - Otherwise: subtract from HP normally.
+
+        Returns actual HP damage dealt (0 if barrier absorbed).
+        """
+        dmg = int(dmg)
+        if dmg <= 0:
+            return 0
+
+        t = self.actors[target]
+        if int(t.barrier_hp) > 0:
+            before = int(t.barrier_hp)
+            if dmg >= before:
+                t.barrier_hp = 0
+                t.barrier_max_hp = 0  # NEW: barrier fully gone
+                self._log(f"{target}: barrier broke ({before}hp) absorbing hit dmg={dmg}")
+            else:
+                t.barrier_hp = before - dmg
+                # barrier_max_hp unchanged
+                self._log(f"{target}: barrier absorbed dmg={dmg} (now {t.barrier_hp}hp)")
+            return 0
+
+
+        before_hp = int(t.hp)
+        t.hp = max(0, before_hp - dmg)
+        return before_hp - int(t.hp)
 
     # ----------------------------
     # Action legality (single-actor, for UI + MCTS)
@@ -417,7 +464,7 @@ class GameState:
         while 0 <= c < COLS:
             idx = rc_to_idx(ar, c)
             if idx == t_st.idx:
-                t_st.hp = max(0, t_st.hp - dmg)
+                self._deal_damage(other(actor), dmg)
                 return True
             c += step
         return False
@@ -471,7 +518,7 @@ class GameState:
                 )
 
             if t.idx in set(targets):
-                t.hp = max(0, t.hp - dmg)
+                self._deal_damage(other(actor), dmg)
             return
 
         from_idx, to_idx = self._compute_raycast_line(actor)
@@ -500,7 +547,7 @@ class GameState:
     # ----------------------------
     # Chips
     # ----------------------------
-    def _start_use_chip(self, actor: ActorId, t: int) -> None:
+    def _start_use_chip(self, actor: ActorId, t: int, *, apply_immediate: bool = True) -> None:
         st = self.actors[actor]
         if st.is_locked(t):
             self._log(f"{actor}: blocked USE_CHIP (locked {st.locked_until - t} left)")
@@ -530,7 +577,8 @@ class GameState:
                 )
             )
 
-        self._apply_due_events(t)
+        if apply_immediate:
+            self._apply_due_events(t)
 
         self._log(
             f"{actor}: start USE_CHIP {spec.name}[{cid}] (lock {spec.lock_cust}) "
@@ -592,12 +640,6 @@ class GameState:
     # AreaGrab mechanics
     # ----------------------------
     def _movement_buffer_block_indices(self, actor: ActorId, now: int) -> Set[int]:
-        """
-        Indices considered "occupied" for purposes like AreaGrab blocking.
-
-        If actor is buffering a vertical move resolving at `now`, they effectively occupy
-        both source and destination panels (=> blocks 2 panels).
-        """
         st = self.actors[actor]
         out: Set[int] = {int(st.idx)}
 
@@ -612,38 +654,25 @@ class GameState:
         return out
 
     def _is_column_fully_owned(self, actor: ActorId, col: int) -> bool:
-        """
-        A column is 'fully owned' if every stealable panel in that column is owned by actor.
-        Permanent holes are not stealable and do not count against fullness.
-        """
         my_owner = self._owner_required(actor)
 
         for r in range(ROWS):
             idx = rc_to_idx(r, col)
-
-            # Permanent holes are never stealable/ownable; ignore them for fullness.
             if int(self.board.tiles[idx]) == TILE_HOLE_PERM:
                 continue
-
             if int(self.board.owners[idx]) != int(my_owner):
                 return False
-
         return True
 
     def _next_areagrab_target_col(self, actor: ActorId) -> Optional[int]:
-        """
-        AreaGrab/PanelGrab targets the first column (from your side toward the opponent)
-        that is NOT fully owned by you (ignoring permanent holes).
-        """
         if actor == "P1":
-            scan = range(0, COLS)           # left -> right
+            scan = range(0, COLS)
         else:
-            scan = range(COLS - 1, -1, -1)  # right -> left
+            scan = range(COLS - 1, -1, -1)
 
         for c in scan:
             if not self._is_column_fully_owned(actor, c):
                 return c
-
         return None
 
     def _col_has_any_stolen(self, col: int) -> bool:
@@ -656,16 +685,6 @@ class GameState:
         return False
 
     def _reconcile_area_cols(self, cols: Iterable[int], now: int, *, allow_start: bool = True) -> bool:
-        """
-        Keep `area_cols` consistent with current board ownership.
-
-        - If a column is fully base-owned => remove timer.
-        - If a column has any stolen panel (non-base) =>
-            ensure timer exists with stolen_owner = other(base_owner),
-            but DO NOT reset started/expires unless this is a brand new stolen column.
-        - Timer starts only when column transitions from fully base-owned -> stolen.
-          (We approximate transition by: 'no timer existed' AND 'col is stolen now'.)
-        """
         changed = False
         for col in cols:
             col = int(col)
@@ -678,9 +697,7 @@ class GameState:
                     changed = True
                 continue
 
-            # Not fully base-owned. If any stolen panel exists, this column is "stolen".
             if not self._col_has_any_stolen(col):
-                # Defensive: should be unreachable if not fully base-owned, but keep safe.
                 if col in self.area_cols:
                     self.area_cols.pop(col, None)
                     changed = True
@@ -700,8 +717,6 @@ class GameState:
                     changed = True
             else:
                 if int(rec.stolen_owner) != int(stolen_owner):
-                    # This shouldn't happen in current sim, but keep invariant sane
-                    # without resetting the timer window.
                     self.area_cols[col] = AreaColTimer(
                         col=col,
                         stolen_owner=int(stolen_owner),
@@ -719,21 +734,12 @@ class GameState:
         return max(cols) if int(owner) == OWNER_P1 else min(cols)
 
     def _process_areagrab_expiry(self, now: int) -> None:
-        """
-        Revert expired columns, but only when they are the outermost stolen column for that owner.
-
-        Also supports same-cust cascade:
-          - If +2 is removed (expired or stolen back), and +1 already expired,
-            +1 reverts immediately in the same cust.
-        """
-        # First, ensure timers match the board (important after steal-backs).
         self._reconcile_area_cols(range(COLS), now, allow_start=True)
 
         blockers: Set[int] = set()
         blockers |= self._movement_buffer_block_indices("P1", now)
         blockers |= self._movement_buffer_block_indices("P2", now)
 
-        # Loop until no further changes can occur this cust.
         while True:
             any_change = False
 
@@ -756,7 +762,6 @@ class GameState:
                     for idx in _col_indices(outer):
                         if int(self.board.tiles[idx]) == TILE_HOLE_PERM:
                             continue
-                        # Only revert panels that are currently held by the stolen_owner.
                         if int(self.board.owners[idx]) != int(owner):
                             continue
                         if int(idx) in blockers:
@@ -764,19 +769,12 @@ class GameState:
                         self.board.owners[idx] = int(base_owner)
                         changed_this_col = True
 
-                    # Reconcile timer removal if column fully returned.
                     rec_change = self._reconcile_area_cols([outer], now, allow_start=False)
                     if changed_this_col or rec_change:
                         any_change = True
 
-                    # If we could not change anything (fully blocked), stop trying this owner this cust.
-                    # Future custs may unblock it.
                     if not (changed_this_col or rec_change):
                         break
-
-                    # Otherwise, keep looping for this owner because:
-                    # - same col might still have more to revert next iteration (rare)
-                    # - or outermost might have changed (col removed), revealing an already-expired inner col
 
             if not any_change:
                 break
@@ -792,11 +790,6 @@ class GameState:
             return
 
         base_owner = _base_owner_for_col(tgt_col)
-
-        # IMPORTANT:
-        # Base ownership does NOT block stealing.
-        # If this column is base-owned by you but currently held by the opponent,
-        # AreaGrab should steal it back (restoring toward default).
         was_fully_base = _col_is_fully_owner(self.board.owners, self.board.tiles, tgt_col, base_owner)
 
         blocked = self._movement_buffer_block_indices(enemy, now)
@@ -809,8 +802,7 @@ class GameState:
                 continue
 
             if int(idx) in blocked:
-                # Cannot steal; deal 10 dmg + flinch 1 cust
-                e.hp = max(0, int(e.hp) - AREAGRAB_BLOCK_DMG)
+                self._deal_damage(enemy, AREAGRAB_BLOCK_DMG)
                 e.locked_until = max(int(e.locked_until), int(now) + AREAGRAB_BLOCK_HITSTUN)
                 blocked_panels += 1
 
@@ -834,24 +826,15 @@ class GameState:
                 f"-> {enemy} took {blocked_panels * AREAGRAB_BLOCK_DMG}"
             )
 
-        # Reconcile timers based on actual board state.
-        # Start timer only if this column was fully base-owned and is now stolen.
-        # (If it was already stolen/partial, do NOT reset.)
         self._reconcile_area_cols(range(COLS), now, allow_start=True)
 
-        # If we just created a brand new stolen column, enforce the transition rule explicitly.
-        # (This keeps behavior stable even if some future effect mutated owners without a timer.)
         if changed and was_fully_base and self._col_has_any_stolen(tgt_col):
-            # It might already exist due to reconcile; just ensure it exists.
             self._reconcile_area_cols([tgt_col], now, allow_start=True)
 
         if changed:
             self._log(f"{actor}: AREA_GRAB applied to col={tgt_col} (base_owner={base_owner})")
         else:
             self._log(f"{actor}: AREA_GRAB col={tgt_col} stole 0 panels")
-
-        # Note: expiry processing happens after events in advance_cust(),
-        # and it will cascade inner expiries immediately if outer was removed.
 
     # ----------------------------
     # Cursor edits (server-authoritative)
@@ -874,24 +857,32 @@ class GameState:
     def advance_cust(self) -> None:
         t = self.cust
 
-        # 0) queued release fires ASAP when actor is able to act
+        # A) Resolve any events already due at the start of this cust
+        # (e.g., movement from prior actions, delayed chip effects, etc.)
+        self._apply_due_events(t)
+
+        # B) Schedule actions for both actors at t, but DO NOT apply immediate events yet.
+        # This ensures same-cust interactions are resolved by a single priority-ordered pass,
+        # rather than depending on which actor we start first.
         for actor in ("P1", "P2"):
             st = self.actors[actor]
             if st.charge.queued_release and (not st.is_locked(t)):
-                self._try_start_action(actor, "RELEASE_CHARGE", t)
+                self._try_start_action(actor, "RELEASE_CHARGE", t, apply_immediate=False)
                 st.pending_action = None
 
-        # 1) start pending for both actors at t
         for actor in ("P1", "P2"):
             st = self.actors[actor]
             if st.pending_action is not None:
-                self._try_start_action(actor, st.pending_action, t)
+                self._try_start_action(actor, st.pending_action, t, apply_immediate=False)
             st.pending_action = None
 
-        # 2) advance time
+        # C) Now apply all events due at t from both actors using deterministic priorities.
+        self._apply_due_events(t)
+
+        # D) Advance time
         self.cust = t + 1
 
-        # 3) apply due events
+        # E) Apply events due at the new cust
         self._apply_due_events(self.cust)
 
         # 3.5) area expiry processing (after events)
@@ -913,7 +904,7 @@ class GameState:
 
         self._validate()
 
-    def _try_start_action(self, actor: ActorId, action_id: ActionId, t: int) -> None:
+    def _try_start_action(self, actor: ActorId, action_id: ActionId, t: int, *, apply_immediate: bool = True) -> None:
         st = self.actors[actor]
 
         if st.is_locked(t):
@@ -921,7 +912,7 @@ class GameState:
             return
 
         if action_id == ACT_USE_CHIP:
-            self._start_use_chip(actor, t)
+            self._start_use_chip(actor, t, apply_immediate=apply_immediate)
             return
 
         if action_id not in ACTIONS:
@@ -961,7 +952,8 @@ class GameState:
                 )
             )
 
-        self._apply_due_events(t)
+        if apply_immediate:
+            self._apply_due_events(t)
 
         self._log(f"{actor}: start {action_id} (lock {spec.lock_cust}) form={form_name(st.form)}[{st.form}]")
 
@@ -977,10 +969,12 @@ class GameState:
         self.scheduled = future
 
         # Deterministic, rule-friendly ordering:
-        # movement resolves before AreaGrab this cust
+        # movement resolves before Barrier/AreaGrab this cust
         def _prio(e: ScheduledEvent) -> int:
             if e.spec.type == "MOVE_APPLY":
                 return 10
+            if e.spec.type == "BARRIER":
+                return 15
             if e.spec.type == "AREA_GRAB":
                 return 20
             return 50
@@ -1066,6 +1060,16 @@ class GameState:
         if et == "AREA_GRAB":
             self._apply_areagrab(actor, now)
             return
+
+        if et == "BARRIER":
+            hp = int(ev.payload.get("hp", 0))
+            chip_id = int(ev.payload.get("chip_id", -1))
+            hp = max(0, hp)
+            st.barrier_hp = hp
+            st.barrier_max_hp = hp  # NEW
+            self._log(f"{actor}: event BARRIER {chip_name(chip_id)}[{chip_id}] hp={hp}")
+            return
+
 
         self._log(f"{actor}: event unknown {et}")
 

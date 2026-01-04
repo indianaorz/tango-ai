@@ -9,8 +9,6 @@ from .coords import idx_to_rc, mirror_idx
 from .forms import form_name
 from .state import ActorId, GameState, other
 
-
-
 ViewActorLabel = Literal["P", "E"]
 
 
@@ -84,6 +82,12 @@ def view_state(st: GameState, viewer: ActorId) -> Dict[str, Any]:
 
         "p_hp": p.hp,
         "e_hp": e.hp,
+        "p_barrier_hp": int(getattr(p, "barrier_hp", 0)),
+        "e_barrier_hp": int(getattr(e, "barrier_hp", 0)),
+        
+        "p_barrier_max_hp": int(getattr(p, "barrier_max_hp", 0)), 
+        "e_barrier_max_hp": int(getattr(e, "barrier_max_hp", 0)),  
+
         "p_idx": p_idx_v,
         "e_idx": e_idx_v,
         "p_rc": [pr, pc],
@@ -96,14 +100,11 @@ def view_state(st: GameState, viewer: ActorId) -> Dict[str, Any]:
         "e_form_name": form_name(e.form),
 
         # Chips (stack top at index 0)
-        # Raw ids (kept for debugging / MCTS stable keys)
         "p_chip_hand": [int(x) for x in p.chip_hand],
         "e_chip_hand": [int(x) for x in e.chip_hand],
 
-        # UI-friendly: [{id, name}, ...]
         "p_hand": [{"id": int(x), "name": chip_name(int(x))} for x in p.chip_hand],
         "e_hand": [{"id": int(x), "name": chip_name(int(x))} for x in e.chip_hand],
-
 
         "pending_action": p.pending_action,
         "is_locked": is_locked,

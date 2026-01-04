@@ -132,8 +132,6 @@ function renderActionButtons(prefix, view) {
   setBtnEnabled(`btn_${prefix}_hold_on`, valid.has("HOLD_ON"));
   setBtnEnabled(`btn_${prefix}_hold_off`, valid.has("HOLD_OFF"));
 
-  // TOGGLE_HOLD is always allowed even if HOLD_ON/HOLD_OFF are the only legal moves;
-  // but if your server encodes this differently, keep this permissive logic.
   setBtnEnabled(
     `btn_${prefix}_toggle`,
     valid.has("TOGGLE_HOLD") || valid.has("HOLD_ON") || valid.has("HOLD_OFF") || valid.has("NOOP")
@@ -142,6 +140,63 @@ function renderActionButtons(prefix, view) {
   setBtnEnabled(`btn_${prefix}_shoot`, valid.has("SHOOT"));
   setBtnEnabled(`btn_${prefix}_release`, valid.has("RELEASE_CHARGE"));
 }
+
+// -------------------------------
+// Barrier visuals (lerped; works for any remaining HP)
+// -------------------------------
+const _barrierMem = new Map(); // key -> { max: number }
+
+function _canonicalBarrierMaxFromHp(hp) {
+  // MMBN-style tiers; keep sane behavior if hp exceeds 200.
+  if (hp <= 0) return 0;
+  if (hp <= 10) return 10;
+  if (hp <= 100) return 100;
+  if (hp <= 200) return 200;
+  return hp;
+}
+
+function _barrierHueForMax(maxHp) {
+  if (maxHp === 10) return 210;   // blue
+  if (maxHp === 100) return 55;   // yellow
+  if (maxHp === 200) return 315;  // pink
+  return 120; // fallback (green-ish) if unknown
+}
+
+function applyBarrierVisual(entEl, barrierHp, memKey) {
+  const hp = Number(barrierHp ?? 0) | 0;
+
+  if (hp <= 0) {
+    entEl.classList.remove("aura-barrier");
+    entEl.style.removeProperty("--barrier-h");
+    entEl.style.removeProperty("--barrier-a");
+    _barrierMem.delete(memKey);
+    return;
+  }
+
+  const prev = _barrierMem.get(memKey);
+  let maxHp = prev?.max ?? 0;
+
+  // If we don't know, or hp increased beyond the remembered max, treat as new barrier.
+  // (This covers new barriers being applied mid-fight.)
+  const canon = _canonicalBarrierMaxFromHp(hp);
+  if (maxHp <= 0 || hp > maxHp) maxHp = canon;
+
+  // Also, if we had a smaller remembered tier but hp clearly indicates a larger tier, upgrade it.
+  if (canon > maxHp) maxHp = canon;
+
+  _barrierMem.set(memKey, { max: maxHp });
+
+  const hue = _barrierHueForMax(maxHp);
+
+  // Lerp alpha based on remaining HP fraction.
+  const frac = Math.max(0, Math.min(1, hp / Math.max(1, maxHp)));
+  const alpha = 0.25 + 0.55 * Math.sqrt(frac); // 0.25 .. ~0.80 (nice “strong then fade”)
+
+  entEl.classList.add("aura-barrier");
+  entEl.style.setProperty("--barrier-h", String(hue));
+  entEl.style.setProperty("--barrier-a", alpha.toFixed(3));
+}
+
 
 // -------------------------------
 // HUD render
@@ -193,6 +248,13 @@ function renderSideHUD(prefix, v) {
 
   const holdEl = $(`${prefix}_hold`);
   if (holdEl) holdEl.textContent = v.p_charge_hold ? "ON" : "OFF";
+
+  // EXACT serializer fields:
+  const barEl = $(`${prefix}_barrier`);
+  if (barEl) barEl.textContent = String(v.p_barrier_hp ?? 0);
+
+  const ebarEl = $(`${prefix}_ebarrier`);
+  if (ebarEl) ebarEl.textContent = String(v.e_barrier_hp ?? 0);
 
   const fullAt = v.charge_full_at ?? 5;
   const progTxt = $(`${prefix}_prog_txt`);
@@ -307,9 +369,14 @@ function renderGrid(view, gridId, overlayId) {
   if (pCell) {
     const ent = document.createElement("div");
     ent.className = "entity ent-p";
+
     const lvl = view.p_charge_level ?? 0;
     if (lvl === 1) ent.classList.add("aura-chg1");
     if (lvl === 2) ent.classList.add("aura-chg2");
+
+    applyBarrierVisual(ent, view.p_barrier_hp ?? 0, `${gridId}:p`);
+
+
     applyEntityTransform(ent, view.p_lean_dir, view.p_entry_dir, !!view.p_is_entering);
     pCell.appendChild(ent);
   }
@@ -317,9 +384,14 @@ function renderGrid(view, gridId, overlayId) {
   if (eCell) {
     const ent = document.createElement("div");
     ent.className = "entity ent-e";
+
     const lvl = view.e_charge_level ?? 0;
     if (lvl === 1) ent.classList.add("aura-chg1");
     if (lvl === 2) ent.classList.add("aura-chg2");
+
+    applyBarrierVisual(ent, view.e_barrier_hp ?? 0, `${gridId}:e`);
+
+
     applyEntityTransform(ent, view.e_lean_dir, view.e_entry_dir, !!view.e_is_entering);
     eCell.appendChild(ent);
   }
@@ -383,21 +455,21 @@ function chipRowLabel(ch) {
 
   const name =
     (ch.name != null ? String(ch.name) :
-    ch.chip_name != null ? String(ch.chip_name) :
-    ch.title != null ? String(ch.title) : "?");
+      ch.chip_name != null ? String(ch.chip_name) :
+        ch.title != null ? String(ch.title) : "?");
 
   const code =
     (ch.code != null ? String(ch.code) :
-    ch.letter != null ? String(ch.letter) :
-    ch.chip_code != null ? String(ch.chip_code) : "");
+      ch.letter != null ? String(ch.letter) :
+        ch.chip_code != null ? String(ch.chip_code) : "");
 
   const dmg =
     (ch.dmg != null ? `dmg ${String(ch.dmg)}` :
-    ch.damage != null ? `dmg ${String(ch.damage)}` : "");
+      ch.damage != null ? `dmg ${String(ch.damage)}` : "");
 
   const extra =
     (ch.desc != null ? String(ch.desc) :
-    ch.description != null ? String(ch.description) : "");
+      ch.description != null ? String(ch.description) : "");
 
   const bits = [];
   if (code) bits.push(code);
@@ -515,7 +587,7 @@ function renderHand(prefix, view) {
 }
 
 // -------------------------------
-// Tree (from your working version)
+// Tree (unchanged)
 // -------------------------------
 function getChildren(nid) {
   if (!tree || !tree.edges) return [];
@@ -714,7 +786,6 @@ async function onKeyDown(ev) {
       return;
     }
 
-    // For non-toggle actions, enforce legality
     if (actor && action && action !== "TOGGLE_HOLD") {
       if (!isActionValidForActor(actor, action)) {
         toast(`Invalid now: ${actor} ${action}`);
@@ -835,7 +906,7 @@ function hookButtons() {
   // Plan
   hook("btn_plan_run", async () => {
     const iters = parseInt($("plan_iters")?.value || "800", 10);
-    const look = parseInt($("plan_look")?.value || "16", 10); // IMPORTANT: plan_look (not plan_depth)
+    const look = parseInt($("plan_look")?.value || "16", 10);
     stopAutoReplay();
     state = await apiPlanRun(iters, look);
     toast(`Planned to 64 (iters/step ${iters}, lookahead ${look})`);
@@ -922,7 +993,6 @@ async function init() {
   window.addEventListener("keydown", onKeyDown, { passive: false });
   window.addEventListener("resize", () => renderBoards());
 
-  // One more pass after layout settles
   setTimeout(() => renderBoards(), 50);
 }
 

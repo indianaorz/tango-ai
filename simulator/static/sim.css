@@ -532,3 +532,80 @@ button.chip-btn:disabled {
   /* tree scroll height can relax on mobile */
   .tree-wrap { max-height: 420px; }
 }
+
+
+/* -------------------------------
+   Barrier ring (bigger than charge aura)
+--------------------------------- */
+.entity.barrier-10::before,
+.entity.barrier-100::before,
+.entity.barrier-200::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 44px;   /* bigger than charge aura (30px) */
+  height: 44px;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+/* Barrier 10: blue ring */
+.entity.barrier-10::before {
+  border: 2px solid rgba(80, 160, 255, 0.95);
+  box-shadow: 0 0 14px rgba(80, 160, 255, 0.65);
+}
+
+/* Barrier 100: yellow ring */
+.entity.barrier-100::before {
+  border: 2px solid rgba(255, 235, 80, 0.95);
+  box-shadow: 0 0 14px rgba(255, 235, 80, 0.60);
+}
+
+/* Barrier 200: pink ring */
+.entity.barrier-200::before {
+  border: 2px solid rgba(255, 80, 220, 0.95);
+  box-shadow: 0 0 16px rgba(255, 80, 220, 0.65);
+}
+
+/* -------------------------------
+   Barrier ring (lerped via CSS vars)
+--------------------------------- */
+
+/* Register CSS custom properties so they animate (Chrome supports this). */
+@property --barrier-h {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 120;
+}
+@property --barrier-a {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+
+.entity.aura-barrier::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 44px;   /* match your “bigger than charge aura” intent */
+  height: 44px;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+
+  /* Animate hue + alpha changes smoothly */
+  transition:
+    border-color 120ms linear,
+    box-shadow 120ms linear,
+    --barrier-h 120ms linear,
+    --barrier-a 120ms linear;
+
+  /* modern CSS color syntax; supported in current Chrome */
+  border: 2px solid hsl(var(--barrier-h) 90% 60% / var(--barrier-a));
+  box-shadow:
+    0 0 14px hsl(var(--barrier-h) 90% 60% / calc(var(--barrier-a) * 0.85)),
+    inset 0 0 8px hsl(var(--barrier-h) 90% 60% / calc(var(--barrier-a) * 0.55));
+}

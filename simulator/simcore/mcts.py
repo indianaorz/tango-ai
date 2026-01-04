@@ -131,67 +131,144 @@ def is_terminal(st: GameState) -> bool:
 # -----------------------------------------------------------------------------
 # Stable key + hash (used for jitter and TreeStore transpositions)
 # -----------------------------------------------------------------------------
-def stable_state_key(st: GameState) -> Tuple[Any, ...]:
+import hashlib
+from typing import Any, Iterable, Tuple
+
+def _hash_tuple(items: Iterable[Any]) -> str:
     """
-    A deterministic, hashable summary of state used for:
-      - transposition caching
-      - stable tie-breaks
-      - stable hashing
-
-    Must stay in sync with gameplay-relevant state.
+    Deterministic, collision-resistant digest for potentially long state features.
+    Returns short hex so the state key stays compact.
     """
-    k: List[Any] = []
-    k.append(int(st.cust))
+    h = hashlib.blake2b(digest_size=16)
+    for it in items:
+        h.update(repr(it).encode("utf-8", errors="strict"))
+        h.update(b"\x1f")  # separator
+    return h.hexdigest()
 
-    # IMPORTANT: board ownership/tiles are gameplay-relevant (AreaGrab etc.)
-    k.append(("owners", tuple(int(x) for x in st.board.owners)))
-    k.append(("tiles", tuple(int(x) for x in st.board.tiles)))
-
-    # AreaGrab timers are gameplay-relevant (expiry behavior)
-    if getattr(st, "area_cols", None):
-        # deterministic ordering by col
-        cols = sorted(st.area_cols.items(), key=lambda kv: int(kv[0]))
-        k.append(("area_cols_len", len(cols)))
-        for col, rec in cols:
-            k.extend(
-                [
-                    int(col),
-                    int(rec.stolen_owner),
-                    int(rec.started_cust),
-                    int(rec.expires_cust),
-                ]
-            )
+def _stable_event_sig(ev: Any) -> tuple:
+    """
+    Produce a stable signature for a scheduled event.
+    Adapt field access here if your ScheduledEvent type differs.
+    """
+    # Common patterns:
+    # ev.due_cust, ev.actor, ev.kind/type, ev.src_action, ev.payload
+    # Keep it strictly deterministic and JSON-ish.
+    payload = getattr(ev, "payload", None)
+    if payload is not None:
+        if isinstance(payload, dict):
+            payload_sig = tuple(sorted((k, payload[k]) for k in payload.keys()))
+        elif isinstance(payload, (list, tuple)):
+            payload_sig = tuple(payload)
+        else:
+            payload_sig = payload
     else:
-        k.append(("area_cols_len", 0))
+        payload_sig = None
 
+    return (
+        getattr(ev, "due_cust", None),
+        getattr(ev, "actor", None),
+        getattr(ev, "etype", None) if hasattr(ev, "etype") else getattr(ev, "kind", None),
+        getattr(ev, "src_action", None),
+        payload_sig,
+    )
+
+def stable_state_key(st: GameState) -> tuple:
+    """
+    Deterministic transposition key for *GameState*.
+
+    Must include every bit of state that can change:
+      - legal actions
+      - damage/knockback outcomes
+      - timers/locks/movement buffering
+      - pending actions and charge state
+      - board ownership/holes/obstacles (whatever your GameState stores)
+
+    This is written to be robust to minor schema differences by using getattr(),
+    but it still stays fast (no deep hashing; that happens only in stable_state_hash32()).
+    """
+
+    # --- Board / grid signature ---
+    # Prefer explicit stable signatures if your GameState exposes them.
+    # Fall back to common container fields.
+    grid_sig = None
+    if hasattr(st, "grid") and hasattr(st.grid, "stable_signature"):
+        grid_sig = st.grid.stable_signature()
+    elif hasattr(st, "grid") and hasattr(st.grid, "owners"):
+        grid_sig = (tuple(st.grid.owners), tuple(getattr(st.grid, "tiles", ())))
+    else:
+        # Common patterns in lightweight sims:
+        #   st.panels, st.panel_owner, st.holes, st.obstacles, etc.
+        grid_sig = (
+            tuple(getattr(st, "panel_owner", ())),
+            tuple(getattr(st, "panels", ())),
+            tuple(getattr(st, "holes", ())),
+            tuple(getattr(st, "obstacles", ())),
+        )
+
+    # --- Global timers / misc ---
+    area_sig = tuple(getattr(st, "area_col_timers", ())) if hasattr(st, "area_col_timers") else None
+    cust = int(getattr(st, "cust", 0))
+
+    # --- Actors ---
+    # Include things that affect both legality and near-future resolution.
+    actors = st.actors
+    p_sig = []
     for aid in ("P1", "P2"):
-        a = st.actors[aid]
-        k.extend(
-            [
-                aid,
-                int(a.hp),
-                int(a.idx),
-                int(a.form),
-                int(a.locked_until),
-                1 if a.charge.hold else 0,
-                int(a.charge.progress),
-                1 if a.charge.queued_release else 0,
-                ("hand", tuple(int(x) for x in a.chip_hand)),
-            ]
-        )
+        a = actors[aid]
 
-    k.append(int(len(st.scheduled)))
-    for ev in st.scheduled[:16]:
-        k.extend(
-            [
-                int(ev.due_cust),
-                ev.actor,
-                str(ev.spec.type),
-                str(ev.source_action),
-            ]
-        )
+        charge = getattr(a, "charge", None)
+        if charge is not None:
+            charge_sig = (
+                bool(getattr(charge, "hold", False)),
+                int(getattr(charge, "level", 0)),
+                bool(getattr(charge, "queued_release", False)),
+            )
+        else:
+            charge_sig = None
 
-    return tuple(k)
+        p_sig.append((
+            aid,
+            int(getattr(a, "hp", 0)),
+            int(getattr(a, "barrier_hp", 0)), 
+            int(getattr(a, "barrier_max_hp", 0)), 
+            int(getattr(a, "idx", -1)),
+            getattr(a, "form", None),
+
+            getattr(a, "pending_action", None),
+
+            getattr(a, "lock_until", None),
+            getattr(a, "move_dir", None),
+            getattr(a, "move_due_cust", None),
+            getattr(a, "entry_dir", None),
+            getattr(a, "entry_until", None),
+
+            charge_sig,
+
+            len(getattr(a, "chip_hand", ())) if hasattr(a, "chip_hand") else None,
+        ))
+    players_sig = tuple(p_sig)
+
+
+    # --- Scheduled events / queues (if your sim has any) ---
+    sched = getattr(st, "scheduled", None)
+    if sched is None:
+        sched_len = 0
+        sched_hash = "none"
+    else:
+        # Deterministic order-independent signature
+        sigs = sorted(_stable_event_sig(ev) for ev in sched)
+        sched_len = len(sigs)
+        sched_hash = _hash_tuple(sigs)
+
+    return (
+        cust,
+        grid_sig,
+        area_sig,
+        players_sig,
+        sched_len,
+        sched_hash,
+    )
+
 
 
 def _fnv1a32_init() -> int:
@@ -613,19 +690,49 @@ def _select_joint_puct(
     joint_actions: List[JointActionId],
     c_puct: float,
 ) -> JointActionId:
+    """
+    Adversarial simultaneous-move tree policy (selection):
+
+      For each P1 action a:
+        worst(a) = min_b  PUCT( (a,b) )
+      Choose a* = argmax_a worst(a)
+      Choose b* as the minimizer for that a* (P2 best response under this score)
+
+    This matches your readout (`recommend_root_maximin`) and prevents
+    "P2 cooperates" optimism during tree growth.
+    """
     ns = stats.node_stats(node_id)
     priors = _joint_priors_for_node(stats, node_id, st, joint_actions)
 
-    best_j = joint_actions[0]
-    best_s = -1e18
-    for j in joint_actions:
-        es = stats.edge_stats(node_id, j)
-        p = float(priors.get(j, 0.0))
-        s = _puct_score(ns.n, es, p, c_puct)
-        if s > best_s:
-            best_s = s
-            best_j = j
-    return best_j
+    p1_acts = _canonical_commit_actions(st, "P1")
+    p2_acts = _canonical_commit_actions(st, "P2")
+
+    best_a = p1_acts[0]
+    best_a_worst = -1e18
+    best_b_for_a = p2_acts[0]
+
+    # Optional: cache per-(a,b) lookup to avoid fmt/parse overhead in loops
+    # but keep it simple first (your action sets are small).
+    for a in p1_acts:
+        worst_s = 1e18
+        worst_b = p2_acts[0]
+
+        for b in p2_acts:
+            j = fmt_joint(a, b)
+            es = stats.edge_stats(node_id, j)
+            p = float(priors.get(j, 0.0))
+            s = _puct_score(ns.n, es, p, c_puct)
+            if s < worst_s:
+                worst_s = s
+                worst_b = b
+
+        if worst_s > best_a_worst:
+            best_a_worst = worst_s
+            best_a = a
+            best_b_for_a = worst_b
+
+    return fmt_joint(best_a, best_b_for_a)
+
 
 
 def _pick_unexpanded(
