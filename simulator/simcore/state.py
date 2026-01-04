@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Literal, Set
+from typing import Any, Dict, List, Optional, Tuple, Literal, Set, Iterable
 
 from .actions import (
     ACTIONS,
@@ -15,7 +15,16 @@ from .actions import (
 )
 from .board import Board
 from .chips import chip_name, chip_spec, chip_timeline, safe_chip_summary
-from .constants import COLS, DIR_DELTAS, N, OWNER_P1, OWNER_P2, ROWS, opposite_dir
+from .constants import (
+    COLS,
+    DIR_DELTAS,
+    N,
+    OWNER_P1,
+    OWNER_P2,
+    ROWS,
+    TILE_HOLE_PERM,
+    opposite_dir,
+)
 from .coords import idx_to_rc, mirror_dir, rc_to_idx
 from .forms import form_charge_spec, form_name, pattern_target_indices
 
@@ -25,6 +34,38 @@ ActorId = Literal["P1", "P2"]
 
 def other(actor: ActorId) -> ActorId:
     return "P2" if actor == "P1" else "P1"
+
+
+# -----------------------------------------------------------------------------
+# AreaGrab tuning (cust-time)
+# -----------------------------------------------------------------------------
+# 64 cust = 8s => 1 cust = 0.125s; 30s => 240 cust
+AREAGRAB_EXPIRE_CUST = 240
+AREAGRAB_BLOCK_DMG = 10
+AREAGRAB_BLOCK_HITSTUN = 1
+
+
+def _base_owner_for_col(col: int) -> int:
+    return OWNER_P1 if int(col) < 3 else OWNER_P2
+
+
+def _other_owner(owner: int) -> int:
+    return OWNER_P2 if int(owner) == OWNER_P1 else OWNER_P1
+
+
+def _col_indices(col: int) -> List[int]:
+    c = int(col)
+    return [rc_to_idx(r, c) for r in range(ROWS)]
+
+
+def _col_is_fully_owner(board_owners: List[int], board_tiles: List[int], col: int, owner: int) -> bool:
+    """Treat permanent holes as 'neutral' for full-owner checks (they can't be stolen)."""
+    for idx in _col_indices(col):
+        if int(board_tiles[idx]) == TILE_HOLE_PERM:
+            continue
+        if int(board_owners[idx]) != int(owner):
+            return False
+    return True
 
 
 @dataclass
@@ -67,8 +108,6 @@ class ChargeState:
         """
         new_hold = bool(new_hold)
 
-        # If we're already queued to release, keep state consistent:
-        # hold can be false, but we preserve full charge until it fires.
         if self.queued_release:
             self.hold = new_hold
             return
@@ -78,12 +117,10 @@ class ChargeState:
 
         self.hold = new_hold
 
-        # Release at full charge => must fire charge shot (possibly later).
         if was_hold and (not new_hold) and was_level == 2:
             self.queued_release = True
 
     def tick_unlocked(self) -> None:
-        # If a release is queued, preserve "full" until the shot fires.
         if self.queued_release:
             return
 
@@ -113,10 +150,10 @@ class ScheduledEvent:
 
 @dataclass
 class ShotLineVisual:
-    actor: ActorId              # canonical actor
-    kind: str                   # "buster"|"charge"|"cannon"|"airshot"|...
-    from_idx: int               # canonical
-    to_idx: int                 # canonical
+    actor: ActorId
+    kind: str
+    from_idx: int
+    to_idx: int
     expires_cust: int
 
     def alive(self, now: int) -> bool:
@@ -125,27 +162,31 @@ class ShotLineVisual:
 
 @dataclass
 class HotPanelVisual:
-    actor: ActorId          # canonical actor who caused it
-    kind: str               # "charge"|"buster"|...
-    idx: int                # canonical panel index
+    actor: ActorId
+    kind: str
+    idx: int
     expires_cust: int
 
     def alive(self, now: int) -> bool:
         return now < self.expires_cust
 
 
+@dataclass(frozen=True)
+class AreaColTimer:
+    col: int
+    stolen_owner: int         # OWNER_P1 or OWNER_P2 (non-base owner holding this col)
+    started_cust: int
+    expires_cust: int
+
+
 @dataclass
 class ActorState:
     hp: int
     idx: int  # canonical
-
-    # "player_game_emotion" equivalent for our simulator.
-    # For now we only use normal-cross ids: 0..10
     form: int = 0
 
     charge: ChargeState = field(default_factory=ChargeState)
 
-    # Chip hand stack: only top (index 0) is usable.
     chip_hand: List[int] = field(default_factory=list)
 
     pending_action: Optional[ActionId] = None
@@ -155,6 +196,10 @@ class ActorState:
     lean_dir_local: Optional[str] = None
     entry_dir_local: Optional[str] = None
     entry_until: int = 0
+
+    # Movement-buffer tracking (for AreaGrab blocking)
+    move_dir_local: Optional[str] = None
+    move_due_cust: int = 0  # when MOVE_APPLY is expected to resolve (t+1)
 
     def is_locked(self, cust: int) -> bool:
         return cust < self.locked_until
@@ -169,10 +214,10 @@ class GameState:
 
     scheduled: List[ScheduledEvent] = field(default_factory=list)
     shot_lines: List[ShotLineVisual] = field(default_factory=list)
-
-    # Panels that were "hot" (damaged/affected) during the last step or two.
-    # Canonical indices; serializer mirrors for P2 view.
     hot_panels: List[HotPanelVisual] = field(default_factory=list)
+
+    # AreaGrab column timers (canonical col index -> timer)
+    area_cols: Dict[int, AreaColTimer] = field(default_factory=dict)
 
     last_action_started: Optional[str] = None
     last_events: List[str] = field(default_factory=list)
@@ -180,12 +225,11 @@ class GameState:
     def __post_init__(self) -> None:
         if not self.actors:
             # Default match-up: Fire vs Slash
-            # TEST HANDS (fixed, fixed order):
-            #   P1: 1,4,1
-            #   P2: 4,1,4
+            # P1: 1,4,1
+            # P2: 163,1,163,4,4  (per your request)
             self.actors = {
-                "P1": ActorState(hp=1000, idx=rc_to_idx(1, 1), form=1, chip_hand=[1, 4, 1]),
-                "P2": ActorState(hp=1000, idx=rc_to_idx(1, 4), form=3, chip_hand=[4, 1, 4]),
+                "P1": ActorState(hp=1000, idx=rc_to_idx(1, 1), form=1, chip_hand=[1, 4, 163, 163]),
+                "P2": ActorState(hp=1000, idx=rc_to_idx(1, 4), form=3, chip_hand=[163, 1, 163, 4, 4]),
             }
         self._validate()
 
@@ -200,10 +244,23 @@ class GameState:
                 raise ValueError(f"{a}.locked_until invalid")
             if st.entry_until < 0:
                 raise ValueError(f"{a}.entry_until invalid")
+            if st.move_due_cust < 0:
+                raise ValueError(f"{a}.move_due_cust invalid")
             if not isinstance(st.form, int):
                 raise ValueError(f"{a}.form must be int")
             if not isinstance(st.chip_hand, list):
                 raise ValueError(f"{a}.chip_hand must be list")
+
+        # sanity-check timers
+        for col, rec in self.area_cols.items():
+            if int(col) < 0 or int(col) >= COLS:
+                raise ValueError("area_cols contains out-of-range col")
+            if int(rec.col) != int(col):
+                raise ValueError("area_cols key/record mismatch")
+            if int(rec.stolen_owner) not in (OWNER_P1, OWNER_P2):
+                raise ValueError("area_cols stolen_owner invalid")
+            if int(rec.expires_cust) < int(rec.started_cust):
+                raise ValueError("area_cols expires_cust < started_cust")
 
     # ----------------------------
     # Rules: transforms
@@ -212,12 +269,9 @@ class GameState:
         return dir_local if actor == "P1" else mirror_dir(dir_local)
 
     def _local_dir_for_actor_from_canon(self, actor: ActorId, canon_dir: str) -> str:
-        # inverse mapping of _canon_dir_for_actor for LEFT/RIGHT; UP/DOWN same
         return canon_dir if actor == "P1" else mirror_dir(canon_dir)
 
     def _forward_col_step(self, actor: ActorId) -> int:
-        # Forward in local view is always "to the right".
-        # Canonical: P1 shoots +1 col, P2 shoots -1 col.
         return +1 if actor == "P1" else -1
 
     def _owner_required(self, actor: ActorId) -> int:
@@ -227,50 +281,31 @@ class GameState:
     # Action legality (single-actor, for UI + MCTS)
     # ----------------------------
     def legal_action_ids(self, actor: ActorId) -> List[ActionId]:
-        """
-        Returns the set of actions that are *meaningfully legal* for this actor
-        at the current cust, given current charge + lock state.
-
-        Notes:
-        - Always includes NOOP.
-        - While locked: only NOOP + hold toggles (if they would change state).
-        - SHOOT is disallowed at full charge (level 2).
-        - RELEASE_CHARGE is allowed if full OR if a queued full-release exists.
-        - USE_CHIP is allowed iff top-of-stack exists and actor is not locked.
-        """
         st = self.actors[actor]
         out: Set[ActionId] = {ACT_NOOP}
 
-        # Hold toggles are cursor-legal even while locked. Only include if it changes.
         if not st.charge.hold:
             out.add(ACT_HOLD_ON)
         else:
             out.add(ACT_HOLD_OFF)
 
-        # If locked, nothing else is legal.
         if st.is_locked(self.cust):
             return sorted(out)
 
-        # If a full-release is queued and we're now unlocked, the sim will force
-        # RELEASE_CHARGE at step 0 of advance_cust. Treat most other actions as
-        # not meaningfully selectable this cust.
         if st.charge.queued_release:
             out.add("RELEASE_CHARGE")
             return sorted(out)
 
-        # Movement
         for a in ("MOVE_UP", "MOVE_DOWN", "MOVE_LEFT", "MOVE_RIGHT"):
             dir_local = a.split("_", 1)[1]
             if self.can_move(actor, dir_local):
                 out.add(a)
 
-        # Shooting
         if st.charge.level != 2:
             out.add("SHOOT")
         else:
             out.add("RELEASE_CHARGE")
 
-        # Chips (top-of-stack only)
         if len(st.chip_hand) > 0:
             out.add(ACT_USE_CHIP)
 
@@ -310,15 +345,14 @@ class GameState:
         r, c = idx_to_rc(st.idx)
         st.idx = rc_to_idx(r + dr, c + dc)
 
-        # Entry visual: lean back toward origin for 1 cust after arrival
+        # Clear move-buffer state once movement resolves
+        st.move_dir_local = None
+        st.move_due_cust = 0
+
         st.entry_dir_local = opposite_dir(dir_local)
         st.entry_until = now + 1
 
     def _apply_forced_push(self, target: ActorId, canon_dir: str, steps: int, now: int) -> bool:
-        """
-        Forced displacement (used by AirShot). Ignores panel ownership rules.
-        Returns True if moved.
-        """
         steps = int(steps)
         if steps == 0:
             return False
@@ -338,10 +372,8 @@ class GameState:
         if nidx == self.actors[other(target)].idx:
             return False
 
-        # Apply move
         st.idx = nidx
 
-        # Entry visual in *target-local* dirs
         local_dir = self._local_dir_for_actor_from_canon(target, canon_dir)
         st.entry_dir_local = opposite_dir(local_dir)
         st.entry_until = now + 1
@@ -358,10 +390,6 @@ class GameState:
         return st.idx, rc_to_idx(r, end_col)
 
     def _ray_forward_indices(self, actor: ActorId) -> List[int]:
-        """
-        Canonical panel indices forward from the actor (excluding the actor panel),
-        out to the far edge of the row.
-        """
         st = self.actors[actor]
         r, c = idx_to_rc(st.idx)
         step = self._forward_col_step(actor)
@@ -487,13 +515,11 @@ class GameState:
         cid = int(st.chip_hand[0])
         spec = chip_spec(cid)
 
-        # Consume immediately: stack behavior (top-of-stack only)
         st.chip_hand.pop(0)
 
         st.locked_until = t + int(spec.lock_cust)
         self.last_action_started = f"{actor}:{ACT_USE_CHIP}:{spec.name}[{cid}]"
 
-        # NEW: chips.py now stores authoring program; use compiled timeline accessor.
         for offset, ev in chip_timeline(cid):
             self.scheduled.append(
                 ScheduledEvent(
@@ -563,6 +589,271 @@ class GameState:
                 self._log(f"{actor}: {kind} push -> {tgt} moved {canon_dir} by {push_step}")
 
     # ----------------------------
+    # AreaGrab mechanics
+    # ----------------------------
+    def _movement_buffer_block_indices(self, actor: ActorId, now: int) -> Set[int]:
+        """
+        Indices considered "occupied" for purposes like AreaGrab blocking.
+
+        If actor is buffering a vertical move resolving at `now`, they effectively occupy
+        both source and destination panels (=> blocks 2 panels).
+        """
+        st = self.actors[actor]
+        out: Set[int] = {int(st.idx)}
+
+        if st.move_dir_local in ("UP", "DOWN") and int(st.move_due_cust) == int(now):
+            canon_dir = self._canon_dir_for_actor(actor, st.move_dir_local)
+            dr, dc = DIR_DELTAS[canon_dir]
+            r, c = idx_to_rc(st.idx)
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < ROWS and 0 <= nc < COLS:
+                out.add(int(rc_to_idx(nr, nc)))
+
+        return out
+
+    def _is_column_fully_owned(self, actor: ActorId, col: int) -> bool:
+        """
+        A column is 'fully owned' if every stealable panel in that column is owned by actor.
+        Permanent holes are not stealable and do not count against fullness.
+        """
+        my_owner = self._owner_required(actor)
+
+        for r in range(ROWS):
+            idx = rc_to_idx(r, col)
+
+            # Permanent holes are never stealable/ownable; ignore them for fullness.
+            if int(self.board.tiles[idx]) == TILE_HOLE_PERM:
+                continue
+
+            if int(self.board.owners[idx]) != int(my_owner):
+                return False
+
+        return True
+
+    def _next_areagrab_target_col(self, actor: ActorId) -> Optional[int]:
+        """
+        AreaGrab/PanelGrab targets the first column (from your side toward the opponent)
+        that is NOT fully owned by you (ignoring permanent holes).
+        """
+        if actor == "P1":
+            scan = range(0, COLS)           # left -> right
+        else:
+            scan = range(COLS - 1, -1, -1)  # right -> left
+
+        for c in scan:
+            if not self._is_column_fully_owned(actor, c):
+                return c
+
+        return None
+
+    def _col_has_any_stolen(self, col: int) -> bool:
+        base = _base_owner_for_col(col)
+        for idx in _col_indices(col):
+            if int(self.board.tiles[idx]) == TILE_HOLE_PERM:
+                continue
+            if int(self.board.owners[idx]) != int(base):
+                return True
+        return False
+
+    def _reconcile_area_cols(self, cols: Iterable[int], now: int, *, allow_start: bool = True) -> bool:
+        """
+        Keep `area_cols` consistent with current board ownership.
+
+        - If a column is fully base-owned => remove timer.
+        - If a column has any stolen panel (non-base) =>
+            ensure timer exists with stolen_owner = other(base_owner),
+            but DO NOT reset started/expires unless this is a brand new stolen column.
+        - Timer starts only when column transitions from fully base-owned -> stolen.
+          (We approximate transition by: 'no timer existed' AND 'col is stolen now'.)
+        """
+        changed = False
+        for col in cols:
+            col = int(col)
+            base = _base_owner_for_col(col)
+
+            fully_base = _col_is_fully_owner(self.board.owners, self.board.tiles, col, base)
+            if fully_base:
+                if col in self.area_cols:
+                    self.area_cols.pop(col, None)
+                    changed = True
+                continue
+
+            # Not fully base-owned. If any stolen panel exists, this column is "stolen".
+            if not self._col_has_any_stolen(col):
+                # Defensive: should be unreachable if not fully base-owned, but keep safe.
+                if col in self.area_cols:
+                    self.area_cols.pop(col, None)
+                    changed = True
+                continue
+
+            stolen_owner = _other_owner(base)
+
+            rec = self.area_cols.get(col)
+            if rec is None:
+                if allow_start:
+                    self.area_cols[col] = AreaColTimer(
+                        col=col,
+                        stolen_owner=int(stolen_owner),
+                        started_cust=int(now),
+                        expires_cust=int(now) + AREAGRAB_EXPIRE_CUST,
+                    )
+                    changed = True
+            else:
+                if int(rec.stolen_owner) != int(stolen_owner):
+                    # This shouldn't happen in current sim, but keep invariant sane
+                    # without resetting the timer window.
+                    self.area_cols[col] = AreaColTimer(
+                        col=col,
+                        stolen_owner=int(stolen_owner),
+                        started_cust=int(rec.started_cust),
+                        expires_cust=int(rec.expires_cust),
+                    )
+                    changed = True
+
+        return changed
+
+    def _area_outermost_for_owner(self, owner: int) -> Optional[int]:
+        cols = [int(c) for c, rec in self.area_cols.items() if int(rec.stolen_owner) == int(owner)]
+        if not cols:
+            return None
+        return max(cols) if int(owner) == OWNER_P1 else min(cols)
+
+    def _process_areagrab_expiry(self, now: int) -> None:
+        """
+        Revert expired columns, but only when they are the outermost stolen column for that owner.
+
+        Also supports same-cust cascade:
+          - If +2 is removed (expired or stolen back), and +1 already expired,
+            +1 reverts immediately in the same cust.
+        """
+        # First, ensure timers match the board (important after steal-backs).
+        self._reconcile_area_cols(range(COLS), now, allow_start=True)
+
+        blockers: Set[int] = set()
+        blockers |= self._movement_buffer_block_indices("P1", now)
+        blockers |= self._movement_buffer_block_indices("P2", now)
+
+        # Loop until no further changes can occur this cust.
+        while True:
+            any_change = False
+
+            for owner in (OWNER_P1, OWNER_P2):
+                while True:
+                    outer = self._area_outermost_for_owner(owner)
+                    if outer is None:
+                        break
+
+                    rec = self.area_cols.get(int(outer))
+                    if rec is None:
+                        break
+
+                    if int(now) < int(rec.expires_cust):
+                        break
+
+                    base_owner = _base_owner_for_col(outer)
+                    changed_this_col = False
+
+                    for idx in _col_indices(outer):
+                        if int(self.board.tiles[idx]) == TILE_HOLE_PERM:
+                            continue
+                        # Only revert panels that are currently held by the stolen_owner.
+                        if int(self.board.owners[idx]) != int(owner):
+                            continue
+                        if int(idx) in blockers:
+                            continue
+                        self.board.owners[idx] = int(base_owner)
+                        changed_this_col = True
+
+                    # Reconcile timer removal if column fully returned.
+                    rec_change = self._reconcile_area_cols([outer], now, allow_start=False)
+                    if changed_this_col or rec_change:
+                        any_change = True
+
+                    # If we could not change anything (fully blocked), stop trying this owner this cust.
+                    # Future custs may unblock it.
+                    if not (changed_this_col or rec_change):
+                        break
+
+                    # Otherwise, keep looping for this owner because:
+                    # - same col might still have more to revert next iteration (rare)
+                    # - or outermost might have changed (col removed), revealing an already-expired inner col
+
+            if not any_change:
+                break
+
+    def _apply_areagrab(self, actor: ActorId, now: int) -> None:
+        my_owner = self._owner_required(actor)
+        enemy = other(actor)
+        e = self.actors[enemy]
+
+        tgt_col = self._next_areagrab_target_col(actor)
+        if tgt_col is None:
+            self._log(f"{actor}: AREA_GRAB -> no target col available")
+            return
+
+        base_owner = _base_owner_for_col(tgt_col)
+
+        # IMPORTANT:
+        # Base ownership does NOT block stealing.
+        # If this column is base-owned by you but currently held by the opponent,
+        # AreaGrab should steal it back (restoring toward default).
+        was_fully_base = _col_is_fully_owner(self.board.owners, self.board.tiles, tgt_col, base_owner)
+
+        blocked = self._movement_buffer_block_indices(enemy, now)
+
+        changed = False
+        blocked_panels = 0
+
+        for idx in _col_indices(tgt_col):
+            if int(self.board.tiles[idx]) == TILE_HOLE_PERM:
+                continue
+
+            if int(idx) in blocked:
+                # Cannot steal; deal 10 dmg + flinch 1 cust
+                e.hp = max(0, int(e.hp) - AREAGRAB_BLOCK_DMG)
+                e.locked_until = max(int(e.locked_until), int(now) + AREAGRAB_BLOCK_HITSTUN)
+                blocked_panels += 1
+
+                self.hot_panels.append(
+                    HotPanelVisual(
+                        actor=actor,
+                        kind="areagrab_block",
+                        idx=int(idx),
+                        expires_cust=int(now) + 2,
+                    )
+                )
+                continue
+
+            if int(self.board.owners[idx]) != int(my_owner):
+                self.board.owners[idx] = int(my_owner)
+                changed = True
+
+        if blocked_panels > 0:
+            self._log(
+                f"{actor}: AREA_GRAB col={tgt_col} blocked_panels={blocked_panels} "
+                f"-> {enemy} took {blocked_panels * AREAGRAB_BLOCK_DMG}"
+            )
+
+        # Reconcile timers based on actual board state.
+        # Start timer only if this column was fully base-owned and is now stolen.
+        # (If it was already stolen/partial, do NOT reset.)
+        self._reconcile_area_cols(range(COLS), now, allow_start=True)
+
+        # If we just created a brand new stolen column, enforce the transition rule explicitly.
+        # (This keeps behavior stable even if some future effect mutated owners without a timer.)
+        if changed and was_fully_base and self._col_has_any_stolen(tgt_col):
+            # It might already exist due to reconcile; just ensure it exists.
+            self._reconcile_area_cols([tgt_col], now, allow_start=True)
+
+        if changed:
+            self._log(f"{actor}: AREA_GRAB applied to col={tgt_col} (base_owner={base_owner})")
+        else:
+            self._log(f"{actor}: AREA_GRAB col={tgt_col} stole 0 panels")
+
+        # Note: expiry processing happens after events in advance_cust(),
+        # and it will cascade inner expiries immediately if outer was removed.
+
+    # ----------------------------
     # Cursor edits (server-authoritative)
     # ----------------------------
     def cursor_set_pending(self, actor: ActorId, action: Optional[ActionId]) -> None:
@@ -602,6 +893,9 @@ class GameState:
 
         # 3) apply due events
         self._apply_due_events(self.cust)
+
+        # 3.5) area expiry processing (after events)
+        self._process_areagrab_expiry(self.cust)
 
         # 4) charge tick only while unlocked
         for actor in ("P1", "P2"):
@@ -648,6 +942,10 @@ class GameState:
                 self._log(f"{actor}: blocked cannot move {dir_local}")
                 return
 
+            # Track movement buffering for AreaGrab blocking (resolve at t+1)
+            st.move_dir_local = dir_local
+            st.move_due_cust = int(t) + 1
+
         spec = ACTIONS[action_id]
 
         st.locked_until = t + spec.lock_cust
@@ -677,6 +975,17 @@ class GameState:
         for ev in self.scheduled:
             (due if ev.due_cust == now else future).append(ev)
         self.scheduled = future
+
+        # Deterministic, rule-friendly ordering:
+        # movement resolves before AreaGrab this cust
+        def _prio(e: ScheduledEvent) -> int:
+            if e.spec.type == "MOVE_APPLY":
+                return 10
+            if e.spec.type == "AREA_GRAB":
+                return 20
+            return 50
+
+        due.sort(key=_prio)
 
         for ev in due:
             self._apply_event(ev.actor, ev.spec, now)
@@ -752,6 +1061,10 @@ class GameState:
                 f"{actor}: event CHIP_RAY {chip_name(chip_id)}[{chip_id}] kind={kind} "
                 f"dmg={dmg} push={push_step} hitstun={hitstun_cust}"
             )
+            return
+
+        if et == "AREA_GRAB":
+            self._apply_areagrab(actor, now)
             return
 
         self._log(f"{actor}: event unknown {et}")

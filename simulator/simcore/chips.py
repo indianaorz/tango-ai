@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Mapping, Sequence, Tuple, Union
 
 from .actions import EventSpec
 
@@ -21,7 +21,6 @@ class Wait:
 @dataclass(frozen=True, slots=True)
 class Emit:
     event: EventSpec
-
 
 
 ChipOp = Union[Wait, Emit]
@@ -168,6 +167,27 @@ _REGISTRY.register(
                     kind="airshot",
                     push_step=1,
                     hitstun_cust=2,
+                )
+            ),
+        ),
+    )
+)
+
+# AreaGrab (BN6): treat as time-freeze, but in this sim:
+# - no lock
+# - effect happens "next cust" after use
+_REGISTRY.register(
+    ChipSpec(
+        chip_id=163,
+        chip_key="areagrab",
+        name="AreaGrab",
+        lock_cust=1,  # must be >= last event offset; keep it minimal but valid
+        program=(
+            Wait(1),
+            Emit(
+                ev(
+                    "AREA_GRAB",
+                    chip_id=163,
                 )
             ),
         ),

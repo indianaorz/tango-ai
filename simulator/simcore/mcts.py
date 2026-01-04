@@ -143,6 +143,27 @@ def stable_state_key(st: GameState) -> Tuple[Any, ...]:
     k: List[Any] = []
     k.append(int(st.cust))
 
+    # IMPORTANT: board ownership/tiles are gameplay-relevant (AreaGrab etc.)
+    k.append(("owners", tuple(int(x) for x in st.board.owners)))
+    k.append(("tiles", tuple(int(x) for x in st.board.tiles)))
+
+    # AreaGrab timers are gameplay-relevant (expiry behavior)
+    if getattr(st, "area_cols", None):
+        # deterministic ordering by col
+        cols = sorted(st.area_cols.items(), key=lambda kv: int(kv[0]))
+        k.append(("area_cols_len", len(cols)))
+        for col, rec in cols:
+            k.extend(
+                [
+                    int(col),
+                    int(rec.stolen_owner),
+                    int(rec.started_cust),
+                    int(rec.expires_cust),
+                ]
+            )
+    else:
+        k.append(("area_cols_len", 0))
+
     for aid in ("P1", "P2"):
         a = st.actors[aid]
         k.extend(
@@ -155,7 +176,6 @@ def stable_state_key(st: GameState) -> Tuple[Any, ...]:
                 1 if a.charge.hold else 0,
                 int(a.charge.progress),
                 1 if a.charge.queued_release else 0,
-                # Chips are gameplay-relevant (stack order matters).
                 ("hand", tuple(int(x) for x in a.chip_hand)),
             ]
         )
@@ -484,6 +504,7 @@ def rollout_policy_joint(st: GameState) -> JointActionId:
     return fmt_joint(a1, a2)
 
 
+# (rest unchanged)
 # -----------------------------------------------------------------------------
 # Priors for PUCT (heuristic, policy-free)
 # -----------------------------------------------------------------------------
@@ -524,7 +545,6 @@ def _actor_action_prior(st: GameState, actor: ActorId, act: ActionId) -> float:
             w = 0.05
 
     elif act == ACT_USE_CHIP:
-        # Prefer chip usage if available, especially when it can connect (same row).
         has_chip = len(a.chip_hand) > 0
         w = 2.6 if (has_chip and _can_attack_now(st, actor)) else (1.2 if has_chip else 0.0)
 
@@ -553,7 +573,7 @@ def _actor_action_prior(st: GameState, actor: ActorId, act: ActionId) -> float:
 
 
 def _joint_priors_for_node(
-    stats: MCTSStatsStore,
+    stats: "MCTSStatsStore",
     node_id: str,
     st: GameState,
     joint_actions: List[JointActionId],
